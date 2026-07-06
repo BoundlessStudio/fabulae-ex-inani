@@ -11,9 +11,11 @@
         "generate": "npm run build && node dist/world-mapgen.cjs",
         "export:png": "npm run generate --",
         "start": "node dist/world-mapgen.cjs",
-        "stress:500": "npm run build && node --expose-gc --max-old-space-size=12288 dist/world-mapgen.cjs --size 128 --controls simulation-controls.example.json --civilizations 5 --years 500 --civ-seed 77 --progress-every 100 --profile-civ-phases --gc-after-compaction --civ-profile-dir output/stress-probes/probe-500-profiles --civ-profile-json output/stress-probes/probe-500-final.json --out output/stress-probes/probe-500-final.png",
+        "stress:500": "npm run build && node --expose-gc --max-old-space-size=12288 dist/world-mapgen.cjs --size 128 --controls simulation-controls.example.json --civilizations 5 --years 500 --civ-seed 77 --progress-every 100 --profile-civ-phases --gc-after-compaction --spill-event-text-dir output/stress-probes/probe-500-event-text --spill-event-text-after 10 --spill-event-text-every 5 --spill-event-text-cache-chunks 256 --civ-profile-dir output/stress-probes/probe-500-profiles --civ-profile-json output/stress-probes/probe-500-final.json --out output/stress-probes/probe-500-final.png",
+        "stress:1000": "npm run build && node --expose-gc --max-old-space-size=12288 dist/world-mapgen.cjs --size 128 --controls simulation-controls.example.json --civilizations 5 --years 1000 --civ-seed 77 --expansion-rate 0.25 --progress-every 100 --profile-civ-phases --gc-after-compaction --spill-event-text-dir output/stress-probes/probe-1000-event-text --spill-event-text-after 10 --spill-event-text-every 5 --spill-event-text-cache-chunks 256 --civ-profile-dir output/stress-probes/probe-1000-profiles --civ-profile-json output/stress-probes/probe-1000-final.json --out output/stress-probes/probe-1000-final.png",
         "serve:legends": "node scripts/serve-static.mjs",
         "verify:legends": "node scripts/verify-legends.mjs",
+        "compare:civ-profiles": "node scripts/compare-civ-profiles.mjs",
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {

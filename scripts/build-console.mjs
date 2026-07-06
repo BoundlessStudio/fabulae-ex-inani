@@ -17,6 +17,17 @@ await build({
     logLevel: "info",
 });
 
+await build({
+    entryPoints: ["civilization-worker.ts"],
+    outfile: "dist/civilization-worker.cjs",
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node20",
+    sourcemap: true,
+    logLevel: "info",
+});
+
 try {
     fs.chmodSync("dist/world-mapgen.cjs", 0o755);
 } catch {

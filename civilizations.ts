@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import path from "node:path";
+import {MessageChannel, receiveMessageOnPort, Worker, type MessagePort} from "node:worker_threads";
 import type {GeneratedWorldMap} from "./node-mapgen.ts";
 import {clamp} from "./geometry.ts";
 
@@ -20,6 +23,7 @@ export type CivilizationOptions = {
 };
 
 export type CivilizationRunOptions = {
+    workerCount?: number;
     snapshotEvery?: number;
     captureEvery?: number;
     onCapture?: (simulation: CivilizationSimulation) => void;
@@ -27,6 +31,10 @@ export type CivilizationRunOptions = {
     onProgress?: (progress: CivilizationProgress, simulation: CivilizationSimulation) => void;
     compactEventRefNamesAfter?: number;
     compactEventRefsEvery?: number;
+    spillEventTextAfter?: number;
+    spillEventTextEvery?: number;
+    legendEventTextSpillDir?: string;
+    legendEventTextCacheChunks?: number;
     compactNewLegendEventRefs?: boolean;
     gcAfterCompaction?: boolean;
     profilePhaseTimings?: boolean;
@@ -40,6 +48,7 @@ export type CivilizationPhaseTiming = {
 export type CivilizationProgress = {
     year: number;
     targetYears: number;
+    workerCount: number;
     elapsedMs: number;
     births: number;
     deaths: number;
@@ -51,6 +60,7 @@ export type CivilizationProgress = {
     events: number;
     legendEvents: number;
     compactedEventRefs: number;
+    spilledEventTexts: number;
     phaseTimings?: CivilizationPhaseTiming[];
 };
 
@@ -58,15 +68,37 @@ const defaultEventRefNameRetentionYears = 30;
 const defaultEventRefCompactionIntervalYears = 5;
 const defaultLegendRefCachePruneIntervalYears = 25;
 
+export type CivilizationStatus = "active" | "declining" | "fallen";
+export type CivilizationOriginKind = "founded" | "ash-born" | "breakaway" | "god-seated" | "magic-restored";
+export type CivilizationCollapseFailureKind = "lost-capital" | "lost-settlements" | "unrest" | "shortage" | "war-loss" | "failed-destiny" | "broken-goals" | "divine-disfavor";
+
 export type Civilization = {
     id: number;
     name: string;
     color: string;
+    status: CivilizationStatus;
+    originKind: CivilizationOriginKind;
+    foundedYear: number;
+    fallenYear?: number;
+    parentCivilizationId?: number;
+    restoredCivilizationId?: number;
     capitalSettlementId: number;
+    creationDomain: BeliefDomain;
+    creationSeatPreference: string;
+    creationSeatScore: number;
+    creationGodId?: number;
+    collapsePressure: number;
+    collapseStage: number;
+    collapseFailureKinds: CivilizationCollapseFailureKind[];
+    lastCollapseEventYear?: number;
     territoryCount: number;
     population: number;
     traditionIds: number[];
     beliefIds: number[];
+    godIds: number[];
+    commandmentIds: number[];
+    destinyIds: number[];
+    miracleIds: number[];
     mythIds: number[];
     doctrineIds: number[];
     magicRoleIds: number[];
@@ -87,6 +119,8 @@ export type Settlement = {
     controlledSinceYear: number;
     population: number;
     suitability: number;
+    foodPotential: number;
+    materialPotential: number;
     food: number;
     materials: number;
     prosperity: number;
@@ -99,8 +133,8 @@ export type Settlement = {
 };
 
 export type SettlementControlStatus = "active" | "ended";
-export type SettlementControlStartReason = "founded" | "captured";
-export type SettlementControlEndReason = "captured";
+export type SettlementControlStartReason = "founded" | "captured" | "seceded" | "restored";
+export type SettlementControlEndReason = "captured" | "seceded" | "restored";
 
 export type SettlementControl = {
     id: number;
@@ -481,6 +515,118 @@ export type Apprenticeship = {
 
 export type BeliefDomain = "ancestors" | "forge" | "harvest" | "rivers" | "mountains" | "stars" | "storms" | "trade";
 
+export type GodKind = "creator" | "keeper" | "judge" | "trickster" | "healer" | "war-god" | "messenger" | "destroyer";
+export type GodTemperament = "benevolent" | "stern" | "distant" | "capricious" | "vengeful" | "mysterious";
+export type GodControlSphere = "creation" | "religion" | "prophecy" | "destiny" | "miracles" | "commandments";
+
+export type God = {
+    id: number;
+    name: string;
+    kind: GodKind;
+    domain: BeliefDomain;
+    temperament: GodTemperament;
+    controlSpheres: GodControlSphere[];
+    civilizationId: number;
+    originSettlementId: number;
+    beliefId: number;
+    foundedYear: number;
+    symbol: string;
+    demand: string;
+    omen: string;
+    creationClaim: string;
+    religiousMandate: string;
+    prophecyMethod: string;
+    destinyPressure: string;
+    miracleBias: MiracleKind;
+    commandmentStyle: CommandmentKind;
+    influence: number;
+    favor: number;
+    mythIds: number[];
+    doctrineIds: number[];
+    magicRoleIds: number[];
+    prophecyIds: number[];
+    civilizationGoalIds: number[];
+    sacredSiteIds: number[];
+    commandmentIds: number[];
+    destinyIds: number[];
+    miracleIds: number[];
+    subjectRefs: LegendEntityRef[];
+    description: string;
+    eventIds: number[];
+};
+
+export type CommandmentKind = "law" | "taboo" | "pilgrimage" | "sacrifice" | "craft" | "hospitality" | "war" | "stewardship";
+
+export type Commandment = {
+    id: number;
+    name: string;
+    kind: CommandmentKind;
+    domain: BeliefDomain;
+    civilizationId: number;
+    settlementId: number;
+    beliefId: number;
+    godId?: number;
+    doctrineId?: number;
+    givenYear: number;
+    demand: string;
+    virtue: string;
+    taboo: string;
+    severity: number;
+    civilizationGoalIds: number[];
+    subjectRefs: LegendEntityRef[];
+    description: string;
+    eventIds: number[];
+};
+
+export type DestinyKind = "chosen-heir" | "doomed-city" | "sacred-journey" | "founding-line" | "war-sign" | "relic-claim";
+export type DestinyStatus = "active" | "fulfilled" | "broken";
+
+export type Destiny = {
+    id: number;
+    name: string;
+    kind: DestinyKind;
+    status: DestinyStatus;
+    year: number;
+    resolvedYear?: number;
+    civilizationId: number;
+    settlementId: number;
+    beliefId?: number;
+    godId?: number;
+    prophecyId?: number;
+    civilizationGoalId?: number;
+    targetSettlementId?: number;
+    targetArtifactId?: number;
+    targetAgentId?: number;
+    sourceEventId?: number;
+    resolvedEventId?: number;
+    pressure: number;
+    subjectRefs: LegendEntityRef[];
+    description: string;
+    eventIds: number[];
+};
+
+export type MiracleKind = "omen" | "healing" | "harvest" | "storm" | "victory" | "protection" | "revelation" | "curse";
+
+export type Miracle = {
+    id: number;
+    name: string;
+    kind: MiracleKind;
+    year: number;
+    civilizationId: number;
+    settlementId: number;
+    beliefId?: number;
+    godId?: number;
+    prophecyId?: number;
+    civilizationGoalId?: number;
+    sacredSiteId?: number;
+    targetAgentId?: number;
+    strength: number;
+    effect: string;
+    subjectRefs: LegendEntityRef[];
+    description: string;
+    eventIds: number[];
+};
+
 export type Belief = {
     id: number;
     name: string;
@@ -493,6 +639,11 @@ export type Belief = {
     adherenceIds: number[];
     organizationIds: number[];
     structureIds: number[];
+    godIds: number[];
+    patronGodId?: number;
+    commandmentIds: number[];
+    destinyIds: number[];
+    miracleIds: number[];
     mythIds: number[];
     doctrineIds: number[];
     magicRoleIds: number[];
@@ -512,6 +663,7 @@ export type Myth = {
     beliefId: number;
     originSettlementId: number;
     year: number;
+    godId?: number;
     centralAgentId?: number;
     subjectRefs: LegendEntityRef[];
     description: string;
@@ -528,6 +680,8 @@ export type Doctrine = {
     civilizationId: number;
     beliefId: number;
     mythId?: number;
+    godId?: number;
+    commandmentId?: number;
     originSettlementId: number;
     foundedYear: number;
     principle: string;
@@ -555,6 +709,7 @@ export type MagicRole = {
     beliefId?: number;
     organizationId?: number;
     mythId?: number;
+    godId?: number;
     prophecyIds: number[];
     civilizationGoalIds: number[];
     subjectRefs: LegendEntityRef[];
@@ -576,6 +731,8 @@ export type Prophecy = {
     settlementId: number;
     beliefId?: number;
     mythId?: number;
+    godId?: number;
+    destinyId?: number;
     speakerAgentId?: number;
     magicRoleId?: number;
     targetSettlementId?: number;
@@ -609,6 +766,9 @@ export type CivilizationGoal = {
     doctrineId?: number;
     magicRoleId?: number;
     prophecyId?: number;
+    godId?: number;
+    commandmentId?: number;
+    destinyId?: number;
     targetSettlementId?: number;
     targetArtifactId?: number;
     targetCivilizationId?: number;
@@ -639,6 +799,7 @@ export type SacredSite = {
     magicRoleId?: number;
     prophecyId?: number;
     civilizationGoalId?: number;
+    godId?: number;
     renown: number;
     subjectRefs: LegendEntityRef[];
     description: string;
@@ -672,6 +833,11 @@ export type MythsAndMagicRecord = {
     civilizationId: number;
     capitalSettlementId: number;
     beliefIds: number[];
+    godIds: number[];
+    commandmentIds: number[];
+    destinyIds: number[];
+    activeDestinyIds: number[];
+    miracleIds: number[];
     mythIds: number[];
     doctrineIds: number[];
     magicRoleIds: number[];
@@ -688,8 +854,8 @@ export type MythsAndMagicRecord = {
 };
 
 export type PersonAllegianceStatus = "active" | "ended";
-export type PersonAllegianceStartReason = "born" | "settled" | "captured";
-export type PersonAllegianceEndReason = "captured" | "died";
+export type PersonAllegianceStartReason = "born" | "settled" | "captured" | "seceded" | "restored";
+export type PersonAllegianceEndReason = "captured" | "seceded" | "restored" | "died";
 
 export type PersonAllegiance = {
     id: number;
@@ -824,6 +990,8 @@ export type BattleKind = "skirmish" | "siege";
 
 export type BattleOutcome = "attacker-victory" | "defender-victory";
 
+export type BattlefieldTerrain = "capital-approach" | "town-approach" | "fertile-fields" | "rough-ground" | "frontier-road";
+
 export type ConflictKind = "border-war" | "war-of-conquest";
 
 export type ConflictStatus = "active" | "dormant" | "resolved";
@@ -845,6 +1013,7 @@ export type Conflict = {
     casualtyAgentIds: number[];
     capturedSettlementIds: number[];
     capturedArtifactIds: number[];
+    spyOperationIds: number[];
     startedEventId?: number;
     endedEventId?: number;
     eventIds: number[];
@@ -857,15 +1026,26 @@ export type Battle = {
     year: number;
     conflictId?: number;
     settlementId: number;
+    battlefieldName: string;
+    battlefieldTriangle: number;
+    battlefieldX: number;
+    battlefieldY: number;
+    battlefieldTerrain: BattlefieldTerrain;
     attackerCivilizationId: number;
     defenderCivilizationId: number;
     attackerCommanderId?: number;
     defenderCommanderId?: number;
     attackerParticipantIds: number[];
     defenderParticipantIds: number[];
+    attackerUnitIds: number[];
+    defenderUnitIds: number[];
+    spyOperationIds: number[];
     battleParticipationIds: number[];
     casualtyAgentIds: number[];
     capturedArtifactIds: number[];
+    attackerPower: number;
+    defenderPower: number;
+    intelligenceAdvantage: number;
     outcome: BattleOutcome;
     eventIds: number[];
 };
@@ -892,6 +1072,111 @@ export type BattleParticipation = {
     injuryIds: number[];
     battleEventId?: number;
     casualtyEventId?: number;
+    subjectRefs: LegendEntityRef[];
+    description: string;
+    eventIds: number[];
+};
+
+export type MilitaryUnitKind = "garrison" | "militia" | "warband" | "scouts";
+export type MilitaryUnitStatus = "active" | "disbanded";
+export type WeaponClass = "spears" | "bows" | "blades" | "axes" | "siege-tools";
+export type ArmorClass = "none" | "hide" | "leather" | "mail" | "lamellar";
+export type EquipmentCacheKind = "weapon-cache" | "armor-cache" | "siege-kit";
+export type EquipmentCondition = "poor" | "serviceable" | "fine";
+export type SpyNetworkStatus = "active" | "exposed" | "dormant";
+export type SpyNetworkCover = "merchants" | "pilgrims" | "envoys" | "smugglers" | "scribes";
+export type SpyOperationKind = "scout-border" | "sabotage-supplies" | "bribe-gate" | "counterspy-sweep";
+export type SpyOperationOutcome = "success" | "partial" | "failed" | "exposed";
+
+export type MilitaryUnit = {
+    id: number;
+    name: string;
+    kind: MilitaryUnitKind;
+    status: MilitaryUnitStatus;
+    formedYear: number;
+    formedEventId?: number;
+    disbandedYear?: number;
+    disbandedEventId?: number;
+    civilizationId: number;
+    settlementId: number;
+    commanderAgentId?: number;
+    troopAgentIds: number[];
+    equipmentCacheIds: number[];
+    battleIds: number[];
+    spyOperationIds: number[];
+    strength: number;
+    training: number;
+    morale: number;
+    supply: number;
+    weaponClass: WeaponClass;
+    armorClass: ArmorClass;
+    weaponQuality: number;
+    armorQuality: number;
+    subjectRefs: LegendEntityRef[];
+    description: string;
+    eventIds: number[];
+};
+
+export type EquipmentCache = {
+    id: number;
+    name: string;
+    kind: EquipmentCacheKind;
+    year: number;
+    civilizationId: number;
+    settlementId: number;
+    unitId?: number;
+    weaponClass?: WeaponClass;
+    armorClass?: ArmorClass;
+    quality: number;
+    quantity: number;
+    condition: EquipmentCondition;
+    sourceEventId?: number;
+    subjectRefs: LegendEntityRef[];
+    description: string;
+    eventIds: number[];
+};
+
+export type SpyNetwork = {
+    id: number;
+    name: string;
+    status: SpyNetworkStatus;
+    cover: SpyNetworkCover;
+    formedYear: number;
+    formedEventId?: number;
+    exposedYear?: number;
+    exposedEventId?: number;
+    civilizationId: number;
+    settlementId: number;
+    targetCivilizationId?: number;
+    targetSettlementId?: number;
+    handlerAgentId?: number;
+    agentIds: number[];
+    operationIds: number[];
+    secrecy: number;
+    infiltration: number;
+    intelligence: number;
+    subjectRefs: LegendEntityRef[];
+    description: string;
+    eventIds: number[];
+};
+
+export type SpyOperation = {
+    id: number;
+    name: string;
+    kind: SpyOperationKind;
+    outcome: SpyOperationOutcome;
+    year: number;
+    networkId: number;
+    civilizationId: number;
+    targetCivilizationId: number;
+    targetSettlementId: number;
+    agentIds: number[];
+    risk: number;
+    success: number;
+    detected: boolean;
+    sourceEventId?: number;
+    battleId?: number;
+    conflictId?: number;
     subjectRefs: LegendEntityRef[];
     description: string;
     eventIds: number[];
@@ -1484,7 +1769,7 @@ export type YearEvent = {
 };
 
 export type LegendEntityRef = {
-    kind: "civilization" | "settlement" | "settlement-control" | "natural-feature" | "person" | "person-allegiance" | "preference" | "tradition" | "epithet" | "reputation-milestone" | "artifact" | "artifact-condition" | "chronicle" | "written-work" | "memory" | "thought" | "personality-shift" | "need-episode" | "opinion" | "social-claim" | "conversation" | "rumor" | "secret" | "scheme" | "feud" | "oath" | "ceremony" | "ceremony-participation" | "activity" | "teaching" | "project" | "project-participation" | "obligation" | "holding" | "belonging" | "possession-attachment" | "estate" | "residence" | "career" | "organization" | "membership" | "organization-rank" | "relationship" | "relationship-milestone" | "union" | "belief" | "belief-adherence" | "myth" | "doctrine" | "magic-role" | "prophecy" | "civilization-goal" | "sacred-site" | "office" | "office-term" | "law" | "case" | "testimony" | "conflict" | "battle" | "battle-participation" | "injury" | "illness" | "care-record" | "wound-legacy" | "memorial" | "burial" | "death-record" | "birth" | "age-milestone" | "appearance-feature" | "ambition" | "apprenticeship" | "skill" | "structure" | "journey" | "road" | "household" | "lineage" | "event";
+    kind: "civilization" | "settlement" | "settlement-control" | "natural-feature" | "person" | "person-allegiance" | "preference" | "tradition" | "epithet" | "reputation-milestone" | "artifact" | "artifact-condition" | "chronicle" | "written-work" | "memory" | "thought" | "personality-shift" | "need-episode" | "opinion" | "social-claim" | "conversation" | "rumor" | "secret" | "scheme" | "feud" | "oath" | "ceremony" | "ceremony-participation" | "activity" | "teaching" | "project" | "project-participation" | "obligation" | "holding" | "belonging" | "possession-attachment" | "estate" | "residence" | "career" | "organization" | "membership" | "organization-rank" | "relationship" | "relationship-milestone" | "union" | "belief" | "belief-adherence" | "god" | "commandment" | "destiny" | "miracle" | "myth" | "doctrine" | "magic-role" | "prophecy" | "civilization-goal" | "sacred-site" | "office" | "office-term" | "law" | "case" | "testimony" | "conflict" | "battle" | "battle-participation" | "military-unit" | "equipment-cache" | "spy-network" | "spy-operation" | "injury" | "illness" | "care-record" | "wound-legacy" | "memorial" | "burial" | "death-record" | "birth" | "age-milestone" | "appearance-feature" | "ambition" | "apprenticeship" | "skill" | "structure" | "journey" | "road" | "household" | "lineage" | "event";
     id: number;
     name?: string;
 };
@@ -2376,6 +2661,10 @@ export type EstateSettlement = {
 
 export type LegendEventType =
     | "civilization-founded"
+    | "civilization-crisis"
+    | "civilization-fallen"
+    | "civilization-risen"
+    | "civilization-restored"
     | "natural-feature-named"
     | "settlement-founded"
     | "conflict-started"
@@ -2407,6 +2696,12 @@ export type LegendEventType =
     | "belief-adopted"
     | "ritual-held"
     | "belief-scandal"
+    | "god-named"
+    | "commandment-given"
+    | "destiny-declared"
+    | "destiny-fulfilled"
+    | "destiny-broken"
+    | "miracle-witnessed"
     | "myth-founded"
     | "doctrine-established"
     | "magic-role-appointed"
@@ -2430,6 +2725,10 @@ export type LegendEventType =
     | "punishment"
     | "battle-fought"
     | "battle-casualty"
+    | "military-unit-formed"
+    | "equipment-cache-stocked"
+    | "spy-network-formed"
+    | "spy-operation"
     | "injury-sustained"
     | "injury-healed"
     | "wound-legacy-formed"
@@ -2559,6 +2858,10 @@ export type LegendEvent = {
     unionId?: number;
     beliefId?: number;
     beliefAdherenceId?: number;
+    godId?: number;
+    commandmentId?: number;
+    destinyId?: number;
+    miracleId?: number;
     mythId?: number;
     doctrineId?: number;
     magicRoleId?: number;
@@ -2573,6 +2876,10 @@ export type LegendEvent = {
     conflictId?: number;
     battleId?: number;
     battleParticipationId?: number;
+    militaryUnitId?: number;
+    equipmentCacheId?: number;
+    spyNetworkId?: number;
+    spyOperationId?: number;
     injuryId?: number;
     illnessId?: number;
     memorialId?: number;
@@ -2647,6 +2954,10 @@ export type LegendsExport = {
     beliefCount: number;
     beliefAdherenceCount: number;
     mythsAndMagicCount: number;
+    godCount: number;
+    commandmentCount: number;
+    destinyCount: number;
+    miracleCount: number;
     mythCount: number;
     doctrineCount: number;
     magicRoleCount: number;
@@ -2661,6 +2972,10 @@ export type LegendsExport = {
     conflictCount: number;
     battleCount: number;
     battleParticipationCount: number;
+    militaryUnitCount: number;
+    equipmentCacheCount: number;
+    spyNetworkCount: number;
+    spyOperationCount: number;
     injuryCount: number;
     illnessCount: number;
     careRecordCount: number;
@@ -2683,11 +2998,28 @@ export type LegendsExport = {
         id: number;
         name: string;
         color: string;
+        status: CivilizationStatus;
+        originKind: CivilizationOriginKind;
+        foundedYear: number;
+        fallenYear?: number;
+        parentCivilizationId?: number;
+        restoredCivilizationId?: number;
         capitalSettlementId: number;
+        creationDomain: BeliefDomain;
+        creationSeatPreference: string;
+        creationSeatScore: number;
+        creationGodId?: number;
+        collapsePressure: number;
+        collapseStage: number;
+        collapseFailureKinds: CivilizationCollapseFailureKind[];
         population: number;
         traditionIds: number[];
         beliefIds: number[];
         mythsMagicId: number;
+        godIds: number[];
+        commandmentIds: number[];
+        destinyIds: number[];
+        miracleIds: number[];
         mythIds: number[];
         doctrineIds: number[];
         magicRoleIds: number[];
@@ -3305,6 +3637,11 @@ export type LegendsExport = {
         adherenceIds: number[];
         organizationIds: number[];
         structureIds: number[];
+        godIds: number[];
+        patronGodId?: number;
+        commandmentIds: number[];
+        destinyIds: number[];
+        miracleIds: number[];
         mythIds: number[];
         doctrineIds: number[];
         magicRoleIds: number[];
@@ -3313,6 +3650,10 @@ export type LegendsExport = {
         eventIds: number[];
     }>;
     mythsAndMagic: MythsAndMagicRecord[];
+    gods: God[];
+    commandments: Commandment[];
+    destinies: Destiny[];
+    miracles: Miracle[];
     myths: Array<{
         id: number;
         name: string;
@@ -3322,6 +3663,7 @@ export type LegendsExport = {
         beliefId: number;
         originSettlementId: number;
         year: number;
+        godId?: number;
         centralAgentId?: number;
         subjectRefs: LegendEntityRef[];
         description: string;
@@ -3335,6 +3677,8 @@ export type LegendsExport = {
         civilizationId: number;
         beliefId: number;
         mythId?: number;
+        godId?: number;
+        commandmentId?: number;
         originSettlementId: number;
         foundedYear: number;
         principle: string;
@@ -3358,6 +3702,7 @@ export type LegendsExport = {
         beliefId?: number;
         organizationId?: number;
         mythId?: number;
+        godId?: number;
         prophecyIds: number[];
         civilizationGoalIds: number[];
         subjectRefs: LegendEntityRef[];
@@ -3375,6 +3720,8 @@ export type LegendsExport = {
         settlementId: number;
         beliefId?: number;
         mythId?: number;
+        godId?: number;
+        destinyId?: number;
         speakerAgentId?: number;
         magicRoleId?: number;
         targetSettlementId?: number;
@@ -3403,6 +3750,9 @@ export type LegendsExport = {
         doctrineId?: number;
         magicRoleId?: number;
         prophecyId?: number;
+        godId?: number;
+        commandmentId?: number;
+        destinyId?: number;
         targetSettlementId?: number;
         targetArtifactId?: number;
         targetCivilizationId?: number;
@@ -3429,6 +3779,7 @@ export type LegendsExport = {
         magicRoleId?: number;
         prophecyId?: number;
         civilizationGoalId?: number;
+        godId?: number;
         renown: number;
         subjectRefs: LegendEntityRef[];
         description: string;
@@ -3556,6 +3907,7 @@ export type LegendsExport = {
         casualtyAgentIds: number[];
         capturedSettlementIds: number[];
         capturedArtifactIds: number[];
+        spyOperationIds: number[];
         startedEventId?: number;
         endedEventId?: number;
         conflictChapters: ConflictChapter[];
@@ -3572,11 +3924,22 @@ export type LegendsExport = {
         defenderCivilizationId: number;
         attackerCommanderId?: number;
         defenderCommanderId?: number;
+        battlefieldName: string;
+        battlefieldTriangle: number;
+        battlefieldX: number;
+        battlefieldY: number;
+        battlefieldTerrain: BattlefieldTerrain;
         attackerParticipantIds: number[];
         defenderParticipantIds: number[];
+        attackerUnitIds: number[];
+        defenderUnitIds: number[];
+        spyOperationIds: number[];
         battleParticipationIds: number[];
         casualtyAgentIds: number[];
         capturedArtifactIds: number[];
+        attackerPower: number;
+        defenderPower: number;
+        intelligenceAdvantage: number;
         outcome: BattleOutcome;
         battleChapters: BattleChapter[];
         eventIds: number[];
@@ -3597,6 +3960,96 @@ export type LegendsExport = {
         injuryIds: number[];
         battleEventId?: number;
         casualtyEventId?: number;
+        subjectRefs: LegendEntityRef[];
+        description: string;
+        eventIds: number[];
+    }>;
+    militaryUnits: Array<{
+        id: number;
+        name: string;
+        kind: MilitaryUnitKind;
+        status: MilitaryUnitStatus;
+        formedYear: number;
+        formedEventId?: number;
+        disbandedYear?: number;
+        disbandedEventId?: number;
+        civilizationId: number;
+        settlementId: number;
+        commanderAgentId?: number;
+        troopAgentIds: number[];
+        equipmentCacheIds: number[];
+        battleIds: number[];
+        spyOperationIds: number[];
+        strength: number;
+        training: number;
+        morale: number;
+        supply: number;
+        weaponClass: WeaponClass;
+        armorClass: ArmorClass;
+        weaponQuality: number;
+        armorQuality: number;
+        subjectRefs: LegendEntityRef[];
+        description: string;
+        eventIds: number[];
+    }>;
+    equipmentCaches: Array<{
+        id: number;
+        name: string;
+        kind: EquipmentCacheKind;
+        year: number;
+        civilizationId: number;
+        settlementId: number;
+        unitId?: number;
+        weaponClass?: WeaponClass;
+        armorClass?: ArmorClass;
+        quality: number;
+        quantity: number;
+        condition: EquipmentCondition;
+        sourceEventId?: number;
+        subjectRefs: LegendEntityRef[];
+        description: string;
+        eventIds: number[];
+    }>;
+    spyNetworks: Array<{
+        id: number;
+        name: string;
+        status: SpyNetworkStatus;
+        cover: SpyNetworkCover;
+        formedYear: number;
+        formedEventId?: number;
+        exposedYear?: number;
+        exposedEventId?: number;
+        civilizationId: number;
+        settlementId: number;
+        targetCivilizationId?: number;
+        targetSettlementId?: number;
+        handlerAgentId?: number;
+        agentIds: number[];
+        operationIds: number[];
+        secrecy: number;
+        infiltration: number;
+        intelligence: number;
+        subjectRefs: LegendEntityRef[];
+        description: string;
+        eventIds: number[];
+    }>;
+    spyOperations: Array<{
+        id: number;
+        name: string;
+        kind: SpyOperationKind;
+        outcome: SpyOperationOutcome;
+        year: number;
+        networkId: number;
+        civilizationId: number;
+        targetCivilizationId: number;
+        targetSettlementId: number;
+        agentIds: number[];
+        risk: number;
+        success: number;
+        detected: boolean;
+        sourceEventId?: number;
+        battleId?: number;
+        conflictId?: number;
         subjectRefs: LegendEntityRef[];
         description: string;
         eventIds: number[];
@@ -4396,6 +4849,7 @@ export type CivilizationYearSnapshot = {
 export type CivilizationSimulation = {
     year: number;
     options: Required<CivilizationOptions>;
+    workerCount: number;
     civilizations: Civilization[];
     settlements: Settlement[];
     settlementControls: SettlementControl[];
@@ -4410,11 +4864,16 @@ export type CivilizationSimulation = {
     memberships: OrganizationMembership[];
     organizationRanks: OrganizationRank[];
     socialBonds: SocialBond[];
+    socialBondPairIndex: Map<string, number[]>;
     relationshipMilestones: RelationshipMilestone[];
     socialClaims: SocialClaim[];
     unions: UnionRecord[];
     beliefs: Belief[];
     beliefAdherences: BeliefAdherence[];
+    gods: God[];
+    commandments: Commandment[];
+    destinies: Destiny[];
+    miracles: Miracle[];
     myths: Myth[];
     doctrines: Doctrine[];
     magicRoles: MagicRole[];
@@ -4429,6 +4888,10 @@ export type CivilizationSimulation = {
     conflicts: Conflict[];
     battles: Battle[];
     battleParticipations: BattleParticipation[];
+    militaryUnits: MilitaryUnit[];
+    equipmentCaches: EquipmentCache[];
+    spyNetworks: SpyNetwork[];
+    spyOperations: SpyOperation[];
     injuries: Injury[];
     illnesses: IllnessCase[];
     woundLegacies: WoundLegacy[];
@@ -4482,6 +4945,8 @@ export type CivilizationSimulation = {
     legendRefCache: Map<string, LegendEntityRef>;
     lineageIndex: Map<string, number>;
     compactedLegendEventRefCursor: number;
+    spilledLegendEventTextCursor: number;
+    legendEventTextSpillStore?: LegendEventTextSpillStore;
     compactNewLegendEventRefs: boolean;
     suppressLegendEventMemories: boolean;
     profilePhaseTimings: boolean;
@@ -4542,6 +5007,10 @@ export type CivilizationSummary = {
     beliefCount: number;
     beliefAdherenceCount: number;
     mythsAndMagicCount: number;
+    godCount: number;
+    commandmentCount: number;
+    destinyCount: number;
+    miracleCount: number;
     mythCount: number;
     doctrineCount: number;
     magicRoleCount: number;
@@ -4556,6 +5025,10 @@ export type CivilizationSummary = {
     conflictCount: number;
     battleCount: number;
     battleParticipationCount: number;
+    militaryUnitCount: number;
+    equipmentCacheCount: number;
+    spyNetworkCount: number;
+    spyOperationCount: number;
     injuryCount: number;
     illnessCount: number;
     careRecordCount: number;
@@ -4578,11 +5051,28 @@ export type CivilizationSummary = {
         id: number;
         name: string;
         color: string;
+        status: CivilizationStatus;
+        originKind: CivilizationOriginKind;
+        foundedYear: number;
+        fallenYear?: number;
+        parentCivilizationId?: number;
+        restoredCivilizationId?: number;
         territoryCount: number;
         settlementCount: number;
         population: number;
+        creationDomain: BeliefDomain;
+        creationSeatPreference: string;
+        creationSeatScore: number;
+        creationGodId?: number;
+        collapsePressure: number;
+        collapseStage: number;
+        collapseFailureKinds: CivilizationCollapseFailureKind[];
         traditionCount: number;
         mythsAndMagicCount: number;
+        godCount: number;
+        commandmentCount: number;
+        destinyCount: number;
+        miracleCount: number;
         mythCount: number;
         doctrineCount: number;
         magicRoleCount: number;
@@ -5239,6 +5729,7 @@ export type CivilizationSummary = {
         casualtyCount: number;
         capturedSettlementCount: number;
         capturedArtifactCount: number;
+        spyOperationCount: number;
         startedEventId?: number;
         endedEventId?: number;
         eventCount: number;
@@ -5254,11 +5745,22 @@ export type CivilizationSummary = {
         defenderCivilizationId: number;
         attackerCommanderId?: number;
         defenderCommanderId?: number;
+        battlefieldName: string;
+        battlefieldTriangle: number;
+        battlefieldX: number;
+        battlefieldY: number;
+        battlefieldTerrain: BattlefieldTerrain;
         attackerParticipantCount: number;
         defenderParticipantCount: number;
+        attackerUnitCount: number;
+        defenderUnitCount: number;
+        spyOperationCount: number;
         battleParticipationCount: number;
         casualtyCount: number;
         capturedArtifactCount: number;
+        attackerPower: number;
+        defenderPower: number;
+        intelligenceAdvantage: number;
         outcome: BattleOutcome;
         eventCount: number;
     }>;
@@ -5278,6 +5780,92 @@ export type CivilizationSummary = {
         injuryCount: number;
         battleEventId?: number;
         casualtyEventId?: number;
+        subjectCount: number;
+        eventCount: number;
+    }>;
+    militaryUnits: Array<{
+        id: number;
+        name: string;
+        kind: MilitaryUnitKind;
+        status: MilitaryUnitStatus;
+        formedYear: number;
+        formedEventId?: number;
+        disbandedYear?: number;
+        disbandedEventId?: number;
+        civilizationId: number;
+        settlementId: number;
+        commanderAgentId?: number;
+        troopCount: number;
+        equipmentCacheCount: number;
+        battleCount: number;
+        spyOperationCount: number;
+        strength: number;
+        training: number;
+        morale: number;
+        supply: number;
+        weaponClass: WeaponClass;
+        armorClass: ArmorClass;
+        weaponQuality: number;
+        armorQuality: number;
+        subjectCount: number;
+        eventCount: number;
+    }>;
+    equipmentCaches: Array<{
+        id: number;
+        name: string;
+        kind: EquipmentCacheKind;
+        year: number;
+        civilizationId: number;
+        settlementId: number;
+        unitId?: number;
+        weaponClass?: WeaponClass;
+        armorClass?: ArmorClass;
+        quality: number;
+        quantity: number;
+        condition: EquipmentCondition;
+        sourceEventId?: number;
+        subjectCount: number;
+        eventCount: number;
+    }>;
+    spyNetworks: Array<{
+        id: number;
+        name: string;
+        status: SpyNetworkStatus;
+        cover: SpyNetworkCover;
+        formedYear: number;
+        formedEventId?: number;
+        exposedYear?: number;
+        exposedEventId?: number;
+        civilizationId: number;
+        settlementId: number;
+        targetCivilizationId?: number;
+        targetSettlementId?: number;
+        handlerAgentId?: number;
+        agentCount: number;
+        operationCount: number;
+        secrecy: number;
+        infiltration: number;
+        intelligence: number;
+        subjectCount: number;
+        eventCount: number;
+    }>;
+    spyOperations: Array<{
+        id: number;
+        name: string;
+        kind: SpyOperationKind;
+        outcome: SpyOperationOutcome;
+        year: number;
+        networkId: number;
+        civilizationId: number;
+        targetCivilizationId: number;
+        targetSettlementId: number;
+        agentCount: number;
+        risk: number;
+        success: number;
+        detected: boolean;
+        sourceEventId?: number;
+        battleId?: number;
+        conflictId?: number;
         subjectCount: number;
         eventCount: number;
     }>;
@@ -6066,6 +6654,443 @@ const DEFAULT_OPTIONS: Required<CivilizationOptions> = {
     roadMaturationYears: 140,
 };
 
+export function defaultCivilizationWorkerCount(civilizationCount: number): number {
+    const count = Math.max(0, Math.floor(civilizationCount));
+    return count;
+}
+
+type AgentSeedAgePlan = {
+    age: number;
+    index: number;
+};
+
+type InitialAgentDraft = {
+    id: number;
+    name: string;
+    profession: AgentProfession;
+    health: number;
+    morale: number;
+    stress: number;
+    resilience: number;
+    mentalState: AgentMentalState;
+    needStates: AgentNeedState[];
+    wealth: number;
+    skill: number;
+    traits: AgentTrait[];
+    values: AgentValue[];
+    specialties: AgentSpecialty[];
+    reputation: number;
+};
+
+type ProfessionCounts = Record<AgentProfession, number>;
+
+type AnnualAgentProfessionInput = {
+    agentId: number;
+    age: number;
+    profession: AgentProfession;
+    settlementId: number;
+    settlementType: "capital" | "town";
+    suitability: number;
+};
+
+type AnnualAgentProfessionDraft = {
+    agentId: number;
+    age: number;
+    profession: AgentProfession;
+};
+
+type SettlementAgentSeedPlanRequest = {
+    settlementId: number;
+    targetPopulation: number;
+    firstAgentId: number;
+    civilizationId: number;
+    type: "capital" | "town";
+    suitability: number;
+    prosperity: number;
+    unrest: number;
+};
+
+type SettlementAgentSeedPlan = {
+    settlementId: number;
+    adultPlans: AgentSeedAgePlan[];
+    childPlans: AgentSeedAgePlan[];
+    adultDrafts: InitialAgentDraft[];
+    childDrafts: InitialAgentDraft[];
+};
+
+type SettlementSiteWorkerSettlement = {
+    civilizationId: number;
+    x: number;
+    y: number;
+};
+
+type SettlementSiteSelectionCommonInput = {
+    year: number;
+    seed: number;
+    minSettlementDistance: number;
+    expansionSearchRadius: number;
+    settlementClaimRadius: number;
+    topCandidateLimit: number;
+    candidateTriangles: Int32Array;
+    candidateX: Float32Array;
+    candidateY: Float32Array;
+    suitability: Float32Array;
+    siteBonus: Float32Array;
+    territory: Int16Array;
+    settlements: SettlementSiteWorkerSettlement[];
+};
+
+type SettlementSiteSelectionWorkerResult = {
+    civilizationId: number;
+    candidates: number[];
+};
+
+type TerrainAnalysisWorkerInput = {
+    numTriangles: number;
+    numSolidTriangles: number;
+    numSides: number;
+    minFlow: number;
+    triangleNeighbors: Int32Array;
+    sideOpposites: Int32Array;
+    isBoundaryTriangle: Int8Array;
+    elevation: Float32Array;
+    moisture: Float32Array;
+    flowSides: Float32Array;
+};
+
+type TerrainAnalysisWorkerRange = {
+    start: number;
+    end: number;
+};
+
+type TerrainAnalysisWorkerResult = {
+    start: number;
+    suitability: Float32Array;
+    siteBonus: Float32Array;
+    candidateTriangles: number[];
+};
+
+type CivilizationTerrainAnalysis = {
+    suitability: Float32Array;
+    settlementCandidateTriangles: Int32Array;
+    settlementSiteBonus: Float32Array;
+};
+
+type InternalRoadWorkerSettlement = {
+    id: number;
+    civilizationId: number;
+    type: "capital" | "town";
+    triangle: number;
+    x: number;
+    y: number;
+    foundedYear: number;
+    controlledSinceYear: number;
+    population: number;
+};
+
+type InternalRoadWorkerInput = {
+    year: number;
+    seed: number;
+    roadMinSettlementAge: number;
+    roadMaturationYears: number;
+    numTriangles: number;
+    numSolidTriangles: number;
+    triangleNeighbors: Int32Array;
+    triangleX: Float32Array;
+    triangleY: Float32Array;
+    isBoundaryTriangle: Int8Array;
+    elevation: Float32Array;
+    suitability: Float32Array;
+    territory: Int16Array;
+    settlements: InternalRoadWorkerSettlement[];
+};
+
+type InternalRoadWorkerDraft = {
+    civilizationId: number;
+    fromSettlementId: number;
+    toSettlementId: number;
+    openedYear: number;
+    strength: number;
+    length: number;
+    cost: number;
+    triangles: number[];
+    points: RoadPoint[];
+};
+
+type InternalRoadWorkerResult = {
+    civilizationId: number;
+    roads: InternalRoadWorkerDraft[];
+};
+
+type TriangleTerritoryWorkerInput = {
+    numRegions: number;
+    numTriangles: number;
+    numSolidTriangles: number;
+    triangleRegions: Int32Array;
+    isBoundaryTriangle: Int8Array;
+    elevation: Float32Array;
+    territory: Int16Array;
+};
+
+type TriangleTerritoryWorkerRange = {
+    start: number;
+    end: number;
+};
+
+type TriangleTerritoryWorkerResult = {
+    start: number;
+    territory: Int16Array;
+};
+
+type SettlementEconomyWorkerSettlement = {
+    id: number;
+    civilizationId: number;
+    food: number;
+    materials: number;
+    prosperity: number;
+    unrest: number;
+    agentCount: number;
+    foodPotential: number;
+    materialPotential: number;
+    professions: ProfessionCounts;
+};
+
+type SettlementEconomyDraft = {
+    settlementId: number;
+    food: number;
+    materials: number;
+    prosperity: number;
+    unrest: number;
+    shortage: boolean;
+    materialShortage: boolean;
+    eventType?: "shortage" | "prosperity";
+    eventSeverity?: number;
+};
+
+type MigrationWorkerSettlement = {
+    id: number;
+    civilizationId: number;
+    prosperity: number;
+    food: number;
+    population: number;
+    unrest: number;
+};
+
+type MigrationWorkerAgent = {
+    id: number;
+    age: number;
+    morale: number;
+};
+
+type MigrationWorkerOrigin = {
+    settlement: MigrationWorkerSettlement;
+    agents: MigrationWorkerAgent[];
+};
+
+type MigrationDraft = {
+    settlementId: number;
+    destinationSettlementId?: number;
+    agentIds: number[];
+};
+
+type BirthCountWorkerSettlement = {
+    id: number;
+    type: "capital" | "town";
+    population: number;
+    suitability: number;
+    prosperity: number;
+    unrest: number;
+    adultCount: number;
+};
+
+type BirthCountDraft = {
+    settlementId: number;
+    count: number;
+};
+
+type BirthParentWorkerAgent = {
+    id: number;
+    civilizationId: number;
+    settlementId: number;
+    age: number;
+    spouseId?: number;
+    alive: boolean;
+    childCount: number;
+};
+
+type BirthParentWorkerSettlement = {
+    id: number;
+    civilizationId: number;
+    count: number;
+    agents: BirthParentWorkerAgent[];
+};
+
+type BirthParentDraft = {
+    settlementId: number;
+    parentIds: number[][];
+};
+
+type HouseholdPairWorkerAgent = {
+    id: number;
+    civilizationId: number;
+    settlementId: number;
+    age: number;
+    spouseId?: number;
+    alive: boolean;
+};
+
+type HouseholdPairWorkerSettlement = {
+    id: number;
+    civilizationId: number;
+    prosperity: number;
+    unrest: number;
+};
+
+type HouseholdPairWorkerInput = {
+    settlement: HouseholdPairWorkerSettlement;
+    agents: HouseholdPairWorkerAgent[];
+};
+
+type HouseholdPairDraft = {
+    settlementId: number;
+    pairs: Array<[number, number]>;
+};
+
+type CivilizationWorkerResponse = {
+    requestId: number;
+    annualAgentProfessionDrafts?: AnnualAgentProfessionDraft[];
+    settlementAgentSeedPlans?: SettlementAgentSeedPlan[];
+    settlementSiteResults?: SettlementSiteSelectionWorkerResult[];
+    terrainAnalysis?: TerrainAnalysisWorkerResult;
+    roadResults?: InternalRoadWorkerResult[];
+    triangleTerritory?: TriangleTerritoryWorkerResult;
+    settlementEconomyDrafts?: SettlementEconomyDraft[];
+    migrationDrafts?: MigrationDraft[];
+    birthCountDrafts?: BirthCountDraft[];
+    birthParentDrafts?: BirthParentDraft[];
+    householdPairDrafts?: HouseholdPairDraft[];
+    error?: string;
+};
+
+type AnnualAgentProfessionWorkerTask = {
+    type: "annual-agent-profession-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: {
+        seed: number;
+        agents: AnnualAgentProfessionInput[];
+    };
+};
+
+type SettlementAgentSeedPlanWorkerTask = {
+    type: "settlement-agent-seed-plan-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: {
+        seed: number;
+        requests: SettlementAgentSeedPlanRequest[];
+    };
+};
+
+type SettlementSiteSelectionWorkerTask = {
+    type: "settlement-site-selection-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: SettlementSiteSelectionCommonInput & {
+        civilizationIds: number[];
+    };
+};
+
+type TerrainAnalysisWorkerTask = {
+    type: "terrain-analysis-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: TerrainAnalysisWorkerInput & TerrainAnalysisWorkerRange;
+};
+
+type InternalRoadWorkerTask = {
+    type: "internal-road-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: InternalRoadWorkerInput & {
+        civilizationIds: number[];
+    };
+};
+
+type TriangleTerritoryWorkerTask = {
+    type: "triangle-territory-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: TriangleTerritoryWorkerInput & TriangleTerritoryWorkerRange;
+};
+
+type SettlementEconomyWorkerTask = {
+    type: "settlement-economy-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: {
+        seed: number;
+        year: number;
+        settlements: SettlementEconomyWorkerSettlement[];
+    };
+};
+
+type MigrationWorkerTask = {
+    type: "migration-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: {
+        settlements: MigrationWorkerSettlement[];
+        origins: MigrationWorkerOrigin[];
+    };
+};
+
+type BirthCountWorkerTask = {
+    type: "birth-count-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: {
+        seed: number;
+        year: number;
+        settlements: BirthCountWorkerSettlement[];
+    };
+};
+
+type BirthParentWorkerTask = {
+    type: "birth-parent-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: {
+        seed: number;
+        year: number;
+        settlements: BirthParentWorkerSettlement[];
+    };
+};
+
+type HouseholdPairWorkerTask = {
+    type: "household-pair-batch";
+    requestId: number;
+    signal: SharedArrayBuffer;
+    input: {
+        seed: number;
+        year: number;
+        settlements: HouseholdPairWorkerInput[];
+    };
+};
+
+type CivilizationWorkerShutdownTask = {
+    type: "shutdown";
+    requestId: number;
+    signal: SharedArrayBuffer;
+};
+
+type CivilizationWorkerTask = AnnualAgentProfessionWorkerTask | SettlementAgentSeedPlanWorkerTask | SettlementSiteSelectionWorkerTask | TerrainAnalysisWorkerTask | InternalRoadWorkerTask | TriangleTerritoryWorkerTask | SettlementEconomyWorkerTask | MigrationWorkerTask | BirthCountWorkerTask | BirthParentWorkerTask | HouseholdPairWorkerTask | CivilizationWorkerShutdownTask;
+
+type CivilizationWorkerHandle = {
+    worker: Worker;
+    port: MessagePort;
+};
+
 type TerritoryQueueItem = {
     region: number;
     owner: number;
@@ -6222,6 +7247,42 @@ const BELIEF_NOUNS: Record<BeliefDomain, string[]> = {
     storms: ["Storm Creed", "Thunder Rite", "Rain Oath", "Gale Path"],
     trade: ["Counting Creed", "Road Covenant", "Market Rite", "Scale Doctrine"],
 };
+const GOD_KINDS: GodKind[] = ["creator", "keeper", "judge", "trickster", "healer", "war-god", "messenger", "destroyer"];
+const GOD_TEMPERAMENTS: GodTemperament[] = ["benevolent", "stern", "distant", "capricious", "vengeful", "mysterious"];
+const GOD_CONTROL_SPHERES: GodControlSphere[] = ["creation", "religion", "prophecy", "destiny", "miracles", "commandments"];
+const GOD_NOUNS: Record<BeliefDomain, string[]> = {
+    ancestors: ["First Ancestor", "Keeper of Names", "Bone Mother", "Old Father"],
+    forge: ["Ember Lord", "Hammer Mother", "Ash Keeper", "Bellows Saint"],
+    harvest: ["Seed Mother", "Green Father", "Granary Keeper", "Root Lady"],
+    rivers: ["Current Lord", "Blue Mother", "Crossing Keeper", "Tide Father"],
+    mountains: ["Stone Father", "Peak Mother", "Deep Keeper", "Cairn Lord"],
+    stars: ["Night Mother", "Lantern Lord", "Sky Keeper", "Far Seer"],
+    storms: ["Thunder Lord", "Rain Mother", "Gale Keeper", "Lightning Child"],
+    trade: ["Scale Mother", "Road Father", "Market Keeper", "Coin Witness"],
+};
+const GOD_SYMBOLS: Record<BeliefDomain, string[]> = {
+    ancestors: ["a carved bone", "a kept name", "an old hearth", "a grave bead"],
+    forge: ["a coal mark", "a ringing hammer", "a red anvil", "a tempered blade"],
+    harvest: ["a split seed", "a sheaf of grain", "a green hand", "a full bowl"],
+    rivers: ["a blue knot", "a fish hook", "a wet stone", "a bridge token"],
+    mountains: ["a white peak", "a cairn stone", "a deep cave", "a black horn"],
+    stars: ["a silver lantern", "a night chart", "a falling star", "a moon bowl"],
+    storms: ["a broken cloud", "a thunder mark", "a rain drum", "a forked line"],
+    trade: ["a balanced scale", "a road coin", "a sealed ledger", "a market bell"],
+};
+const GOD_DEMANDS: Record<BeliefDomain, string[]> = {
+    ancestors: ["keep lineage debts visible", "feed the dead before councils meet", "name the forgotten in public rites"],
+    forge: ["finish every sworn work honestly", "mark flawed craft before it is traded", "keep the sacred fire witnessed"],
+    harvest: ["protect seed grain from vanity", "share stores during lean years", "return first fruits to the shrine"],
+    rivers: ["give shelter to travelers", "keep bridges and crossings open", "carry news along lawful roads"],
+    mountains: ["guard boundary stones", "ask leave before deep digging", "raise cairns for the lost"],
+    stars: ["record omens before obeying them", "teach signs to sworn students", "keep night watches from falsehood"],
+    storms: ["break corrupt oaths openly", "renew law after disaster", "honor warning winds"],
+    trade: ["weigh bargains in public", "protect guest merchants", "punish false ledgers"],
+};
+const COMMANDMENT_KINDS: CommandmentKind[] = ["law", "taboo", "pilgrimage", "sacrifice", "craft", "hospitality", "war", "stewardship"];
+const DESTINY_KINDS: DestinyKind[] = ["chosen-heir", "doomed-city", "sacred-journey", "founding-line", "war-sign", "relic-claim"];
+const MIRACLE_KINDS: MiracleKind[] = ["omen", "healing", "harvest", "storm", "victory", "protection", "revelation", "curse"];
 const MYTH_KINDS: MythKind[] = ["creation", "founding", "cataclysm", "heroic", "covenant", "omen"];
 const MYTH_NOUNS: Record<MythKind, string[]> = {
     creation: ["First Dawn", "First Fire", "First Stone", "First Breath"],
@@ -6476,7 +7537,7 @@ function defaultOptions(options: CivilizationOptions): Required<CivilizationOpti
     };
     return {
         ...merged,
-        expansionRate: Math.max(1, merged.expansionRate),
+        expansionRate: Math.max(0, merged.expansionRate),
         settlementInterval: Math.max(1, Math.floor(merged.settlementInterval)),
         minSettlementDistance: Math.max(1, merged.minSettlementDistance),
         minTerritoryPerSettlement: Math.max(1, Math.floor(merged.minTerritoryPerSettlement)),
@@ -6509,6 +7570,653 @@ function hashFloat(seed: number, a: number, b: number, c: number): number {
     h = Math.imul(h ^ c, 668265263);
     h ^= h >>> 16;
     return (h >>> 0) / 4294967296;
+}
+
+function buildInitialAgentDraft(
+    seed: number,
+    settlement: Pick<Settlement, "id" | "type" | "suitability" | "prosperity" | "unrest">,
+    id: number,
+    age: number,
+    profession?: AgentProfession,
+): InitialAgentDraft {
+    const assignedProfession = profession
+        ?? (age < 15 ? "child" : age >= 65 ? "elder" : chooseAdultProfession(seed, id, settlement, settlement.suitability));
+    const traits = initialAgentTraits(seed, id);
+    const values = initialAgentValues(seed, id, assignedProfession);
+    const morale = clamp(0.58 + settlement.suitability * 0.25 + hashFloat(seed, id, 307, 2) * 0.17, 0, 1);
+    const stress = clamp(
+        0.12
+        + (traits.includes("melancholy") ? 0.08 : 0)
+        + (traits.includes("restless") ? 0.04 : 0)
+        - (traits.includes("patient") ? 0.03 : 0)
+        - settlement.prosperity * 0.04
+        + settlement.unrest * 0.08,
+        0,
+        1,
+    );
+    const resilience = initialAgentResilience(traits, values, seed, id);
+    return {
+        id,
+        name: makeAgentName(seed, id),
+        profession: assignedProfession,
+        health: clamp(0.72 + hashFloat(seed, id, 307, 1) * 0.28, 0, 1),
+        morale,
+        stress,
+        resilience,
+        mentalState: mentalStateFor(stress, morale),
+        needStates: initialAgentNeeds(seed, id, assignedProfession, traits, values),
+        wealth: Math.round((6 + hashFloat(seed, id, 307, 3) * 16) * 100) / 100,
+        skill: clamp(0.2 + age / 90 + hashFloat(seed, id, 307, 4) * 0.25, 0, 1),
+        traits,
+        values,
+        specialties: initialAgentSpecialties(seed, id, assignedProfession),
+        reputation: Math.round(clamp(0.03 + (age >= 18 ? age / 120 : 0) + hashFloat(seed, id, 307, 5) * 0.08, 0, 1) * 1000) / 1000,
+    };
+}
+
+function buildSettlementAgentSeedPlan(seed: number, request: SettlementAgentSeedPlanRequest): SettlementAgentSeedPlan {
+    const adultPlans: AgentSeedAgePlan[] = [];
+    const childPlans: AgentSeedAgePlan[] = [];
+    for (let i = 0; i < request.targetPopulation; i++) {
+        const roll = hashFloat(seed, request.settlementId, i, 419);
+        let age: number;
+        if (roll < 0.24) age = Math.floor(hashFloat(seed, request.settlementId, i, 421) * 15);
+        else if (roll < 0.82) age = 15 + Math.floor(hashFloat(seed, request.settlementId, i, 422) * 35);
+        else age = 50 + Math.floor(hashFloat(seed, request.settlementId, i, 423) * 35);
+        if (age < 15) childPlans.push({age, index: i});
+        else adultPlans.push({age, index: i});
+    }
+
+    adultPlans.sort((a, b) => b.age - a.age || a.index - b.index);
+    childPlans.sort((a, b) => b.age - a.age || a.index - b.index);
+    const settlement = {
+        id: request.settlementId,
+        type: request.type,
+        suitability: request.suitability,
+        prosperity: request.prosperity,
+        unrest: request.unrest,
+    };
+    const adultDrafts = adultPlans.map((plan, index) => buildInitialAgentDraft(
+        seed,
+        settlement,
+        request.firstAgentId + index,
+        plan.age,
+    ));
+    const firstChildAgentId = request.firstAgentId + adultPlans.length;
+    const childDrafts = childPlans.map((plan, index) => buildInitialAgentDraft(
+        seed,
+        settlement,
+        firstChildAgentId + index,
+        plan.age,
+        "child",
+    ));
+    return {settlementId: request.settlementId, adultPlans, childPlans, adultDrafts, childDrafts};
+}
+
+function insertTopSettlementCandidate(top: Array<{triangle: number; score: number}>, candidate: {triangle: number; score: number}, limit: number) {
+    if (limit <= 0) return;
+    if (top.length < limit) {
+        top.push(candidate);
+    } else if (candidate.score <= top[top.length - 1].score) {
+        return;
+    } else {
+        top[top.length - 1] = candidate;
+    }
+    top.sort((a, b) => b.score - a.score || a.triangle - b.triangle);
+}
+
+function settlementSiteCandidatesFromInput(input: SettlementSiteSelectionCommonInput, civilizationId: number): number[] {
+    const settlements = input.settlements.filter(settlement => settlement.civilizationId === civilizationId);
+    if (settlements.length === 0) return [];
+
+    const minDistance2 = input.minSettlementDistance * input.minSettlementDistance;
+    const maxDistance2 = input.expansionSearchRadius * input.expansionSearchRadius;
+    const closeEnemyDistance2 = input.minSettlementDistance * input.minSettlementDistance * 2.25;
+    const claimDistance2 = input.settlementClaimRadius * input.settlementClaimRadius;
+    const idealDistance = input.settlementClaimRadius + input.minSettlementDistance * 0.85;
+    const top: Array<{triangle: number; score: number}> = [];
+
+    for (let i = 0; i < input.candidateTriangles.length; i++) {
+        const triangle = input.candidateTriangles[i];
+        const owner = input.territory[triangle] ?? -1;
+        if (owner >= 0 && owner !== civilizationId) continue;
+
+        const x = input.candidateX[i];
+        const y = input.candidateY[i];
+        let nearestSameDistance2 = Number.POSITIVE_INFINITY;
+        for (let settlement of settlements) {
+            const dx = settlement.x - x;
+            const dy = settlement.y - y;
+            nearestSameDistance2 = Math.min(nearestSameDistance2, dx*dx + dy*dy);
+        }
+        if (nearestSameDistance2 < minDistance2 || nearestSameDistance2 > maxDistance2) continue;
+
+        let enemyPressure = 0;
+        for (let settlement of input.settlements) {
+            if (settlement.civilizationId === civilizationId) continue;
+            const dx = settlement.x - x;
+            const dy = settlement.y - y;
+            const distance2 = dx*dx + dy*dy;
+            if (distance2 < closeEnemyDistance2) enemyPressure += 0.35;
+            else if (distance2 < claimDistance2) enemyPressure += 0.12;
+        }
+
+        const distance = Math.sqrt(nearestSameDistance2);
+        const distanceScore = 1 - clamp(Math.abs(distance - idealDistance) / Math.max(1, idealDistance), 0, 1);
+        const frontierBonus = owner < 0 ? 0.18 : 0.04;
+        const jitter = hashFloat(input.seed, civilizationId, input.year, triangle) * 0.04;
+        const score = input.suitability[triangle] * 1.25 + input.siteBonus[triangle] + distanceScore * 0.26 + frontierBonus - enemyPressure + jitter;
+        insertTopSettlementCandidate(top, {triangle, score}, input.topCandidateLimit);
+    }
+
+    return top.map(candidate => candidate.triangle);
+}
+
+function civilizationWorkerScriptPath(): string {
+    return path.join(__dirname, "civilization-worker.cjs");
+}
+
+function waitForWorkerSignal(signal: SharedArrayBuffer) {
+    const view = new Int32Array(signal);
+    while (Atomics.load(view, 0) === 0) {
+        Atomics.wait(view, 0, 0);
+    }
+}
+
+function sharedInt8Array(length: number): Int8Array {
+    return new Int8Array(new SharedArrayBuffer(length * Int8Array.BYTES_PER_ELEMENT));
+}
+
+function sharedInt16Array(length: number): Int16Array {
+    return new Int16Array(new SharedArrayBuffer(length * Int16Array.BYTES_PER_ELEMENT));
+}
+
+function sharedInt32Array(length: number): Int32Array {
+    return new Int32Array(new SharedArrayBuffer(length * Int32Array.BYTES_PER_ELEMENT));
+}
+
+function sharedFloat32Array(length: number): Float32Array {
+    return new Float32Array(new SharedArrayBuffer(length * Float32Array.BYTES_PER_ELEMENT));
+}
+
+class CivilizationWorkerPool {
+    private readonly handles: CivilizationWorkerHandle[];
+    private nextRequestId = 1;
+
+    constructor(workerCount: number) {
+        this.handles = Array.from({length: Math.max(1, workerCount)}, () => {
+            const channel = new MessageChannel();
+            const worker = new Worker(civilizationWorkerScriptPath(), {
+                workerData: {port: channel.port1},
+                transferList: [channel.port1],
+            });
+            return {worker, port: channel.port2};
+        });
+    }
+
+    private runCivilizationChunks(
+        civilizationIds: number[],
+        createTask: (requestId: number, signal: SharedArrayBuffer, civilizationIdsForWorker: number[]) => CivilizationWorkerTask,
+    ): CivilizationWorkerResponse[] {
+        if (civilizationIds.length === 0) return [];
+        const activeWorkerCount = Math.min(this.handles.length, civilizationIds.length);
+        const chunks = Array.from({length: activeWorkerCount}, () => [] as number[]);
+        civilizationIds.forEach((civilizationId, index) => chunks[index % activeWorkerCount].push(civilizationId));
+
+        const jobs = chunks.map((civilizationIdsForWorker, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task = createTask(requestId, signal, civilizationIdsForWorker);
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        const responses: CivilizationWorkerResponse[] = [];
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            responses.push(response);
+        }
+        return responses;
+    }
+
+    computeAnnualAgentProfessionDrafts(seed: number, agents: AnnualAgentProfessionInput[]): Map<number, AnnualAgentProfessionDraft> {
+        if (agents.length === 0) return new Map();
+        const activeWorkerCount = Math.min(this.handles.length, agents.length);
+        const chunks = Array.from({length: activeWorkerCount}, () => [] as AnnualAgentProfessionInput[]);
+        agents.forEach((agent, index) => chunks[index % activeWorkerCount].push(agent));
+
+        const jobs = chunks.map((agentsForWorker, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task: CivilizationWorkerTask = {
+                type: "annual-agent-profession-batch",
+                requestId,
+                signal,
+                input: {
+                    seed,
+                    agents: agentsForWorker,
+                },
+            };
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        const drafts = new Map<number, AnnualAgentProfessionDraft>();
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            for (let draft of response.annualAgentProfessionDrafts ?? []) {
+                drafts.set(draft.agentId, draft);
+            }
+        }
+        return drafts;
+    }
+
+    buildSettlementAgentSeedPlans(seed: number, requests: SettlementAgentSeedPlanRequest[]): Map<number, SettlementAgentSeedPlan> {
+        if (requests.length === 0) return new Map();
+        const activeWorkerCount = Math.min(this.handles.length, requests.length);
+        const chunks = Array.from({length: activeWorkerCount}, () => [] as SettlementAgentSeedPlanRequest[]);
+        requests.forEach((request, index) => chunks[index % activeWorkerCount].push(request));
+
+        const jobs = chunks.map((requestsForWorker, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task: CivilizationWorkerTask = {
+                type: "settlement-agent-seed-plan-batch",
+                requestId,
+                signal,
+                input: {
+                    seed,
+                    requests: requestsForWorker,
+                },
+            };
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        const plans = new Map<number, SettlementAgentSeedPlan>();
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            for (let plan of response.settlementAgentSeedPlans ?? []) {
+                plans.set(plan.settlementId, plan);
+            }
+        }
+        return plans;
+    }
+
+    selectSettlementSites(input: SettlementSiteSelectionCommonInput, civilizationIds: number[]): Map<number, number[]> {
+        const responses = this.runCivilizationChunks(civilizationIds, (requestId, signal, civilizationIdsForWorker) => ({
+            type: "settlement-site-selection-batch",
+            requestId,
+            signal,
+            input: {
+                ...input,
+                civilizationIds: civilizationIdsForWorker,
+            },
+        }));
+
+        const selected = new Map<number, number[]>();
+        for (let response of responses) {
+            for (let result of response.settlementSiteResults ?? []) {
+                selected.set(result.civilizationId, result.candidates);
+            }
+        }
+        return selected;
+    }
+
+    computeTerrainAnalysis(input: TerrainAnalysisWorkerInput): CivilizationTerrainAnalysis {
+        const suitability = sharedFloat32Array(input.numTriangles);
+        const settlementSiteBonus = sharedFloat32Array(input.numTriangles);
+        if (input.numSolidTriangles <= 0) {
+            return {
+                suitability,
+                settlementCandidateTriangles: sharedInt32Array(0),
+                settlementSiteBonus,
+            };
+        }
+
+        const activeWorkerCount = Math.min(this.handles.length, input.numSolidTriangles);
+        const chunkSize = Math.ceil(input.numSolidTriangles / activeWorkerCount);
+        const ranges: TerrainAnalysisWorkerRange[] = [];
+        for (let start = 0; start < input.numSolidTriangles; start += chunkSize) {
+            ranges.push({start, end: Math.min(input.numSolidTriangles, start + chunkSize)});
+        }
+
+        const jobs = ranges.map((range, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task: CivilizationWorkerTask = {
+                type: "terrain-analysis-batch",
+                requestId,
+                signal,
+                input: {
+                    ...input,
+                    ...range,
+                },
+            };
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        const candidateTriangles: number[] = [];
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            if (!response.terrainAnalysis) throw new Error(`Civilization worker ${job.requestId} did not return terrain analysis`);
+            suitability.set(response.terrainAnalysis.suitability, response.terrainAnalysis.start);
+            settlementSiteBonus.set(response.terrainAnalysis.siteBonus, response.terrainAnalysis.start);
+            candidateTriangles.push(...response.terrainAnalysis.candidateTriangles);
+        }
+
+        const settlementCandidateTriangles = sharedInt32Array(candidateTriangles.length);
+        settlementCandidateTriangles.set(candidateTriangles);
+        return {suitability, settlementCandidateTriangles, settlementSiteBonus};
+    }
+
+    computeInternalRoads(input: InternalRoadWorkerInput, civilizationIds: number[]): InternalRoadWorkerDraft[] {
+        const responses = this.runCivilizationChunks(civilizationIds, (requestId, signal, civilizationIdsForWorker) => ({
+            type: "internal-road-batch",
+            requestId,
+            signal,
+            input: {
+                ...input,
+                civilizationIds: civilizationIdsForWorker,
+            },
+        }));
+
+        const roadsByCivilization = new Map<number, InternalRoadWorkerDraft[]>();
+        for (let response of responses) {
+            for (let result of response.roadResults ?? []) {
+                roadsByCivilization.set(result.civilizationId, result.roads);
+            }
+        }
+        return civilizationIds.flatMap(civilizationId => roadsByCivilization.get(civilizationId) ?? []);
+    }
+
+    computeTriangleTerritory(input: TriangleTerritoryWorkerInput): Int16Array {
+        const territory = new Int16Array(input.numTriangles);
+        territory.fill(-1);
+        if (input.numSolidTriangles <= 0) return territory;
+
+        const activeWorkerCount = Math.min(this.handles.length, input.numSolidTriangles);
+        const chunkSize = Math.ceil(input.numSolidTriangles / activeWorkerCount);
+        const ranges: TriangleTerritoryWorkerRange[] = [];
+        for (let start = 0; start < input.numSolidTriangles; start += chunkSize) {
+            ranges.push({start, end: Math.min(input.numSolidTriangles, start + chunkSize)});
+        }
+
+        const jobs = ranges.map((range, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task: CivilizationWorkerTask = {
+                type: "triangle-territory-batch",
+                requestId,
+                signal,
+                input: {
+                    ...input,
+                    ...range,
+                },
+            };
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            if (!response.triangleTerritory) throw new Error(`Civilization worker ${job.requestId} did not return triangle territory`);
+            territory.set(response.triangleTerritory.territory, response.triangleTerritory.start);
+        }
+
+        return territory;
+    }
+
+    computeSettlementEconomyDrafts(seed: number, year: number, settlements: SettlementEconomyWorkerSettlement[]): Map<number, SettlementEconomyDraft> {
+        if (settlements.length === 0) return new Map();
+        const activeWorkerCount = Math.min(this.handles.length, settlements.length);
+        const chunks = Array.from({length: activeWorkerCount}, () => [] as SettlementEconomyWorkerSettlement[]);
+        settlements.forEach((settlement, index) => chunks[index % activeWorkerCount].push(settlement));
+
+        const jobs = chunks.map((settlementsForWorker, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task: CivilizationWorkerTask = {
+                type: "settlement-economy-batch",
+                requestId,
+                signal,
+                input: {
+                    seed,
+                    year,
+                    settlements: settlementsForWorker,
+                },
+            };
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        const drafts = new Map<number, SettlementEconomyDraft>();
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            for (let draft of response.settlementEconomyDrafts ?? []) {
+                drafts.set(draft.settlementId, draft);
+            }
+        }
+        return drafts;
+    }
+
+    computeMigrationDrafts(settlements: MigrationWorkerSettlement[], origins: MigrationWorkerOrigin[]): Map<number, MigrationDraft> {
+        if (origins.length === 0) return new Map();
+        const activeWorkerCount = Math.min(this.handles.length, origins.length);
+        const chunks = Array.from({length: activeWorkerCount}, () => [] as MigrationWorkerOrigin[]);
+        origins.forEach((origin, index) => chunks[index % activeWorkerCount].push(origin));
+
+        const jobs = chunks.map((originsForWorker, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task: CivilizationWorkerTask = {
+                type: "migration-batch",
+                requestId,
+                signal,
+                input: {
+                    settlements,
+                    origins: originsForWorker,
+                },
+            };
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        const drafts = new Map<number, MigrationDraft>();
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            for (let draft of response.migrationDrafts ?? []) {
+                drafts.set(draft.settlementId, draft);
+            }
+        }
+        return drafts;
+    }
+
+    computeBirthCountDrafts(seed: number, year: number, settlements: BirthCountWorkerSettlement[]): Map<number, BirthCountDraft> {
+        if (settlements.length === 0) return new Map();
+        const activeWorkerCount = Math.min(this.handles.length, settlements.length);
+        const chunks = Array.from({length: activeWorkerCount}, () => [] as BirthCountWorkerSettlement[]);
+        settlements.forEach((settlement, index) => chunks[index % activeWorkerCount].push(settlement));
+
+        const jobs = chunks.map((settlementsForWorker, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task: CivilizationWorkerTask = {
+                type: "birth-count-batch",
+                requestId,
+                signal,
+                input: {
+                    seed,
+                    year,
+                    settlements: settlementsForWorker,
+                },
+            };
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        const drafts = new Map<number, BirthCountDraft>();
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            for (let draft of response.birthCountDrafts ?? []) {
+                drafts.set(draft.settlementId, draft);
+            }
+        }
+        return drafts;
+    }
+
+    computeBirthParentDrafts(seed: number, year: number, settlements: BirthParentWorkerSettlement[]): Map<number, BirthParentDraft> {
+        if (settlements.length === 0) return new Map();
+        const activeWorkerCount = Math.min(this.handles.length, settlements.length);
+        const chunks = Array.from({length: activeWorkerCount}, () => [] as BirthParentWorkerSettlement[]);
+        settlements.forEach((settlement, index) => chunks[index % activeWorkerCount].push(settlement));
+
+        const jobs = chunks.map((settlementsForWorker, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task: CivilizationWorkerTask = {
+                type: "birth-parent-batch",
+                requestId,
+                signal,
+                input: {
+                    seed,
+                    year,
+                    settlements: settlementsForWorker,
+                },
+            };
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        const drafts = new Map<number, BirthParentDraft>();
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            for (let draft of response.birthParentDrafts ?? []) {
+                drafts.set(draft.settlementId, draft);
+            }
+        }
+        return drafts;
+    }
+
+    computeHouseholdPairDrafts(seed: number, year: number, settlements: HouseholdPairWorkerInput[]): Map<number, HouseholdPairDraft> {
+        if (settlements.length === 0) return new Map();
+        const activeWorkerCount = Math.min(this.handles.length, settlements.length);
+        const chunks = Array.from({length: activeWorkerCount}, () => [] as HouseholdPairWorkerInput[]);
+        settlements.forEach((settlement, index) => chunks[index % activeWorkerCount].push(settlement));
+
+        const jobs = chunks.map((settlementsForWorker, index) => {
+            const handle = this.handles[index];
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            const task: CivilizationWorkerTask = {
+                type: "household-pair-batch",
+                requestId,
+                signal,
+                input: {
+                    seed,
+                    year,
+                    settlements: settlementsForWorker,
+                },
+            };
+            handle.port.postMessage(task);
+            return {handle, signal, requestId};
+        });
+
+        const drafts = new Map<number, HouseholdPairDraft>();
+        for (let job of jobs) {
+            waitForWorkerSignal(job.signal);
+            const response = receiveMessageOnPort(job.handle.port)?.message as CivilizationWorkerResponse | undefined;
+            if (!response) throw new Error(`Civilization worker ${job.requestId} did not return a response`);
+            if (response.requestId !== job.requestId) {
+                throw new Error(`Civilization worker returned response ${response.requestId} for request ${job.requestId}`);
+            }
+            if (response.error) throw new Error(`Civilization worker failed: ${response.error}`);
+            for (let draft of response.householdPairDrafts ?? []) {
+                drafts.set(draft.settlementId, draft);
+            }
+        }
+        return drafts;
+    }
+
+    shutdown() {
+        for (let handle of this.handles) {
+            const signal = new SharedArrayBuffer(4);
+            const requestId = this.nextRequestId++;
+            try {
+                const task: CivilizationWorkerTask = {type: "shutdown", requestId, signal};
+                handle.port.postMessage(task);
+                waitForWorkerSignal(signal);
+            } catch {
+                void handle.worker.terminate();
+            } finally {
+                handle.port.close();
+            }
+        }
+    }
 }
 
 function makeName(seed: number, index: number, kind: "civ" | "settlement"): string {
@@ -6918,6 +8626,23 @@ function beliefDomainLabel(domain: BeliefDomain): string {
     return "trade and exchange";
 }
 
+function godKindLabel(kind: GodKind): string {
+    if (kind === "war-god") return "war god";
+    return kind;
+}
+
+function commandmentKindLabel(kind: CommandmentKind): string {
+    return kind;
+}
+
+function destinyKindLabel(kind: DestinyKind): string {
+    return kind.replace(/-/g, " ");
+}
+
+function miracleKindLabel(kind: MiracleKind): string {
+    return kind;
+}
+
 function mythKindLabel(kind: MythKind): string {
     if (kind === "creation") return "creation myth";
     if (kind === "founding") return "founding myth";
@@ -7057,6 +8782,132 @@ function sacredSiteKindForBelief(domain: BeliefDomain, myth?: Myth, prophecy?: P
     if (domain === "stars") return "star-marker";
     if (domain === "storms" || myth?.kind === "cataclysm") return "standing-stones";
     return "standing-stones";
+}
+
+function chooseGodKind(seed: number, index: number, domain: BeliefDomain, controlSphere: GodControlSphere): GodKind {
+    if (controlSphere === "creation") return "creator";
+    if (controlSphere === "commandments") return "judge";
+    if (controlSphere === "miracles" && (domain === "harvest" || domain === "rivers")) return "healer";
+    if (controlSphere === "destiny" && domain === "storms") return "trickster";
+    if (domain === "storms") return hashFloat(seed, index, 946, 1) < 0.58 ? "destroyer" : "messenger";
+    if (domain === "forge" || domain === "mountains") return hashFloat(seed, index, 946, 2) < 0.55 ? "keeper" : "judge";
+    if (domain === "trade") return hashFloat(seed, index, 946, 3) < 0.5 ? "messenger" : "judge";
+    const options = GOD_KINDS;
+    return options[Math.floor(hashFloat(seed, index, 946, 4) * options.length)] ?? "keeper";
+}
+
+function chooseGodTemperament(seed: number, index: number, kind: GodKind, domain: BeliefDomain): GodTemperament {
+    if (kind === "destroyer" || kind === "war-god") return hashFloat(seed, index, 946, 5) < 0.64 ? "vengeful" : "stern";
+    if (kind === "trickster") return "capricious";
+    if (domain === "stars") return hashFloat(seed, index, 946, 6) < 0.52 ? "distant" : "mysterious";
+    const options = GOD_TEMPERAMENTS;
+    return options[Math.floor(hashFloat(seed, index, 946, 7) * options.length)] ?? "mysterious";
+}
+
+function godControlSpheresForBelief(seed: number, belief: Belief, index: number, count: number): GodControlSphere[] {
+    const primary = index === 0
+        ? "creation"
+        : GOD_CONTROL_SPHERES[Math.floor(hashFloat(seed, belief.id, index, 948) * GOD_CONTROL_SPHERES.length)] ?? "religion";
+    const secondary: GodControlSphere[] = [];
+    if (index === 0 || belief.domain === "stars") secondary.push("prophecy");
+    if (belief.domain === "ancestors" || belief.domain === "storms" || hashFloat(seed, belief.id, index, 949) < 0.45) secondary.push("destiny");
+    if (belief.domain === "harvest" || belief.domain === "rivers" || hashFloat(seed, belief.id, index, 950) < 0.5) secondary.push("miracles");
+    if (belief.domain === "forge" || belief.domain === "trade" || hashFloat(seed, belief.id, index, 951) < 0.56) secondary.push("commandments");
+    if (count > 1 && index === count - 1) secondary.push("religion");
+    return Array.from(new Set([primary, ...secondary])).slice(0, 4) as GodControlSphere[];
+}
+
+function godCreationClaim(domain: BeliefDomain, settlement: Settlement, symbol: string): string {
+    if (domain === "ancestors") return `seated the first families at ${settlement.name} so names and graves would anchor the people`;
+    if (domain === "forge") return `set the first hearths at ${settlement.name} where ${symbol} could mark honest craft`;
+    if (domain === "harvest") return `opened the first fields at ${settlement.name} and bound survival to stored seed`;
+    if (domain === "rivers") return `guided the first camp to ${settlement.name} by water, road, and crossing`;
+    if (domain === "mountains") return `raised ${settlement.name} under stone signs so boundaries would be remembered`;
+    if (domain === "stars") return `placed ${settlement.name} beneath watchable skies so omens could be recorded`;
+    if (domain === "storms") return `drove the first people to ${settlement.name} through warning winds and hard renewal`;
+    return `seated the first market at ${settlement.name} where bargains could be witnessed`;
+}
+
+function godReligiousMandate(domain: BeliefDomain, demand: string): string {
+    if (domain === "ancestors") return `religion must preserve lineage duties and ${demand}`;
+    if (domain === "forge") return `religion must test craft, oaths, and ${demand}`;
+    if (domain === "harvest") return `religion must protect stores, shared labor, and ${demand}`;
+    if (domain === "rivers") return `religion must keep roads, crossings, hospitality, and ${demand}`;
+    if (domain === "mountains") return `religion must guard sacred bounds and ${demand}`;
+    if (domain === "stars") return `religion must record signs before action and ${demand}`;
+    if (domain === "storms") return `religion must cleanse broken orders and ${demand}`;
+    return `religion must witness fair exchange and ${demand}`;
+}
+
+function godProphecyMethod(domain: BeliefDomain, omen: string): string {
+    if (domain === "ancestors") return `through remembered names, dreams of the dead, and ${omen}`;
+    if (domain === "forge") return `through flaws in metal, ringing tools, and ${omen}`;
+    if (domain === "harvest") return `through seed failures, sudden abundance, and ${omen}`;
+    if (domain === "rivers") return `through changed currents, bridge signs, and ${omen}`;
+    if (domain === "mountains") return `through cairn falls, cave echoes, and ${omen}`;
+    if (domain === "stars") return `through night charts, falling lights, and ${omen}`;
+    if (domain === "storms") return `through thunder breaks, wind warnings, and ${omen}`;
+    return `through ledgers, road news, market bells, and ${omen}`;
+}
+
+function godDestinyPressure(kind: GodKind, temperament: GodTemperament): string {
+    if (kind === "judge" || temperament === "stern") return "destiny is enforced through tests, public duties, and costly proof";
+    if (kind === "trickster" || temperament === "capricious") return "destiny bends through reversals, bargains, and misread signs";
+    if (kind === "destroyer" || temperament === "vengeful") return "destiny presses through ruin, warning, and punishment";
+    if (kind === "healer" || temperament === "benevolent") return "destiny is nudged through rescue, repair, and mercy";
+    if (kind === "messenger" || temperament === "distant") return "destiny arrives through omens carried between places";
+    return "destiny moves through hidden patterns and repeated signs";
+}
+
+function godMiracleBias(seed: number, index: number, domain: BeliefDomain, kind: GodKind): MiracleKind {
+    if (kind === "healer") return "healing";
+    if (kind === "war-god") return "victory";
+    if (kind === "destroyer") return "curse";
+    if (domain === "harvest") return "harvest";
+    if (domain === "rivers") return "healing";
+    if (domain === "storms") return "storm";
+    if (domain === "stars") return "omen";
+    if (domain === "ancestors") return "revelation";
+    const options = MIRACLE_KINDS;
+    return options[Math.floor(hashFloat(seed, index, 952, 1) * options.length)] ?? "omen";
+}
+
+function godCommandmentStyle(seed: number, index: number, domain: BeliefDomain, kind: GodKind): CommandmentKind {
+    if (kind === "judge") return "law";
+    if (kind === "war-god" || kind === "destroyer") return "war";
+    if (domain === "forge") return "craft";
+    if (domain === "harvest") return "stewardship";
+    if (domain === "rivers" || domain === "trade") return "hospitality";
+    if (domain === "mountains") return "taboo";
+    if (domain === "ancestors") return "law";
+    const options = COMMANDMENT_KINDS;
+    return options[Math.floor(hashFloat(seed, index, 953, 1) * options.length)] ?? "law";
+}
+
+function makeGodName(seed: number, index: number, domain: BeliefDomain): string {
+    const prefix = NAME_PREFIXES[Math.floor(hashFloat(seed, index, 942, 1) * NAME_PREFIXES.length)];
+    const suffix = NAME_SUFFIXES[Math.floor(hashFloat(seed, index, 942, 2) * NAME_SUFFIXES.length)];
+    const nouns = GOD_NOUNS[domain];
+    const noun = nouns[Math.floor(hashFloat(seed, index, 942, 3) * nouns.length)];
+    return `${prefix}${suffix} the ${noun}`;
+}
+
+function makeCommandmentName(seed: number, index: number, kind: CommandmentKind, god: God | undefined): string {
+    const prefix = NAME_PREFIXES[Math.floor(hashFloat(seed, index, 943, 1) * NAME_PREFIXES.length)];
+    const suffix = NAME_SUFFIXES[Math.floor(hashFloat(seed, index, 943, 2) * NAME_SUFFIXES.length)];
+    return `${prefix}${suffix} ${commandmentKindLabel(kind)}${god ? ` of ${god.name}` : ""}`;
+}
+
+function makeDestinyName(seed: number, index: number, kind: DestinyKind, settlement: Settlement): string {
+    const prefix = NAME_PREFIXES[Math.floor(hashFloat(seed, index, 944, 1) * NAME_PREFIXES.length)];
+    const suffix = NAME_SUFFIXES[Math.floor(hashFloat(seed, index, 944, 2) * NAME_SUFFIXES.length)];
+    return `${prefix}${suffix} ${destinyKindLabel(kind)} of ${settlement.name}`;
+}
+
+function makeMiracleName(seed: number, index: number, kind: MiracleKind, settlement: Settlement): string {
+    const prefix = NAME_PREFIXES[Math.floor(hashFloat(seed, index, 945, 1) * NAME_PREFIXES.length)];
+    const suffix = NAME_SUFFIXES[Math.floor(hashFloat(seed, index, 945, 2) * NAME_SUFFIXES.length)];
+    return `${prefix}${suffix} ${miracleKindLabel(kind)} at ${settlement.name}`;
 }
 
 function mythicNaturalFeatureAffinity(domain: BeliefDomain, kind: NaturalFeatureKind): number {
@@ -7506,7 +9357,7 @@ function makeBelongingName(seed: number, index: number, kind: BelongingKind, own
     return style === 1 ? `${prefix}${suffix} ${noun}` : `${material} ${noun} of ${owner.name}`;
 }
 
-function emptyProfessionCounts(): Record<AgentProfession, number> {
+function emptyProfessionCounts(): ProfessionCounts {
     return {
         child: 0,
         farmer: 0,
@@ -7520,7 +9371,7 @@ function emptyProfessionCounts(): Record<AgentProfession, number> {
     };
 }
 
-function chooseAdultProfession(seed: number, agentId: number, settlement: Settlement, terrainScore: number): AgentProfession {
+function chooseAdultProfession(seed: number, agentId: number, settlement: Pick<Settlement, "id" | "type">, terrainScore: number): AgentProfession {
     const roll = hashFloat(seed, agentId, settlement.id, 503);
     const mountainBias = clamp((terrainScore - 0.35) / 0.45, 0, 1);
     const capitalBias = settlement.type === "capital" ? 0.08 : 0;
@@ -7756,17 +9607,57 @@ function createAppearanceFeatureForWoundLegacy(simulation: CivilizationSimulatio
     createAppearanceFeature(simulation, agent, "wound-mark", legacy.sourceEventId, traits, legacy.severity === "grave" ? 0.86 : 0.68, description, {woundLegacyId: legacy.id});
 }
 
-function updateAgentProfession(agent: Agent, simulation: CivilizationSimulation) {
-    if (!agent.alive) return;
-    const previousProfession = agent.profession;
-    if (agent.age < 15) {
-        agent.profession = "child";
-    } else if (agent.age >= 65) {
-        agent.profession = "elder";
-    } else if (agent.profession === "child" || agent.profession === "elder") {
-        const settlement = simulation.settlements[agent.settlementId];
-        agent.profession = chooseAdultProfession(simulation.options.seed, agent.id, settlement, settlement.suitability);
+function annualAgentProfessionInput(simulation: CivilizationSimulation, agent: Agent): AnnualAgentProfessionInput {
+    const settlement = simulation.settlements[agent.settlementId];
+    return {
+        agentId: agent.id,
+        age: agent.age,
+        profession: agent.profession,
+        settlementId: settlement.id,
+        settlementType: settlement.type,
+        suitability: settlement.suitability,
+    };
+}
+
+function computeAnnualAgentProfessionDraft(seed: number, input: AnnualAgentProfessionInput): AnnualAgentProfessionDraft {
+    const age = input.age + 1;
+    let profession = input.profession;
+    if (age < 15) {
+        profession = "child";
+    } else if (age >= 65) {
+        profession = "elder";
+    } else if (profession === "child" || profession === "elder") {
+        profession = chooseAdultProfession(seed, input.agentId, {id: input.settlementId, type: input.settlementType}, input.suitability);
     }
+    return {agentId: input.agentId, age, profession};
+}
+
+function annualAgentProfessionDrafts(
+    simulation: CivilizationSimulation,
+    workerPool?: CivilizationWorkerPool,
+): Map<number, AnnualAgentProfessionDraft> {
+    const inputs: AnnualAgentProfessionInput[] = [];
+    for (let agentId of simulation.aliveAgentIds) {
+        const agent = simulation.agents[agentId];
+        if (agent?.alive) inputs.push(annualAgentProfessionInput(simulation, agent));
+    }
+    if (workerPool && inputs.length > 1) {
+        return workerPool.computeAnnualAgentProfessionDrafts(simulation.options.seed, inputs);
+    }
+    return new Map(inputs.map(input => [
+        input.agentId,
+        computeAnnualAgentProfessionDraft(simulation.options.seed, input),
+    ]));
+}
+
+function applyAnnualAgentProfessionDraft(agent: Agent, simulation: CivilizationSimulation, draft: AnnualAgentProfessionDraft) {
+    if (!agent.alive) return;
+    if (draft.agentId !== agent.id) {
+        throw new Error(`Profession draft for agent ${draft.agentId} applied to ${agent.id}`);
+    }
+    const previousProfession = agent.profession;
+    agent.age = draft.age;
+    agent.profession = draft.profession;
 
     if (agent.profession !== previousProfession) {
         for (let specialty of specialtiesForProfession(agent.profession)) {
@@ -8064,11 +9955,107 @@ function formHouseholds(
     return pairs;
 }
 
+function householdPairWorkerAgent(agent: Agent): HouseholdPairWorkerAgent {
+    return {
+        id: agent.id,
+        civilizationId: agent.civilizationId,
+        settlementId: agent.settlementId,
+        age: agent.age,
+        spouseId: agent.spouseId,
+        alive: agent.alive,
+    };
+}
+
+function householdPairWorkerInput(settlement: Settlement, agents: Agent[]): HouseholdPairWorkerInput {
+    return {
+        settlement: {
+            id: settlement.id,
+            civilizationId: settlement.civilizationId,
+            prosperity: settlement.prosperity,
+            unrest: settlement.unrest,
+        },
+        agents: agents.map(householdPairWorkerAgent),
+    };
+}
+
+function computeHouseholdPairDraft(seed: number, year: number, input: HouseholdPairWorkerInput): HouseholdPairDraft {
+    if (year <= 0) return {settlementId: input.settlement.id, pairs: []};
+    const adultCount = input.agents.filter(agent =>
+        agent.alive
+        && agent.spouseId === undefined
+        && agent.age >= 18
+        && agent.age <= 42
+    ).length;
+    if (adultCount < 2) return {settlementId: input.settlement.id, pairs: []};
+
+    const chance = clamp(0.02 + input.settlement.prosperity * 0.05 - input.settlement.unrest * 0.035, 0.005, 0.08);
+    const maxPairs = Math.max(0, Math.floor(adultCount * (0.003 + input.settlement.prosperity * 0.004)));
+    if (maxPairs <= 0 || chance <= 0) return {settlementId: input.settlement.id, pairs: []};
+
+    const candidates = input.agents
+        .filter(agent =>
+            agent.alive
+            && agent.spouseId === undefined
+            && agent.civilizationId === input.settlement.civilizationId
+            && agent.settlementId === input.settlement.id
+            && agent.age >= 18
+            && agent.age <= 42
+        )
+        .sort((a, b) =>
+            hashFloat(seed, year, input.settlement.id, a.id)
+            - hashFloat(seed, year, input.settlement.id, b.id)
+            || a.id - b.id
+        );
+
+    const pairs: Array<[number, number]> = [];
+    for (let i = 0; i + 1 < candidates.length && pairs.length < maxPairs; i += 2) {
+        const a = candidates[i];
+        const b = candidates[i + 1];
+        if (hashFloat(seed, year + 823, a.id, b.id) > chance) continue;
+        pairs.push([a.id, b.id]);
+    }
+    return {settlementId: input.settlement.id, pairs};
+}
+
+function householdPairDrafts(
+    simulation: CivilizationSimulation,
+    aliveAgentsBySettlement: Agent[][],
+    workerPool?: CivilizationWorkerPool,
+): Map<number, HouseholdPairDraft> {
+    const inputs = simulation.settlements.map(settlement => householdPairWorkerInput(
+        settlement,
+        aliveAgentsBySettlement[settlement.id] ?? [],
+    ));
+    if (workerPool && inputs.length > 1) {
+        return workerPool.computeHouseholdPairDrafts(simulation.options.seed, simulation.year, inputs);
+    }
+    return new Map(inputs.map(input => [
+        input.settlement.id,
+        computeHouseholdPairDraft(simulation.options.seed, simulation.year, input),
+    ]));
+}
+
+function applyHouseholdPairDraft(simulation: CivilizationSimulation, settlement: Settlement, draft: HouseholdPairDraft): number {
+    if (draft.settlementId !== settlement.id) {
+        throw new Error(`Household pair draft for settlement ${draft.settlementId} applied to ${settlement.id}`);
+    }
+    let pairs = 0;
+    for (let [aId, bId] of draft.pairs) {
+        const a = simulation.agents[aId];
+        const b = simulation.agents[bId];
+        if (!a || !b) continue;
+        linkSpouses(simulation, a, b, settlement, simulation.year);
+        pairs++;
+    }
+    return pairs;
+}
+
 function arrangeInitialHouseholds(simulation: CivilizationSimulation, settlement: Settlement, agents: Agent[]) {
     formHouseholds(simulation, settlement, agents, Math.floor(agents.length * 0.32), 0.72);
 }
 
-function maybeFormHouseholds(simulation: CivilizationSimulation, settlement: Settlement, agents: Agent[]): number {
+function maybeFormHouseholds(simulation: CivilizationSimulation, settlement: Settlement, agents: Agent[], draft?: HouseholdPairDraft): number {
+    if (draft) return applyHouseholdPairDraft(simulation, settlement, draft);
     if (simulation.year <= 0) return 0;
     const adults = agents.filter(agent => agent.alive && agent.spouseId === undefined && agent.age >= 18 && agent.age <= 42);
     if (adults.length < 2) return 0;
@@ -8569,16 +10556,21 @@ function createAgent(
     bornYear: number,
     profession?: AgentProfession,
     parentIds: number[] = [],
+    initialDraft?: InitialAgentDraft,
 ): Agent {
     const id = simulation.agents.length;
     const settlement = simulation.settlements[settlementId];
     const familyName = inheritedFamilyName(simulation, parentIds);
-    const assignedProfession = profession
+    if (initialDraft && initialDraft.id !== id) {
+        throw new Error(`Initial agent draft ${initialDraft.id} applied to agent ${id}`);
+    }
+    const draft = initialDraft;
+    const assignedProfession = draft?.profession ?? profession
         ?? (age < 15 ? "child" : age >= 65 ? "elder" : chooseAdultProfession(simulation.options.seed, id, settlement, settlement.suitability));
-    const traits = initialAgentTraits(simulation.options.seed, id);
-    const values = initialAgentValues(simulation.options.seed, id, assignedProfession);
-    const morale = clamp(0.58 + settlement.suitability * 0.25 + hashFloat(simulation.options.seed, id, 307, 2) * 0.17, 0, 1);
-    const stress = clamp(
+    const traits = draft ? [...draft.traits] : initialAgentTraits(simulation.options.seed, id);
+    const values = draft ? [...draft.values] : initialAgentValues(simulation.options.seed, id, assignedProfession);
+    const morale = draft?.morale ?? clamp(0.58 + settlement.suitability * 0.25 + hashFloat(simulation.options.seed, id, 307, 2) * 0.17, 0, 1);
+    const stress = draft?.stress ?? clamp(
         0.12
         + (traits.includes("melancholy") ? 0.08 : 0)
         + (traits.includes("restless") ? 0.04 : 0)
@@ -8588,34 +10580,34 @@ function createAgent(
         0,
         1,
     );
-    const resilience = initialAgentResilience(traits, values, simulation.options.seed, id);
+    const resilience = draft?.resilience ?? initialAgentResilience(traits, values, simulation.options.seed, id);
     const agent: Agent = {
         id,
-        name: makeAgentName(simulation.options.seed, id, familyName),
+        name: draft && familyName === undefined ? draft.name : makeAgentName(simulation.options.seed, id, familyName),
         civilizationId,
         settlementId,
         bornYear,
         age,
         profession: assignedProfession,
-        health: clamp(0.72 + hashFloat(simulation.options.seed, id, 307, 1) * 0.28, 0, 1),
+        health: draft?.health ?? clamp(0.72 + hashFloat(simulation.options.seed, id, 307, 1) * 0.28, 0, 1),
         morale,
         stress,
         resilience,
-        mentalState: mentalStateFor(stress, morale),
-        needStates: initialAgentNeeds(simulation.options.seed, id, assignedProfession, traits, values),
+        mentalState: draft?.mentalState ?? mentalStateFor(stress, morale),
+        needStates: draft ? draft.needStates.map(need => ({...need})) : initialAgentNeeds(simulation.options.seed, id, assignedProfession, traits, values),
         needEpisodeIds: [],
-        wealth: Math.round((6 + hashFloat(simulation.options.seed, id, 307, 3) * 16) * 100) / 100,
-        skill: clamp(0.2 + age / 90 + hashFloat(simulation.options.seed, id, 307, 4) * 0.25, 0, 1),
+        wealth: draft?.wealth ?? Math.round((6 + hashFloat(simulation.options.seed, id, 307, 3) * 16) * 100) / 100,
+        skill: draft?.skill ?? clamp(0.2 + age / 90 + hashFloat(simulation.options.seed, id, 307, 4) * 0.25, 0, 1),
         traits,
         values,
-        specialties: initialAgentSpecialties(simulation.options.seed, id, assignedProfession),
+        specialties: draft ? [...draft.specialties] : initialAgentSpecialties(simulation.options.seed, id, assignedProfession),
         epithets: [],
         epithetIds: [],
         reputationMilestoneIds: [],
         preferenceIds: [],
         writtenWorkIds: [],
         traditionIds: [],
-        reputation: Math.round(clamp(0.03 + (age >= 18 ? age / 120 : 0) + hashFloat(simulation.options.seed, id, 307, 5) * 0.08, 0, 1) * 1000) / 1000,
+        reputation: draft?.reputation ?? Math.round(clamp(0.03 + (age >= 18 ? age / 120 : 0) + hashFloat(simulation.options.seed, id, 307, 5) * 0.08, 0, 1) * 1000) / 1000,
         parentIds: [],
         childIds: [],
         organizationIds: [],
@@ -8719,37 +10711,62 @@ function createAgent(
     return agent;
 }
 
-function seedSettlementAgents(simulation: CivilizationSimulation, settlement: Settlement): Agent[] {
+function seedSettlementAgents(simulation: CivilizationSimulation, settlement: Settlement, seedPlan?: SettlementAgentSeedPlan): Agent[] {
     const targetPopulation = settlement.population;
     const createdAgents: Agent[] = [];
     withSuppressedLegendEventMemories(simulation, () => {
-        const adultPlans: Array<{age: number; index: number}> = [];
-        const childPlans: Array<{age: number; index: number}> = [];
-        for (let i = 0; i < targetPopulation; i++) {
-            const roll = hashFloat(simulation.options.seed, settlement.id, i, 419);
-            let age: number;
-            if (roll < 0.24) age = Math.floor(hashFloat(simulation.options.seed, settlement.id, i, 421) * 15);
-            else if (roll < 0.82) age = 15 + Math.floor(hashFloat(simulation.options.seed, settlement.id, i, 422) * 35);
-            else age = 50 + Math.floor(hashFloat(simulation.options.seed, settlement.id, i, 423) * 35);
-            if (age < 15) childPlans.push({age, index: i});
-            else adultPlans.push({age, index: i});
+        const plan = seedPlan ?? timedPhase(simulation, "settlement-seed-agent-plan", () => buildSettlementAgentSeedPlan(simulation.options.seed, {
+            settlementId: settlement.id,
+            targetPopulation,
+            firstAgentId: simulation.agents.length,
+            civilizationId: settlement.civilizationId,
+            type: settlement.type,
+            suitability: settlement.suitability,
+            prosperity: settlement.prosperity,
+            unrest: settlement.unrest,
+        }));
+        if (plan.settlementId !== settlement.id) {
+            throw new Error(`Seed plan for settlement ${plan.settlementId} applied to ${settlement.id}`);
+        }
+        if (plan.adultPlans.length + plan.childPlans.length !== targetPopulation) {
+            throw new Error(`Seed plan for ${settlement.name} has ${plan.adultPlans.length + plan.childPlans.length} agents, expected ${targetPopulation}`);
         }
 
-        adultPlans
-            .sort((a, b) => b.age - a.age || a.index - b.index)
-            .forEach(plan => {
-                createdAgents.push(createAgent(simulation, settlement.civilizationId, settlement.id, plan.age, simulation.year - plan.age));
+        timedPhase(simulation, "settlement-seed-adult-agents", () => {
+            plan.adultPlans.forEach((agentPlan, index) => {
+                createdAgents.push(createAgent(
+                    simulation,
+                    settlement.civilizationId,
+                    settlement.id,
+                    agentPlan.age,
+                    simulation.year - agentPlan.age,
+                    undefined,
+                    [],
+                    plan.adultDrafts[index],
+                ));
             });
+        });
 
-        arrangeInitialHouseholds(simulation, settlement, createdAgents);
+        timedPhase(simulation, "settlement-seed-households", () => {
+            arrangeInitialHouseholds(simulation, settlement, createdAgents);
+        });
 
-        childPlans
-            .sort((a, b) => b.age - a.age || a.index - b.index)
-            .forEach(plan => {
-                const parentIds = chooseParentsForBirth(simulation, settlement, createdAgents, plan.index);
-                const child = createAgent(simulation, settlement.civilizationId, settlement.id, plan.age, simulation.year - plan.age, "child", parentIds);
+        timedPhase(simulation, "settlement-seed-child-agents", () => {
+            plan.childPlans.forEach((agentPlan, index) => {
+                const parentIds = chooseParentsForBirth(simulation, settlement, createdAgents, agentPlan.index);
+                const child = createAgent(
+                    simulation,
+                    settlement.civilizationId,
+                    settlement.id,
+                    agentPlan.age,
+                    simulation.year - agentPlan.age,
+                    "child",
+                    parentIds,
+                    plan.childDrafts[index],
+                );
                 createdAgents.push(child);
             });
+        });
     });
 
     if (createdAgents.length !== targetPopulation) {
@@ -8913,7 +10930,7 @@ function careRecordRef(simulation: CivilizationSimulation, id: number): LegendEn
 
 function eventRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
     const event = simulation.legendEvents[id];
-    return {kind: "event", id, name: event ? `${event.year}: ${event.headline}` : `Event ${id}`};
+    return {kind: "event", id, name: event ? `${event.year}: ${legendEventHeadline(event)}` : `Event ${id}`};
 }
 
 function skillRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
@@ -8953,6 +10970,22 @@ function beliefRef(simulation: CivilizationSimulation, id: number): LegendEntity
 
 function beliefAdherenceRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
     return {kind: "belief-adherence", id, name: simulation.beliefAdherences[id]?.name ?? `Belief Adherence ${id}`};
+}
+
+function godRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
+    return {kind: "god", id, name: simulation.gods[id]?.name ?? `God ${id}`};
+}
+
+function commandmentRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
+    return {kind: "commandment", id, name: simulation.commandments[id]?.name ?? `Commandment ${id}`};
+}
+
+function destinyRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
+    return {kind: "destiny", id, name: simulation.destinies[id]?.name ?? `Destiny ${id}`};
+}
+
+function miracleRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
+    return {kind: "miracle", id, name: simulation.miracles[id]?.name ?? `Miracle ${id}`};
 }
 
 function mythRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
@@ -9009,6 +11042,22 @@ function battleRef(simulation: CivilizationSimulation, id: number): LegendEntity
 
 function battleParticipationRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
     return {kind: "battle-participation", id, name: simulation.battleParticipations[id]?.name ?? `Battle Participation ${id}`};
+}
+
+function militaryUnitRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
+    return {kind: "military-unit", id, name: simulation.militaryUnits[id]?.name ?? `Military Unit ${id}`};
+}
+
+function equipmentCacheRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
+    return {kind: "equipment-cache", id, name: simulation.equipmentCaches[id]?.name ?? `Equipment Cache ${id}`};
+}
+
+function spyNetworkRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
+    return {kind: "spy-network", id, name: simulation.spyNetworks[id]?.name ?? `Spy Network ${id}`};
+}
+
+function spyOperationRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
+    return {kind: "spy-operation", id, name: simulation.spyOperations[id]?.name ?? `Spy Operation ${id}`};
 }
 
 function injuryRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
@@ -9149,6 +11198,10 @@ function legendRefName(simulation: CivilizationSimulation, ref: LegendEntityRef)
     if (ref.kind === "union") return simulation.unions[ref.id]?.name ?? `Union ${ref.id}`;
     if (ref.kind === "belief") return simulation.beliefs[ref.id]?.name ?? `Belief ${ref.id}`;
     if (ref.kind === "belief-adherence") return simulation.beliefAdherences[ref.id]?.name ?? `Belief Adherence ${ref.id}`;
+    if (ref.kind === "god") return simulation.gods[ref.id]?.name ?? `God ${ref.id}`;
+    if (ref.kind === "commandment") return simulation.commandments[ref.id]?.name ?? `Commandment ${ref.id}`;
+    if (ref.kind === "destiny") return simulation.destinies[ref.id]?.name ?? `Destiny ${ref.id}`;
+    if (ref.kind === "miracle") return simulation.miracles[ref.id]?.name ?? `Miracle ${ref.id}`;
     if (ref.kind === "myth") return simulation.myths[ref.id]?.name ?? `Myth ${ref.id}`;
     if (ref.kind === "doctrine") return simulation.doctrines[ref.id]?.name ?? `Doctrine ${ref.id}`;
     if (ref.kind === "magic-role") return simulation.magicRoles[ref.id]?.name ?? `Magic Role ${ref.id}`;
@@ -9163,6 +11216,10 @@ function legendRefName(simulation: CivilizationSimulation, ref: LegendEntityRef)
     if (ref.kind === "conflict") return simulation.conflicts[ref.id]?.name ?? `Conflict ${ref.id}`;
     if (ref.kind === "battle") return simulation.battles[ref.id]?.name ?? `Battle ${ref.id}`;
     if (ref.kind === "battle-participation") return simulation.battleParticipations[ref.id]?.name ?? `Battle Participation ${ref.id}`;
+    if (ref.kind === "military-unit") return simulation.militaryUnits[ref.id]?.name ?? `Military Unit ${ref.id}`;
+    if (ref.kind === "equipment-cache") return simulation.equipmentCaches[ref.id]?.name ?? `Equipment Cache ${ref.id}`;
+    if (ref.kind === "spy-network") return simulation.spyNetworks[ref.id]?.name ?? `Spy Network ${ref.id}`;
+    if (ref.kind === "spy-operation") return simulation.spyOperations[ref.id]?.name ?? `Spy Operation ${ref.id}`;
     if (ref.kind === "injury") return simulation.injuries[ref.id]?.name ?? `Injury ${ref.id}`;
     if (ref.kind === "illness") return simulation.illnesses[ref.id]?.name ?? `Illness ${ref.id}`;
     if (ref.kind === "memorial") return simulation.memorials[ref.id]?.name ?? `Memorial ${ref.id}`;
@@ -9181,7 +11238,7 @@ function legendRefName(simulation: CivilizationSimulation, ref: LegendEntityRef)
     if (ref.kind === "lineage") return simulation.lineages[ref.id]?.name ?? `Lineage ${ref.id}`;
     if (ref.kind === "event") {
         const event = simulation.legendEvents[ref.id];
-        return event ? `${event.year}: ${event.headline}` : `Event ${ref.id}`;
+        return event ? `${event.year}: ${legendEventHeadline(event)}` : `Event ${ref.id}`;
     }
     return `${ref.kind} ${ref.id}`;
 }
@@ -9189,8 +11246,8 @@ function legendRefName(simulation: CivilizationSimulation, ref: LegendEntityRef)
 function memoryEmotionForEvent(event: LegendEvent, agent: Agent): MemoryEmotion | undefined {
     if (event.type === "person-born") return undefined;
     if (event.type === "person-died") return event.personId === agent.id ? undefined : "grief";
-    if (event.type === "person-married" || event.type === "relationship-formed") return event.type === "relationship-formed" && event.headline.includes("rivals") ? "anger" : "joy";
-    if (event.type === "conversation-held") return event.description.includes("guarded") || event.description.includes("tense") ? "fear" : "joy";
+    if (event.type === "person-married" || event.type === "relationship-formed") return event.type === "relationship-formed" && legendEventHeadline(event).includes("rivals") ? "anger" : "joy";
+    if (event.type === "conversation-held") return legendEventDescription(event).includes("guarded") || legendEventDescription(event).includes("tense") ? "fear" : "joy";
     if (event.type === "project-completed") return "pride";
     if (event.type === "project-failed") return "shame";
     if (event.type === "obligation-created") return "hope";
@@ -9204,13 +11261,14 @@ function memoryEmotionForEvent(event: LegendEvent, agent: Agent): MemoryEmotion 
     if (event.type === "belonging-lost") return "shame";
     if (event.type === "possession-attachment-formed") return event.artifactId === undefined ? "joy" : "pride";
     if (event.type === "lineage-founded" || event.type === "household-founded" || event.type === "profession-changed" || event.type === "skill-improved" || event.type === "reputation-gained") return "pride";
-    if (event.type === "journey-made" || event.type === "belief-founded" || event.type === "tradition-founded" || event.type === "ritual-held" || event.type === "ceremony-held" || event.type === "myth-founded" || event.type === "doctrine-established" || event.type === "magic-role-appointed" || event.type === "prophecy-spoken" || event.type === "prophecy-interpreted" || event.type === "sacred-site-founded") return "awe";
-    if (event.type === "prophecy-fulfilled" || event.type === "civilization-goal-fulfilled") return "hope";
-    if (event.type === "prophecy-failed" || event.type === "civilization-goal-failed") return "shame";
+    if (event.type === "journey-made" || event.type === "belief-founded" || event.type === "tradition-founded" || event.type === "ritual-held" || event.type === "ceremony-held" || event.type === "god-named" || event.type === "commandment-given" || event.type === "destiny-declared" || event.type === "miracle-witnessed" || event.type === "myth-founded" || event.type === "doctrine-established" || event.type === "magic-role-appointed" || event.type === "prophecy-spoken" || event.type === "prophecy-interpreted" || event.type === "sacred-site-founded") return "awe";
+    if (event.type === "prophecy-fulfilled" || event.type === "destiny-fulfilled" || event.type === "civilization-goal-fulfilled") return "hope";
+    if (event.type === "prophecy-failed" || event.type === "destiny-broken" || event.type === "civilization-goal-failed") return "shame";
     if (event.type === "life-activity") {
-        if (event.headline.includes("rested") || event.headline.includes("received care")) return "relief";
-        if (event.headline.includes("studied") || event.headline.includes("trained") || event.headline.includes("practiced")) return "pride";
-        if (event.headline.includes("worshiped")) return "awe";
+        const headline = legendEventHeadline(event);
+        if (headline.includes("rested") || headline.includes("received care")) return "relief";
+        if (headline.includes("studied") || headline.includes("trained") || headline.includes("practiced")) return "pride";
+        if (headline.includes("worshiped")) return "awe";
         return "joy";
     }
     if (event.type === "structure-built" || event.type === "organization-founded" || event.type === "organization-joined" || event.type === "organization-leader-appointed" || event.type === "office-created" || event.type === "office-holder-appointed") return "pride";
@@ -9221,12 +11279,13 @@ function memoryEmotionForEvent(event: LegendEvent, agent: Agent): MemoryEmotion 
     if (event.type === "artifact-lost") return "shame";
     if (event.type === "belief-adopted" || event.type === "ambition-formed" || event.type === "civilization-goal-formed" || event.type === "apprenticeship-started") return "hope";
     if (event.type === "law-enacted" || event.type === "chronicle-written" || event.type === "written-work-authored" || event.type === "teaching-given") return "pride";
-    if (event.type === "case-opened" || event.type === "trial-held" || event.type === "testimony-given" || event.type === "battle-fought" || event.type === "conflict-started" || event.type === "conflict-renewed" || event.type === "shortage") return "fear";
-    if (event.type === "verdict-reached") return event.description.includes("dismissed") ? "relief" : "fear";
+    if (event.type === "case-opened" || event.type === "trial-held" || event.type === "testimony-given" || event.type === "battle-fought" || event.type === "military-unit-formed" || event.type === "spy-network-formed" || event.type === "spy-operation" || event.type === "conflict-started" || event.type === "conflict-renewed" || event.type === "shortage") return "fear";
+    if (event.type === "equipment-cache-stocked") return "pride";
+    if (event.type === "verdict-reached") return legendEventDescription(event).includes("dismissed") ? "relief" : "fear";
     if (event.type === "punishment" || event.type === "ambition-failed" || event.type === "apprenticeship-broken") return "shame";
     if (event.type === "battle-casualty" || event.type === "injury-sustained" || event.type === "memorial-created" || event.type === "burial-recorded") return event.type === "memorial-created" || event.type === "burial-recorded" ? "grief" : "fear";
     if (event.type === "injury-healed") return "relief";
-    if (event.type === "wound-legacy-formed") return event.headline.includes("battle fright") ? "fear" : "relief";
+    if (event.type === "wound-legacy-formed") return legendEventHeadline(event).includes("battle fright") ? "fear" : "relief";
     if (event.type === "ambition-fulfilled" || event.type === "apprenticeship-completed" || event.type === "artifact-created" || event.type === "artifact-recovered" || event.type === "artifact-reclaimed") return "pride";
     if (event.type === "artifact-moved" || event.type === "artifact-gifted") return "joy";
     if (event.type === "artifact-inherited") return "grief";
@@ -9237,10 +11296,10 @@ function memoryEmotionForEvent(event: LegendEvent, agent: Agent): MemoryEmotion 
     if (event.type === "need-episode-started") return "shame";
     if (event.type === "need-episode-resolved") return "relief";
     if (event.type === "epithet-earned") return "pride";
-    if (event.type === "rumor-started") return event.headline.includes("scandal") ? "anger" : "awe";
+    if (event.type === "rumor-started") return legendEventHeadline(event).includes("scandal") ? "anger" : "awe";
     if (event.type === "rumor-spread") return "awe";
     if (event.type === "secret-kept") return "fear";
-    if (event.type === "secret-revealed") return event.description.includes("relieved") ? "relief" : "shame";
+    if (event.type === "secret-revealed") return legendEventDescription(event).includes("relieved") ? "relief" : "shame";
     if (event.type === "scheme-formed" || event.type === "scheme-advanced") return "fear";
     if (event.type === "scheme-succeeded") return event.personId === agent.id ? "pride" : "anger";
     if (event.type === "scheme-exposed" || event.type === "scheme-abandoned") return "shame";
@@ -9572,10 +11631,11 @@ function createThoughtForMemory(simulation: CivilizationSimulation, memory: Memo
     if (hashFloat(simulation.options.seed, memory.id, agent.id, 4019) > chance) return;
     const tone = thoughtToneForMemory(memory.emotion);
     const intensity = clamp(memory.intensity + (primary ? 0.08 : 0) + hashFloat(simulation.options.seed, memory.id, agent.id, 4021) * 0.05, 0.05, 1);
+    const headline = legendEventHeadline(event);
     createThought(simulation, agent, {
         kind: thoughtKindForMemory(event),
         tone,
-        subject: event.headline,
+        subject: headline,
         year: memory.year,
         sourceEventId: event.id,
         sourceMemoryId: memory.id,
@@ -9583,7 +11643,7 @@ function createThoughtForMemory(simulation: CivilizationSimulation, memory: Memo
         moodDelta: emotionValence(memory.emotion) * intensity * 0.008,
         stressDelta: memory.stressImpact * 0.16,
         subjectRefs: uniqueLegendRefs([memoryRef(simulation, memory.id), ...memory.subjectRefs], 18),
-        description: `${agent.name} had a ${tone} thought while remembering ${event.headline}.`,
+        description: `${agent.name} had a ${tone} thought while remembering ${headline}.`,
     });
 }
 
@@ -9757,6 +11817,27 @@ function maybeCreateMythicThoughtForBelief(
     const doctrine = goal?.doctrineId === undefined
         ? simulation.doctrines[belief.doctrineIds[0]]
         : simulation.doctrines[goal.doctrineId];
+    const god = prophecy?.godId !== undefined
+        ? simulation.gods[prophecy.godId]
+        : goal?.godId !== undefined
+            ? simulation.gods[goal.godId]
+            : myth?.godId !== undefined
+                ? simulation.gods[myth.godId]
+                : godForBeliefControl(simulation, belief);
+    const commandment = goal?.commandmentId !== undefined
+        ? simulation.commandments[goal.commandmentId]
+        : doctrine?.commandmentId !== undefined
+            ? simulation.commandments[doctrine.commandmentId]
+            : undefined;
+    const destiny = prophecy?.destinyId !== undefined
+        ? simulation.destinies[prophecy.destinyId]
+        : goal?.destinyId !== undefined
+            ? simulation.destinies[goal.destinyId]
+            : undefined;
+    const miracle = belief.miracleIds
+        .map(id => simulation.miracles[id])
+        .filter((candidate): candidate is Miracle => !!candidate && simulation.year - candidate.year <= 16)
+        .sort((a, b) => b.year - a.year || b.strength - a.strength || a.id - b.id)[0];
     const sacredSite = simulation.sacredSites.find(site =>
         site.beliefId === belief.id
         && (prophecy === undefined || site.prophecyId === prophecy.id || site.prophecyId === undefined)
@@ -9772,10 +11853,14 @@ function maybeCreateMythicThoughtForBelief(
     const agent = candidates[0];
     if (!agent) return;
     const thoughtKind: ThoughtKind = prophecy ? "omen" : "dream";
-    const subject = prophecy?.name ?? goal?.name ?? myth?.name ?? doctrine?.name ?? belief.name;
+    const subject = destiny?.name ?? prophecy?.name ?? goal?.name ?? commandment?.name ?? myth?.name ?? doctrine?.name ?? god?.name ?? miracle?.name ?? belief.name;
     const tone = mythicThoughtTone(simulation, prophecy, goal, agent);
     const refs = uniqueLegendRefs([
         beliefRef(simulation, belief.id),
+        ...(god ? [godRef(simulation, god.id)] : []),
+        ...(commandment ? [commandmentRef(simulation, commandment.id)] : []),
+        ...(destiny ? [destinyRef(simulation, destiny.id)] : []),
+        ...(miracle ? [miracleRef(simulation, miracle.id)] : []),
         ...(myth ? [mythRef(simulation, myth.id)] : []),
         ...(doctrine ? [doctrineRef(simulation, doctrine.id)] : []),
         ...(magicRole ? [magicRoleRef(simulation, magicRole.id)] : []),
@@ -9796,8 +11881,8 @@ function maybeCreateMythicThoughtForBelief(
         stressDelta: tone === "worried" ? 0.014 : tone === "relieved" ? -0.008 : -0.002,
         subjectRefs: refs,
         description: thoughtKind === "omen"
-            ? `${agent.name} took ${subject} as an omen shaped by ${belief.name}${sacredSite ? ` at ${sacredSite.name}` : ""}.`
-            : `${agent.name} dreamed of ${subject} through the symbols of ${belief.name}${sacredSite ? ` at ${sacredSite.name}` : ""}.`,
+            ? `${agent.name} took ${subject} as an omen shaped by ${belief.name}${god ? ` and ${god.name}` : ""}${sacredSite ? ` at ${sacredSite.name}` : ""}.`
+            : `${agent.name} dreamed of ${subject} through the symbols of ${belief.name}${god ? ` and ${god.name}` : ""}${sacredSite ? ` at ${sacredSite.name}` : ""}.`,
     });
 }
 
@@ -9817,7 +11902,7 @@ function sameLegendRef(a: LegendEntityRef | undefined, b: LegendEntityRef | unde
 
 function opinionTargetPriority(ref: LegendEntityRef, agent: Agent): number {
     if (ref.kind === "person" && ref.id !== agent.id) return 0;
-    if (ref.kind === "organization" || ref.kind === "belief" || ref.kind === "office") return 1;
+    if (ref.kind === "organization" || ref.kind === "belief" || ref.kind === "god" || ref.kind === "commandment" || ref.kind === "destiny" || ref.kind === "miracle" || ref.kind === "office") return 1;
     if (ref.kind === "relationship" || ref.kind === "household" || ref.kind === "lineage") return 2;
     if (ref.kind === "law" || ref.kind === "case" || ref.kind === "conflict" || ref.kind === "battle" || ref.kind === "scheme" || ref.kind === "feud" || ref.kind === "oath") return 3;
     if (ref.kind === "artifact" || ref.kind === "holding" || ref.kind === "belonging" || ref.kind === "project" || ref.kind === "ceremony" || ref.kind === "activity" || ref.kind === "teaching" || ref.kind === "conversation") return 4;
@@ -9883,7 +11968,7 @@ function createOpinionForMemory(simulation: CivilizationSimulation, memory: Memo
             existing.sourceMemoryId = memory.id;
             existing.intensity = Math.round(memory.intensity * 1000) / 1000;
             existing.valence = Math.round(opinionValence(kind) * memory.intensity * 1000) / 1000;
-            existing.description = `${agent.name}'s ${kind} toward ${targetName} was strengthened by ${event.headline}.`;
+            existing.description = `${agent.name}'s ${kind} toward ${targetName} was strengthened by ${legendEventHeadline(event)}.`;
             createSocialClaimForOpinion(simulation, memory, event, agent, existing);
         }
         return;
@@ -9915,7 +12000,7 @@ function createOpinionForMemory(simulation: CivilizationSimulation, memory: Memo
         intensity,
         valence,
         subjectRefs,
-        description: `${agent.name} formed ${kind} toward ${targetName} after remembering ${event.headline}.`,
+        description: `${agent.name} formed ${kind} toward ${targetName} after remembering ${legendEventHeadline(event)}.`,
         eventIds: [],
     };
     simulation.opinions.push(opinion);
@@ -9959,7 +12044,7 @@ function socialClaimName(agent: Agent, target: Agent, kind: SocialClaimKind): st
 }
 
 function activeSocialBondBetween(simulation: CivilizationSimulation, aId: number, bId: number): SocialBond | undefined {
-    return simulation.socialBonds.find(bond => bond.active && sameSocialPair(bond, aId, bId));
+    return socialBondsForPair(simulation, aId, bId).find(bond => bond.active);
 }
 
 function activeSocialClaimBetween(simulation: CivilizationSimulation, agentId: number, targetAgentId: number, kind: SocialClaimKind): SocialClaim | undefined {
@@ -10052,7 +12137,7 @@ function createSocialClaimForOpinion(simulation: CivilizationSimulation, memory:
                 eventRef(simulation, event.id),
                 ...memory.subjectRefs,
             ], 24);
-            existing.description = `${agent.name}'s ${kind} toward ${target.name} was renewed by ${event.headline}.`;
+            existing.description = `${agent.name}'s ${kind} toward ${target.name} was renewed by ${legendEventHeadline(event)}.`;
             adjustSocialBondForClaim(simulation, simulation.socialBonds[existing.relationshipId ?? -1] ?? activeSocialBondBetween(simulation, agent.id, target.id), kind, existing.intensity, memory.year);
         }
         return;
@@ -10097,8 +12182,8 @@ function createSocialClaimForOpinion(simulation: CivilizationSimulation, memory:
         intensity,
         subjectRefs,
         description: kind === "favor"
-            ? `${agent.name} believed ${target.name} was owed favor after ${event.headline}.`
-            : `${agent.name} nursed a grudge against ${target.name} after ${event.headline}.`,
+            ? `${agent.name} believed ${target.name} was owed favor after ${legendEventHeadline(event)}.`
+            : `${agent.name} nursed a grudge against ${target.name} after ${legendEventHeadline(event)}.`,
         eventIds: [],
     };
     simulation.socialClaims.push(claim);
@@ -10389,7 +12474,7 @@ function createPersonalityShiftForMemory(simulation: CivilizationSimulation, mem
     const changeLabel = candidate.trait
         ? `became more ${candidate.trait}`
         : `embraced ${candidate.value}`;
-    const sourceHeadline = event.headline.replace(/[.!?]+$/, "");
+    const sourceHeadline = legendEventHeadline(event).replace(/[.!?]+$/, "");
     const subjectRefs = uniqueLegendRefs([
         {kind: "personality-shift", id, name},
         personRef(simulation, agent.id),
@@ -10447,7 +12532,7 @@ function createPersonalityShiftForMemory(simulation: CivilizationSimulation, mem
 
 function memoryName(emotion: MemoryEmotion, event: LegendEvent): string {
     const label = emotion[0].toUpperCase() + emotion.slice(1);
-    return `${label} memory of ${event.headline}`;
+    return `${label} memory of ${legendEventHeadline(event)}`;
 }
 
 function createMemoryForEvent(simulation: CivilizationSimulation, event: LegendEvent, agent: Agent): Memory | undefined {
@@ -10463,7 +12548,8 @@ function createMemoryForEvent(simulation: CivilizationSimulation, event: LegendE
 
     const id = simulation.memories.length;
     const subjects = uniqueLegendRefs(event.entityRefs.filter(ref => ref.kind !== "memory"), 14);
-    const description = `${agent.name} remembered ${event.headline} with ${emotion} in year ${event.year}.`;
+    const headline = legendEventHeadline(event);
+    const description = `${agent.name} remembered ${headline} with ${emotion} in year ${event.year}.`;
     const memory: Memory = {
         id,
         name: memoryName(emotion, event),
@@ -10615,6 +12701,23 @@ function shouldStoreRuntimeEventIdLink(ref: LegendEntityRef, event: LegendEvent)
     if (ref.kind === "event" || exportIndexedRuntimeOnlyKinds.has(ref.kind)) return false;
     if (ref.kind === "person") return shouldStoreAgentRuntimeEventId(event.type);
     if (ref.kind === "natural-feature") return true;
+    if (ref.kind === "god" || ref.kind === "commandment" || ref.kind === "destiny" || ref.kind === "miracle") {
+        return event.type === "god-named"
+            || event.type === "commandment-given"
+            || event.type === "destiny-declared"
+            || event.type === "destiny-fulfilled"
+            || event.type === "destiny-broken"
+            || event.type === "miracle-witnessed"
+            || event.type === "myth-founded"
+            || event.type === "doctrine-established"
+            || event.type === "magic-role-appointed"
+            || event.type === "prophecy-spoken"
+            || event.type === "prophecy-interpreted"
+            || event.type === "prophecy-fulfilled"
+            || event.type === "prophecy-failed"
+            || event.type === "civilization-goal-formed"
+            || event.type === "sacred-site-founded";
+    }
     if (ref.kind === "myth" || ref.kind === "doctrine" || ref.kind === "magic-role" || ref.kind === "prophecy") {
         return event.type === "myth-founded"
             || event.type === "doctrine-established"
@@ -10711,6 +12814,10 @@ function pushRuntimeEventIdForRef(simulation: CivilizationSimulation, ref: Legen
     else if (ref.kind === "relationship") pushRuntimeEventId(simulation.socialBonds[ref.id]?.eventIds, eventId, ref.kind);
     else if (ref.kind === "union") pushRuntimeEventId(simulation.unions[ref.id]?.eventIds, eventId, ref.kind);
     else if (ref.kind === "belief") pushRuntimeEventId(simulation.beliefs[ref.id]?.eventIds, eventId, ref.kind);
+    else if (ref.kind === "god") pushRuntimeEventId(simulation.gods[ref.id]?.eventIds, eventId, ref.kind);
+    else if (ref.kind === "commandment") pushRuntimeEventId(simulation.commandments[ref.id]?.eventIds, eventId, ref.kind);
+    else if (ref.kind === "destiny") pushRuntimeEventId(simulation.destinies[ref.id]?.eventIds, eventId, ref.kind);
+    else if (ref.kind === "miracle") pushRuntimeEventId(simulation.miracles[ref.id]?.eventIds, eventId, ref.kind);
     else if (ref.kind === "myth") pushRuntimeEventId(simulation.myths[ref.id]?.eventIds, eventId, ref.kind);
     else if (ref.kind === "doctrine") pushRuntimeEventId(simulation.doctrines[ref.id]?.eventIds, eventId, ref.kind);
     else if (ref.kind === "magic-role") pushRuntimeEventId(simulation.magicRoles[ref.id]?.eventIds, eventId, ref.kind);
@@ -10862,11 +12969,15 @@ function refreshPersonAllegiance(simulation: CivilizationSimulation, allegiance:
         : `from year ${allegiance.startedYear} to year ${allegiance.endedYear ?? simulation.year}`;
     const start = allegiance.startReason === "captured"
         ? `${personName} came under ${civilizationName}${previousCivilization ? ` from ${previousCivilization.name}` : ""} when ${placeName} was captured`
-        : allegiance.startReason === "settled"
-            ? `${personName} entered the records as one of ${civilizationName}`
-            : `${personName} was born into ${civilizationName}`;
+        : allegiance.startReason === "seceded"
+            ? `${personName} came under ${civilizationName}${previousCivilization ? ` from ${previousCivilization.name}` : ""} when ${placeName} seceded`
+            : allegiance.startReason === "restored"
+                ? `${personName} came under restored ${civilizationName}${previousCivilization ? ` after ${previousCivilization.name} fell` : ""}`
+                : allegiance.startReason === "settled"
+                    ? `${personName} entered the records as one of ${civilizationName}`
+                    : `${personName} was born into ${civilizationName}`;
     const end = allegiance.status === "ended"
-        ? ` It ended when ${allegiance.endReason === "died" ? `${personName} died` : `${personName}'s home was captured`}.`
+        ? ` It ended when ${allegiance.endReason === "died" ? `${personName} died` : allegiance.endReason === "seceded" ? `${personName}'s home seceded` : allegiance.endReason === "restored" ? `${personName}'s home was restored under a successor` : `${personName}'s home was captured`}.`
         : "";
     allegiance.subjectRefs = personAllegianceSubjectRefs(simulation, allegiance);
     allegiance.description = `${personName} owed allegiance to ${civilizationName} in ${placeName} ${span}. ${start}.${end}`;
@@ -10909,7 +13020,7 @@ function startPersonAllegiance(
 ): PersonAllegiance {
     const active = activePersonAllegianceForAgent(simulation, agent);
     if (active?.civilizationId === civilizationId) return active;
-    if (active) closePersonAllegiance(simulation, active, context.startEventId, "captured", context.includeEventRef ?? true);
+    if (active) closePersonAllegiance(simulation, active, context.startEventId, startReason === "seceded" || startReason === "restored" ? startReason : "captured", context.includeEventRef ?? true);
 
     const civilization = simulation.civilizations[civilizationId];
     const id = simulation.personAllegiances.length;
@@ -11354,6 +13465,40 @@ function countAgentEventsOfTypes(events: LegendEvent[], types: LegendEventType[]
     return count;
 }
 
+type AgentEventSummary = {
+    counts: Map<LegendEventType, number>;
+    latestByType: Map<LegendEventType, {event: LegendEvent; index: number}>;
+};
+
+function summarizeAgentLegendEvents(simulation: CivilizationSimulation, agent: Agent): AgentEventSummary {
+    const counts = new Map<LegendEventType, number>();
+    const latestByType = new Map<LegendEventType, {event: LegendEvent; index: number}>();
+    let index = 0;
+    for (let eventId of agent.eventIds) {
+        const event = simulation.legendEvents[eventId];
+        if (!event) continue;
+        counts.set(event.type, (counts.get(event.type) ?? 0) + 1);
+        latestByType.set(event.type, {event, index});
+        index++;
+    }
+    return {counts, latestByType};
+}
+
+function countAgentSummaryEventsOfTypes(summary: AgentEventSummary, types: LegendEventType[]): number {
+    let count = 0;
+    for (let type of types) count += summary.counts.get(type) ?? 0;
+    return count;
+}
+
+function latestAgentSummaryEventOfTypes(summary: AgentEventSummary, types: LegendEventType[]): LegendEvent | undefined {
+    let latest: {event: LegendEvent; index: number} | undefined;
+    for (let type of types) {
+        const candidate = summary.latestByType.get(type);
+        if (candidate && (!latest || candidate.index > latest.index)) latest = candidate;
+    }
+    return latest?.event;
+}
+
 function cloneAgentEpithets(agent: Agent): AgentEpithet[] {
     return agent.epithets.map(epithet => ({...epithet}));
 }
@@ -11396,7 +13541,8 @@ function recordReputationMilestone(
     const name = kind === "epithet-earned" && epithet
         ? `${agent.name} became known as ${epithet.epithet}`
         : `${agent.name} became ${label}`;
-    const reason = options.reason ?? sourceEvent.headline;
+    const sourceHeadline = legendEventHeadline(sourceEvent);
+    const reason = options.reason ?? sourceHeadline;
     const recordRef: LegendEntityRef = {kind: "reputation-milestone", id, name};
     const subjectRefs = internLegendRefs(simulation, uniqueLegendRefs([
         recordRef,
@@ -11425,7 +13571,7 @@ function recordReputationMilestone(
         reputation,
         reason,
         subjectRefs,
-        description: `${agent.name}'s reputation shifted from ${previousReputation} to ${reputation} after ${sourceEvent.headline} ${reason}`,
+        description: `${agent.name}'s reputation shifted from ${previousReputation} to ${reputation} after ${sourceHeadline} ${reason}`,
         eventIds: [sourceEventId],
     };
     simulation.reputationMilestones.push(milestone);
@@ -11463,7 +13609,7 @@ function awardAgentEpithet(simulation: CivilizationSimulation, agent: Agent, can
         sourceEventId: candidate.sourceEventId,
         subjectRefs: [],
         description: sourceEvent
-            ? `${agent.name} earned the name ${candidate.name} ${candidate.reason}; chroniclers tied it to ${sourceEvent.headline}.`
+            ? `${agent.name} earned the name ${candidate.name} ${candidate.reason}; chroniclers tied it to ${legendEventHeadline(sourceEvent)}.`
             : `${agent.name} earned the name ${candidate.name} ${candidate.reason}.`,
         eventIds: [],
     };
@@ -11507,26 +13653,26 @@ function awardAgentEpithet(simulation: CivilizationSimulation, agent: Agent, can
 function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent) {
     if (!agent.alive || agent.age < 16 || simulation.year <= 0 || agent.epithets.length >= 3) return;
 
-    const events = agentLegendEvents(simulation, agent);
+    const eventSummary = summarizeAgentLegendEvents(simulation, agent);
     const candidates: AgentEpithetCandidate[] = [];
     const hasEpithet = (name: string) => agent.epithets.some(epithet => epithet.name === name);
     const pushCandidate = (candidate: AgentEpithetCandidate) => {
         if (!hasEpithet(candidate.name)) candidates.push(candidate);
     };
 
-    const lawEvents = countAgentEventsOfTypes(events, ["law-enacted"]);
-    const chronicleEvents = countAgentEventsOfTypes(events, ["chronicle-written"]);
-    const writtenWorkEvents = countAgentEventsOfTypes(events, ["written-work-authored"]);
-    const artifactEvents = countAgentEventsOfTypes(events, ["artifact-created"]);
-    const journeyEvents = countAgentEventsOfTypes(events, ["journey-made"]);
-    const battleEvents = countAgentEventsOfTypes(events, ["battle-fought", "battle-casualty"]);
-    const copingEvents = countAgentEventsOfTypes(events, ["coping-action"]);
-    const crisisEvents = countAgentEventsOfTypes(events, ["stress-crisis"]);
-    const ambitionEvents = countAgentEventsOfTypes(events, ["ambition-fulfilled"]);
-    const apprenticeshipEvents = countAgentEventsOfTypes(events, ["apprenticeship-completed"]);
-    const structureEvents = countAgentEventsOfTypes(events, ["structure-built"]);
-    const organizationEvents = countAgentEventsOfTypes(events, ["organization-founded", "organization-leader-appointed"]);
-    const caseEvents = countAgentEventsOfTypes(events, ["trial-held", "verdict-reached", "punishment"]);
+    const lawEvents = countAgentSummaryEventsOfTypes(eventSummary, ["law-enacted"]);
+    const chronicleEvents = countAgentSummaryEventsOfTypes(eventSummary, ["chronicle-written"]);
+    const writtenWorkEvents = countAgentSummaryEventsOfTypes(eventSummary, ["written-work-authored"]);
+    const artifactEvents = countAgentSummaryEventsOfTypes(eventSummary, ["artifact-created"]);
+    const journeyEvents = countAgentSummaryEventsOfTypes(eventSummary, ["journey-made"]);
+    const battleEvents = countAgentSummaryEventsOfTypes(eventSummary, ["battle-fought", "battle-casualty"]);
+    const copingEvents = countAgentSummaryEventsOfTypes(eventSummary, ["coping-action"]);
+    const crisisEvents = countAgentSummaryEventsOfTypes(eventSummary, ["stress-crisis"]);
+    const ambitionEvents = countAgentSummaryEventsOfTypes(eventSummary, ["ambition-fulfilled"]);
+    const apprenticeshipEvents = countAgentSummaryEventsOfTypes(eventSummary, ["apprenticeship-completed"]);
+    const structureEvents = countAgentSummaryEventsOfTypes(eventSummary, ["structure-built"]);
+    const organizationEvents = countAgentSummaryEventsOfTypes(eventSummary, ["organization-founded", "organization-leader-appointed"]);
+    const caseEvents = countAgentSummaryEventsOfTypes(eventSummary, ["trial-held", "verdict-reached", "punishment"]);
 
     const strongHardMemories = agent.memoryIds
         .map(id => simulation.memories[id])
@@ -11536,7 +13682,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         .filter(injury => injury !== undefined && injury.status === "healed" && injury.severity !== "minor");
     const lastHealedSeriousInjury = healedSeriousInjuries[healedSeriousInjuries.length - 1];
 
-    const lawSource = latestAgentEventOfTypes(events, ["law-enacted"]);
+    const lawSource = latestAgentSummaryEventOfTypes(eventSummary, ["law-enacted"]);
     if (lawEvents >= 2 || lawEvents >= 1 && agent.reputation >= 0.34) {
         pushCandidate({
             name: "the Lawgiver",
@@ -11547,7 +13693,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const chronicleSource = latestAgentEventOfTypes(events, ["chronicle-written"]);
+    const chronicleSource = latestAgentSummaryEventOfTypes(eventSummary, ["chronicle-written"]);
     if (chronicleEvents >= 3 || chronicleEvents >= 2 && agent.values.includes("knowledge")) {
         pushCandidate({
             name: "the Chronicler",
@@ -11558,7 +13704,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const writtenWorkSource = latestAgentEventOfTypes(events, ["written-work-authored"]);
+    const writtenWorkSource = latestAgentSummaryEventOfTypes(eventSummary, ["written-work-authored"]);
     if (writtenWorkEvents >= 2 || writtenWorkEvents >= 1 && agent.values.includes("knowledge") && agent.reputation >= 0.42) {
         pushCandidate({
             name: "the Author",
@@ -11569,7 +13715,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const artifactSource = latestAgentEventOfTypes(events, ["artifact-created"]);
+    const artifactSource = latestAgentSummaryEventOfTypes(eventSummary, ["artifact-created"]);
     if (artifactEvents >= 1 && (agent.skill >= 0.68 || agent.reputation >= 0.28 || agent.profession === "artisan")) {
         pushCandidate({
             name: "the Maker",
@@ -11580,7 +13726,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const journeySource = latestAgentEventOfTypes(events, ["journey-made"]);
+    const journeySource = latestAgentSummaryEventOfTypes(eventSummary, ["journey-made"]);
     if (agent.journeyIds.length >= 5 || journeyEvents >= 5) {
         pushCandidate({
             name: "the Roadfarer",
@@ -11591,7 +13737,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const battleSource = latestAgentEventOfTypes(events, ["battle-fought", "battle-casualty"]);
+    const battleSource = latestAgentSummaryEventOfTypes(eventSummary, ["battle-fought", "battle-casualty"]);
     if (agent.battleIds.length >= 3 || battleEvents >= 4) {
         pushCandidate({
             name: "the Battle-Tested",
@@ -11602,7 +13748,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const injurySource = latestAgentEventOfTypes(events, ["injury-healed", "injury-sustained"]);
+    const injurySource = latestAgentSummaryEventOfTypes(eventSummary, ["injury-healed", "injury-sustained"]);
     if (healedSeriousInjuries.length >= 1 && (agent.battleIds.length > 0 || strongHardMemories.length >= 2 || agent.age >= 45)) {
         pushCandidate({
             name: "the Survivor",
@@ -11613,7 +13759,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const crisisSource = latestAgentEventOfTypes(events, ["stress-crisis"]);
+    const crisisSource = latestAgentSummaryEventOfTypes(eventSummary, ["stress-crisis"]);
     if (agent.mentalState === "haunted" && crisisEvents >= 1 && strongHardMemories.length >= 5) {
         pushCandidate({
             name: "the Haunted",
@@ -11624,7 +13770,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const copingSource = latestAgentEventOfTypes(events, ["coping-action"]);
+    const copingSource = latestAgentSummaryEventOfTypes(eventSummary, ["coping-action"]);
     if (copingEvents >= 3 && (crisisEvents > 0 || strongHardMemories.length >= 3) && agent.stress <= 0.46) {
         pushCandidate({
             name: "the Steady",
@@ -11635,7 +13781,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const ambitionSource = latestAgentEventOfTypes(events, ["ambition-fulfilled"]);
+    const ambitionSource = latestAgentSummaryEventOfTypes(eventSummary, ["ambition-fulfilled"]);
     if (ambitionEvents >= 2) {
         pushCandidate({
             name: "the Oathkeeper",
@@ -11646,7 +13792,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const apprenticeshipSource = latestAgentEventOfTypes(events, ["apprenticeship-completed"]);
+    const apprenticeshipSource = latestAgentSummaryEventOfTypes(eventSummary, ["apprenticeship-completed"]);
     if (apprenticeshipEvents >= 2 || artifactEvents >= 1 && agent.skill >= 0.84 && agent.reputation >= 0.25) {
         pushCandidate({
             name: "the Master",
@@ -11657,7 +13803,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const judgeSource = latestAgentEventOfTypes(events, ["trial-held", "verdict-reached", "punishment"]);
+    const judgeSource = latestAgentSummaryEventOfTypes(eventSummary, ["trial-held", "verdict-reached", "punishment"]);
     if (caseEvents >= 4 && (agent.officeIds.length > 0 || agent.specialties.includes("law"))) {
         pushCandidate({
             name: "the Arbiter",
@@ -11668,7 +13814,7 @@ function maybeAwardAgentEpithet(simulation: CivilizationSimulation, agent: Agent
         });
     }
 
-    const founderSource = latestAgentEventOfTypes(events, ["structure-built", "organization-founded", "organization-leader-appointed"]);
+    const founderSource = latestAgentSummaryEventOfTypes(eventSummary, ["structure-built", "organization-founded", "organization-leader-appointed"]);
     if (structureEvents + organizationEvents >= 2) {
         pushCandidate({
             name: "the Founder",
@@ -11824,8 +13970,8 @@ function createRumor(simulation: CivilizationSimulation, settlement: Settlement,
         spreadAgentIds: teller ? [teller.id] : [],
         subjectRefs: uniqueLegendRefs([...sourceSubjects, eventRef(simulation, sourceEvent.id)], 14),
         description: teller
-            ? `${teller.name} first carried the ${kind} rumor in ${settlement.name}: ${sourceEvent.headline}`
-            : `People in ${settlement.name} first carried the ${kind} rumor: ${sourceEvent.headline}`,
+            ? `${teller.name} first carried the ${kind} rumor in ${settlement.name}: ${legendEventHeadline(sourceEvent)}`
+            : `People in ${settlement.name} first carried the ${kind} rumor: ${legendEventHeadline(sourceEvent)}`,
         eventIds: [],
     };
     simulation.rumors.push(rumor);
@@ -12092,7 +14238,7 @@ function createSecret(simulation: CivilizationSimulation, settlement: Settlement
         severity,
         keeperAgentIds: keepers.map(agent => agent.id),
         subjectRefs: uniqueLegendRefs([...subjectRefs, eventRef(simulation, sourceEvent.id)], 14),
-        description: `${keepers.map(agent => agent.name).join(", ")} kept quiet about ${sourceEvent.headline}`,
+        description: `${keepers.map(agent => agent.name).join(", ")} kept quiet about ${legendEventHeadline(sourceEvent)}`,
         eventIds: [],
     };
     simulation.secrets.push(secret);
@@ -12343,21 +14489,21 @@ function schemeLeaderScore(simulation: CivilizationSimulation, settlement: Settl
 function chooseSchemeConspirators(simulation: CivilizationSimulation, settlement: Settlement, leader: Agent, targetAgentId: number | undefined, agents: Agent[]): Agent[] {
     return agents
         .filter(agent => agent.alive && agent.age >= 15 && agent.id !== leader.id && agent.id !== targetAgentId && activeSchemesForAgent(simulation, agent).length < 2)
-        .sort((a, b) => {
-            const score = (agent: Agent) => {
-                const bond = bestConversationRelationship(simulation, leader, agent);
-                const kin = leader.householdId !== undefined && leader.householdId === agent.householdId
-                    || leader.lineageId !== undefined && leader.lineageId === agent.lineageId;
-                return (bond ? bond.trust * 0.22 + bond.familiarity * 0.16 - bond.tension * 0.1 : 0)
-                    + (kin ? 0.22 : 0)
-                    + (agent.morale < 0.45 ? 0.12 : 0)
-                    + (agent.values.includes("power") || agent.values.includes("wealth") || agent.values.includes("family") ? 0.14 : 0)
-                    + (agent.traits.includes("cautious") || agent.traits.includes("ambitious") ? 0.12 : 0)
-                    + hashFloat(simulation.options.seed, simulation.year, leader.id, agent.id + 2227) * 0.14;
-            };
-            return score(b) - score(a) || a.id - b.id;
+        .map(agent => {
+            const bond = bestConversationRelationship(simulation, leader, agent);
+            const kin = leader.householdId !== undefined && leader.householdId === agent.householdId
+                || leader.lineageId !== undefined && leader.lineageId === agent.lineageId;
+            const score = (bond ? bond.trust * 0.22 + bond.familiarity * 0.16 - bond.tension * 0.1 : 0)
+                + (kin ? 0.22 : 0)
+                + (agent.morale < 0.45 ? 0.12 : 0)
+                + (agent.values.includes("power") || agent.values.includes("wealth") || agent.values.includes("family") ? 0.14 : 0)
+                + (agent.traits.includes("cautious") || agent.traits.includes("ambitious") ? 0.12 : 0)
+                + hashFloat(simulation.options.seed, simulation.year, leader.id, agent.id + 2227) * 0.14;
+            return {agent, score};
         })
+        .sort((a, b) => b.score - a.score || a.agent.id - b.agent.id)
         .slice(0, 3)
+        .map(entry => entry.agent)
         .filter((agent, index) => index === 0 || hashFloat(simulation.options.seed, simulation.year, leader.id, agent.id + 2231) < 0.68);
 }
 
@@ -12376,18 +14522,17 @@ function localSchemeOffices(simulation: CivilizationSimulation, settlement: Sett
 function schemeRivalTarget(simulation: CivilizationSimulation, leader: Agent, agents: Agent[]): Agent | undefined {
     const candidates = agents
         .filter(agent => agent.alive && agent.age >= 15 && agent.id !== leader.id)
-        .sort((a, b) => {
-            const score = (agent: Agent) => {
-                const bond = bestConversationRelationship(simulation, leader, agent);
-                return (bond?.kind === "rivalry" ? 0.42 : 0)
-                    + (bond?.tension ?? 0) * 0.34
-                    + (agent.wealth > leader.wealth ? 0.1 : 0)
-                    + (agent.reputation > leader.reputation ? 0.12 : 0)
-                    + hashFloat(simulation.options.seed, simulation.year, leader.id, agent.id + 2237) * 0.16;
-            };
-            return score(b) - score(a) || a.id - b.id;
+        .map(agent => {
+            const bond = bestConversationRelationship(simulation, leader, agent);
+            const score = (bond?.kind === "rivalry" ? 0.42 : 0)
+                + (bond?.tension ?? 0) * 0.34
+                + (agent.wealth > leader.wealth ? 0.1 : 0)
+                + (agent.reputation > leader.reputation ? 0.12 : 0)
+                + hashFloat(simulation.options.seed, simulation.year, leader.id, agent.id + 2237) * 0.16;
+            return {agent, score};
         });
-    return candidates[0];
+    candidates.sort((a, b) => b.score - a.score || a.agent.id - b.agent.id);
+    return candidates[0]?.agent;
 }
 
 function activeFeudForLeader(simulation: CivilizationSimulation, leader: Agent): Feud | undefined {
@@ -12668,7 +14813,9 @@ function maybeCreateSettlementScheme(simulation: CivilizationSimulation, settlem
 
     const leaders = adults
         .filter(agent => activeSchemesForAgent(simulation, agent).length === 0)
-        .sort((a, b) => schemeLeaderScore(simulation, settlement, b) - schemeLeaderScore(simulation, settlement, a) || a.id - b.id);
+        .map(agent => ({agent, score: schemeLeaderScore(simulation, settlement, agent)}))
+        .sort((a, b) => b.score - a.score || a.agent.id - b.agent.id)
+        .map(entry => entry.agent);
     for (let leader of leaders.slice(0, 8)) {
         const draft = buildSchemeDraft(simulation, settlement, leader, adults);
         if (!draft) continue;
@@ -13030,7 +15177,7 @@ function createFeud(simulation: CivilizationSimulation, settlement: Settlement, 
         householdIds,
         lineageIds,
         subjectRefs,
-        description: `${sides.sideA.map(agent => agent.name).join(", ")} entered a ${kind} feud with ${sides.sideB.map(agent => agent.name).join(", ")} after ${sourceEvent.headline}`,
+        description: `${sides.sideA.map(agent => agent.name).join(", ")} entered a ${kind} feud with ${sides.sideB.map(agent => agent.name).join(", ")} after ${legendEventHeadline(sourceEvent)}`,
         eventIds: [],
     };
     simulation.feuds.push(feud);
@@ -13341,7 +15488,7 @@ function createOath(simulation: CivilizationSimulation, settlement: Settlement, 
         sourceEventId: sourceEvent.id,
         strength,
         subjectRefs,
-        description: `${swearer.name} swore a ${kind} oath after ${sourceEvent.headline}`,
+        description: `${swearer.name} swore a ${kind} oath after ${legendEventHeadline(sourceEvent)}`,
         eventIds: [],
     };
     simulation.oaths.push(oath);
@@ -13732,7 +15879,7 @@ function createBelonging(
         value: Math.round((1.2 + owner.wealth * 0.018 + owner.skill * 2.4 + hashFloat(simulation.options.seed, id, owner.id, 2451) * 4.2) * 10) / 10,
         sentiment: Math.round(clamp(0.18 + owner.reputation * 0.18 + sourceEvent.entityRefs.length * 0.012 + hashFloat(simulation.options.seed, id, owner.id, 2453) * 0.55, 0, 1) * 1000) / 1000,
         subjectRefs,
-        description: `${owner.name} acquired a ${material} ${belongingKindLabel(kind)} after ${sourceEvent.headline}`,
+        description: `${owner.name} acquired a ${material} ${belongingKindLabel(kind)} after ${legendEventHeadline(sourceEvent)}`,
         eventIds: [],
     };
     simulation.belongings.push(belonging);
@@ -13872,7 +16019,7 @@ function createPossessionAttachment(
         memoryIds: [],
         intensity,
         subjectRefs,
-        description: `${agent.name} formed ${possessionAttachmentKindLabel(kind)} around ${targetName} after ${sourceEvent.headline}`,
+        description: `${agent.name} formed ${possessionAttachmentKindLabel(kind)} around ${targetName} after ${legendEventHeadline(sourceEvent)}`,
         eventIds: [],
     };
     simulation.possessionAttachments.push(attachment);
@@ -15665,7 +17812,7 @@ function createArtifactConditionRecord(
         civilizationRef(simulation, civilizationId),
     ], 18);
     const description = options.description
-        ?? `${artifact.name} was recorded as ${condition} after ${sourceEvent?.headline ?? "an unknown event"}.`;
+        ?? `${artifact.name} was recorded as ${condition} after ${legendEventHeadlineOr(sourceEvent, "an unknown event")}.`;
     const record: ArtifactConditionRecord = {
         id,
         name,
@@ -16083,6 +18230,8 @@ function maybeCreateSacredSitePilgrimage(
 }
 
 function chooseBeliefDomain(world: GeneratedWorldMap, simulation: CivilizationSimulation, settlement: Settlement): BeliefDomain {
+    const civilization = simulation.civilizations[settlement.civilizationId];
+    if (settlement.type === "capital" && civilization?.beliefIds.length === 0) return civilization.creationDomain;
     const elevation = world.map.elevation_t[settlement.triangle];
     const moisture = clamp(world.map.moisture_t[settlement.triangle] ?? 0.5, 0, 1.5);
     const roll = hashFloat(simulation.options.seed, settlement.id, simulation.year, 953);
@@ -16329,8 +18478,36 @@ function addBeliefIdToCivilization(civilization: Civilization | undefined, belie
     if (civilization && !civilization.beliefIds.includes(beliefId)) civilization.beliefIds.push(beliefId);
 }
 
+function addGodIdToCivilization(civilization: Civilization | undefined, godId: number) {
+    if (civilization && !civilization.godIds.includes(godId)) civilization.godIds.push(godId);
+}
+
+function addCommandmentIdToCivilization(civilization: Civilization | undefined, commandmentId: number) {
+    if (civilization && !civilization.commandmentIds.includes(commandmentId)) civilization.commandmentIds.push(commandmentId);
+}
+
+function addDestinyIdToCivilization(civilization: Civilization | undefined, destinyId: number) {
+    if (civilization && !civilization.destinyIds.includes(destinyId)) civilization.destinyIds.push(destinyId);
+}
+
+function addMiracleIdToCivilization(civilization: Civilization | undefined, miracleId: number) {
+    if (civilization && !civilization.miracleIds.includes(miracleId)) civilization.miracleIds.push(miracleId);
+}
+
 function addCivilizationGoalIdToBelief(belief: Belief | undefined, goalId: number) {
     if (belief && !belief.civilizationGoalIds.includes(goalId)) belief.civilizationGoalIds.push(goalId);
+}
+
+function addCivilizationGoalIdToGod(god: God | undefined, goalId: number) {
+    if (god && !god.civilizationGoalIds.includes(goalId)) god.civilizationGoalIds.push(goalId);
+}
+
+function addCivilizationGoalIdToCommandment(commandment: Commandment | undefined, goalId: number) {
+    if (commandment && !commandment.civilizationGoalIds.includes(goalId)) commandment.civilizationGoalIds.push(goalId);
+}
+
+function addCivilizationGoalIdToDestiny(destiny: Destiny | undefined, goalId: number) {
+    if (destiny && destiny.civilizationGoalId === undefined) destiny.civilizationGoalId = goalId;
 }
 
 function addCivilizationGoalIdToDoctrine(doctrine: Doctrine | undefined, goalId: number) {
@@ -16349,11 +18526,365 @@ function addMagicRoleIdToAgent(agent: Agent | undefined, magicRoleId: number) {
     if (agent && !agent.magicRoleIds.includes(magicRoleId)) agent.magicRoleIds.push(magicRoleId);
 }
 
+function godForBeliefControl(simulation: CivilizationSimulation, belief: Belief, sphere?: GodControlSphere): God | undefined {
+    const gods = belief.godIds.map(id => simulation.gods[id]).filter((god): god is God => !!god);
+    if (sphere) return gods.find(god => god.controlSpheres.includes(sphere)) ?? gods[0];
+    return belief.patronGodId === undefined ? gods[0] : simulation.gods[belief.patronGodId] ?? gods[0];
+}
+
+function commandmentKindForDoctrine(kind: DoctrineKind, domain: BeliefDomain): CommandmentKind {
+    if (kind === "ancestor-duty") return "law";
+    if (kind === "craft-perfection") return "craft";
+    if (kind === "harvest-stewardship") return "stewardship";
+    if (kind === "river-pilgrimage") return "pilgrimage";
+    if (kind === "mountain-warding") return "taboo";
+    if (kind === "star-study") return "law";
+    if (kind === "storm-renewal") return "sacrifice";
+    return domain === "trade" || domain === "rivers" ? "hospitality" : "law";
+}
+
+function destinyKindForProphecy(kind: ProphecyKind): DestinyKind {
+    if (kind === "fall") return "doomed-city";
+    if (kind === "rise" || kind === "heir") return "chosen-heir";
+    if (kind === "journey") return "sacred-journey";
+    if (kind === "war" || kind === "storm") return "war-sign";
+    if (kind === "artifact") return "relic-claim";
+    return "founding-line";
+}
+
+function miracleKindForBelief(seed: number, index: number, belief: Belief, prophecy?: Prophecy): MiracleKind {
+    if (prophecy?.kind === "harvest") return "harvest";
+    if (prophecy?.kind === "war") return "victory";
+    if (prophecy?.kind === "storm") return "storm";
+    if (prophecy?.kind === "fall") return "protection";
+    if (belief.domain === "harvest") return "harvest";
+    if (belief.domain === "rivers") return "healing";
+    if (belief.domain === "storms") return hashFloat(seed, index, 939, 1) < 0.5 ? "storm" : "revelation";
+    if (belief.domain === "stars") return "omen";
+    const options = MIRACLE_KINDS;
+    return options[Math.floor(hashFloat(seed, index, 939, 2) * options.length)] ?? "omen";
+}
+
+function createGod(
+    simulation: CivilizationSimulation,
+    belief: Belief,
+    settlement: Settlement,
+    index: number,
+    count: number,
+): God {
+    const id = simulation.gods.length;
+    const controlSpheres = godControlSpheresForBelief(simulation.options.seed, belief, index, count);
+    const primarySphere = controlSpheres[0] ?? "religion";
+    const kind = chooseGodKind(simulation.options.seed, id, belief.domain, primarySphere);
+    const temperament = chooseGodTemperament(simulation.options.seed, id, kind, belief.domain);
+    const symbols = GOD_SYMBOLS[belief.domain];
+    const demands = GOD_DEMANDS[belief.domain];
+    const symbol = symbols[Math.floor(hashFloat(simulation.options.seed, id, 936, 1) * symbols.length)] ?? symbols[0];
+    const demand = demands[Math.floor(hashFloat(simulation.options.seed, id, 936, 2) * demands.length)] ?? demands[0];
+    const omen = `${symbol} appearing without hands`;
+    const miracleBias = godMiracleBias(simulation.options.seed, id, belief.domain, kind);
+    const commandmentStyle = godCommandmentStyle(simulation.options.seed, id, belief.domain, kind);
+    const god: God = {
+        id,
+        name: makeGodName(simulation.options.seed, id, belief.domain),
+        kind,
+        domain: belief.domain,
+        temperament,
+        controlSpheres,
+        civilizationId: belief.civilizationId,
+        originSettlementId: settlement.id,
+        beliefId: belief.id,
+        foundedYear: simulation.year,
+        symbol,
+        demand,
+        omen,
+        creationClaim: godCreationClaim(belief.domain, settlement, symbol),
+        religiousMandate: godReligiousMandate(belief.domain, demand),
+        prophecyMethod: godProphecyMethod(belief.domain, omen),
+        destinyPressure: godDestinyPressure(kind, temperament),
+        miracleBias,
+        commandmentStyle,
+        influence: Math.round(clamp(0.48 + controlSpheres.length * 0.07 + hashFloat(simulation.options.seed, id, 936, 3) * 0.3, 0, 1) * 1000) / 1000,
+        favor: Math.round(clamp(0.42 + hashFloat(simulation.options.seed, id, 936, 4) * 0.28, 0, 1) * 1000) / 1000,
+        mythIds: [],
+        doctrineIds: [],
+        magicRoleIds: [],
+        prophecyIds: [],
+        civilizationGoalIds: [],
+        sacredSiteIds: [],
+        commandmentIds: [],
+        destinyIds: [],
+        miracleIds: [],
+        subjectRefs: [],
+        description: "",
+        eventIds: [],
+    };
+    simulation.gods.push(god);
+    if (!belief.godIds.includes(id)) belief.godIds.push(id);
+    if (belief.patronGodId === undefined || controlSpheres.includes("creation")) belief.patronGodId = id;
+    const civilization = simulation.civilizations[belief.civilizationId];
+    addGodIdToCivilization(civilization, id);
+    if (civilization && controlSpheres.includes("creation") && civilization.creationGodId === undefined) civilization.creationGodId = id;
+    god.subjectRefs = uniqueLegendRefs([
+        godRef(simulation, id),
+        beliefRef(simulation, belief.id),
+        settlementRef(simulation, settlement.id),
+        civilizationRef(simulation, belief.civilizationId),
+    ], 10);
+    god.description = `${god.name} is a ${temperament} ${godKindLabel(kind)} of ${beliefDomainLabel(belief.domain)} for ${belief.name}. The god controls ${controlSpheres.join(", ")}, is marked by ${symbol}, and demands that followers ${demand}. Its creation claim says it ${god.creationClaim}; its religious mandate says ${god.religiousMandate}. Prophecies come ${god.prophecyMethod}, destiny works because ${god.destinyPressure}, miracles lean toward ${miracleKindLabel(miracleBias)}, and commandments lean toward ${commandmentKindLabel(commandmentStyle)}.`;
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "god-named",
+        headline: `${god.name} was named among the gods.`,
+        description: god.description,
+        civilizationId: god.civilizationId,
+        settlementId: god.originSettlementId,
+        beliefId: god.beliefId,
+        godId: god.id,
+        entityRefs: god.subjectRefs,
+    });
+    if (!god.eventIds.includes(eventId)) god.eventIds.push(eventId);
+    return god;
+}
+
+function createCommandment(
+    simulation: CivilizationSimulation,
+    belief: Belief,
+    settlement: Settlement,
+    doctrine?: Doctrine,
+    god: God | undefined = godForBeliefControl(simulation, belief, "commandments"),
+): Commandment {
+    const id = simulation.commandments.length;
+    const kind = doctrine
+        ? commandmentKindForDoctrine(doctrine.kind, belief.domain)
+        : god?.commandmentStyle ?? COMMANDMENT_KINDS[Math.floor(hashFloat(simulation.options.seed, id, 937, 1) * COMMANDMENT_KINDS.length)] ?? "law";
+    const commandment: Commandment = {
+        id,
+        name: makeCommandmentName(simulation.options.seed, id, kind, god),
+        kind,
+        domain: belief.domain,
+        civilizationId: belief.civilizationId,
+        settlementId: settlement.id,
+        beliefId: belief.id,
+        godId: god?.id,
+        doctrineId: doctrine?.id,
+        givenYear: simulation.year,
+        demand: god?.demand ?? doctrine?.principle ?? "keep the rite before private ambition",
+        virtue: doctrine?.virtue ?? (god?.temperament === "stern" ? "discipline" : "devotion"),
+        taboo: doctrine?.taboo ?? "mocking a witnessed omen",
+        severity: Math.round(clamp(0.42 + (god?.influence ?? 0.5) * 0.32 + hashFloat(simulation.options.seed, id, 937, 2) * 0.22, 0, 1) * 1000) / 1000,
+        civilizationGoalIds: [],
+        subjectRefs: [],
+        description: "",
+        eventIds: [],
+    };
+    simulation.commandments.push(commandment);
+    if (!belief.commandmentIds.includes(id)) belief.commandmentIds.push(id);
+    if (god && !god.commandmentIds.includes(id)) god.commandmentIds.push(id);
+    if (doctrine && doctrine.commandmentId === undefined) doctrine.commandmentId = id;
+    addCommandmentIdToCivilization(simulation.civilizations[belief.civilizationId], id);
+    commandment.subjectRefs = uniqueLegendRefs([
+        commandmentRef(simulation, id),
+        beliefRef(simulation, belief.id),
+        ...(god ? [godRef(simulation, god.id)] : []),
+        ...(doctrine ? [doctrineRef(simulation, doctrine.id)] : []),
+        settlementRef(simulation, settlement.id),
+        civilizationRef(simulation, belief.civilizationId),
+    ], 14);
+    commandment.description = `${commandment.name} is a ${commandmentKindLabel(kind)} commandment of ${belief.name}${god ? ` given under ${god.name}` : ""}. It demands that followers ${commandment.demand}; its virtue is ${commandment.virtue}, and its taboo is ${commandment.taboo}${god ? `. This follows ${god.name}'s commandment style of ${commandmentKindLabel(god.commandmentStyle)}` : ""}.`;
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "commandment-given",
+        headline: `${commandment.name} was given.`,
+        description: commandment.description,
+        civilizationId: commandment.civilizationId,
+        settlementId: commandment.settlementId,
+        beliefId: commandment.beliefId,
+        godId: commandment.godId,
+        doctrineId: commandment.doctrineId,
+        commandmentId: commandment.id,
+        entityRefs: commandment.subjectRefs,
+    });
+    if (!commandment.eventIds.includes(eventId)) commandment.eventIds.push(eventId);
+    return commandment;
+}
+
+function createDestiny(
+    simulation: CivilizationSimulation,
+    belief: Belief,
+    settlement: Settlement,
+    options: {
+        god?: God;
+        prophecy?: Prophecy;
+        civilizationGoal?: CivilizationGoal;
+        targetSettlementId?: number;
+        targetArtifactId?: number;
+        targetAgentId?: number;
+        sourceEventId?: number;
+        kind?: DestinyKind;
+    } = {},
+): Destiny {
+    const id = simulation.destinies.length;
+    const god = options.god ?? godForBeliefControl(simulation, belief, "destiny");
+    const kind = options.kind ?? (options.prophecy ? destinyKindForProphecy(options.prophecy.kind) : DESTINY_KINDS[Math.floor(hashFloat(simulation.options.seed, id, 938, 1) * DESTINY_KINDS.length)] ?? "founding-line");
+    const destiny: Destiny = {
+        id,
+        name: makeDestinyName(simulation.options.seed, id, kind, settlement),
+        kind,
+        status: "active",
+        year: simulation.year,
+        civilizationId: belief.civilizationId,
+        settlementId: settlement.id,
+        beliefId: belief.id,
+        godId: god?.id,
+        prophecyId: options.prophecy?.id,
+        civilizationGoalId: options.civilizationGoal?.id,
+        targetSettlementId: options.targetSettlementId ?? options.prophecy?.targetSettlementId ?? options.civilizationGoal?.targetSettlementId ?? settlement.id,
+        targetArtifactId: options.targetArtifactId ?? options.prophecy?.targetArtifactId ?? options.civilizationGoal?.targetArtifactId,
+        targetAgentId: options.targetAgentId ?? options.prophecy?.targetAgentId,
+        sourceEventId: options.sourceEventId ?? options.prophecy?.sourceEventId,
+        pressure: Math.round(clamp(0.36 + (options.prophecy?.strength ?? 0.44) * 0.34 + (god?.influence ?? 0.4) * 0.18, 0, 1) * 1000) / 1000,
+        subjectRefs: [],
+        description: "",
+        eventIds: [],
+    };
+    simulation.destinies.push(destiny);
+    if (!belief.destinyIds.includes(id)) belief.destinyIds.push(id);
+    if (god && !god.destinyIds.includes(id)) god.destinyIds.push(id);
+    if (options.prophecy && options.prophecy.destinyId === undefined) options.prophecy.destinyId = id;
+    if (options.civilizationGoal && options.civilizationGoal.destinyId === undefined) options.civilizationGoal.destinyId = id;
+    addDestinyIdToCivilization(simulation.civilizations[belief.civilizationId], id);
+    destiny.subjectRefs = uniqueLegendRefs([
+        destinyRef(simulation, id),
+        beliefRef(simulation, belief.id),
+        ...(god ? [godRef(simulation, god.id)] : []),
+        ...(options.prophecy ? [prophecyRef(simulation, options.prophecy.id)] : []),
+        ...(options.civilizationGoal ? [civilizationGoalRef(simulation, options.civilizationGoal.id)] : []),
+        ...(destiny.targetAgentId === undefined ? [] : [personRef(simulation, destiny.targetAgentId)]),
+        ...(destiny.targetArtifactId === undefined ? [] : [artifactRef(simulation, destiny.targetArtifactId)]),
+        ...(destiny.targetSettlementId === undefined ? [] : [settlementRef(simulation, destiny.targetSettlementId)]),
+        settlementRef(simulation, settlement.id),
+        civilizationRef(simulation, belief.civilizationId),
+    ], 18);
+    const target = destiny.targetAgentId !== undefined
+        ? legendRefName(simulation, personRef(simulation, destiny.targetAgentId))
+        : destiny.targetArtifactId !== undefined
+            ? legendRefName(simulation, artifactRef(simulation, destiny.targetArtifactId))
+            : legendRefName(simulation, settlementRef(simulation, destiny.targetSettlementId ?? settlement.id));
+    destiny.description = `${destiny.name} is an active ${destinyKindLabel(kind)} destiny of ${belief.name}${god ? ` under ${god.name}` : ""}, pressing ${target} toward a foretold role${god ? ` because ${god.destinyPressure}` : ""}.`;
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "destiny-declared",
+        headline: `${destiny.name} was declared.`,
+        description: destiny.description,
+        civilizationId: destiny.civilizationId,
+        settlementId: destiny.settlementId,
+        beliefId: destiny.beliefId,
+        godId: destiny.godId,
+        prophecyId: destiny.prophecyId,
+        civilizationGoalId: destiny.civilizationGoalId,
+        destinyId: destiny.id,
+        artifactId: destiny.targetArtifactId,
+        sourceEventId: destiny.sourceEventId,
+        entityRefs: destiny.subjectRefs,
+    });
+    if (!destiny.eventIds.includes(eventId)) destiny.eventIds.push(eventId);
+    return destiny;
+}
+
+function createMiracle(
+    simulation: CivilizationSimulation,
+    belief: Belief,
+    settlement: Settlement,
+    options: {
+        god?: God;
+        prophecy?: Prophecy;
+        civilizationGoal?: CivilizationGoal;
+        sacredSite?: SacredSite;
+        targetAgent?: Agent;
+        kind?: MiracleKind;
+    } = {},
+): Miracle {
+    const id = simulation.miracles.length;
+    const god = options.god ?? godForBeliefControl(simulation, belief, "miracles");
+    const kind = options.kind ?? (options.prophecy ? miracleKindForBelief(simulation.options.seed, id, belief, options.prophecy) : god?.miracleBias ?? miracleKindForBelief(simulation.options.seed, id, belief, options.prophecy));
+    const strength = Math.round(clamp(0.34 + (god?.favor ?? 0.45) * 0.38 + hashFloat(simulation.options.seed, id, 940, 1) * 0.24, 0, 1) * 1000) / 1000;
+    if (kind === "harvest") settlement.prosperity = Math.round(clamp(settlement.prosperity + 0.012 + strength * 0.028, 0, 1) * 1000) / 1000;
+    if (kind === "protection" || kind === "victory" || kind === "healing") settlement.unrest = Math.round(clamp(settlement.unrest - 0.008 - strength * 0.018, 0, 1) * 1000) / 1000;
+    if (kind === "curse") settlement.unrest = Math.round(clamp(settlement.unrest + 0.012 + strength * 0.02, 0, 1) * 1000) / 1000;
+    if (options.targetAgent) {
+        options.targetAgent.morale = clamp(options.targetAgent.morale + 0.015 + strength * 0.03, 0, 1);
+        if (kind === "healing") options.targetAgent.health = clamp(options.targetAgent.health + 0.012 + strength * 0.025, 0, 1);
+        options.targetAgent.mentalState = mentalStateFor(options.targetAgent.stress, options.targetAgent.morale);
+    }
+    const effect = kind === "harvest"
+        ? `prosperity rose in ${settlement.name}`
+        : kind === "curse"
+            ? `unrest sharpened in ${settlement.name}`
+            : kind === "healing" && options.targetAgent
+                ? `${options.targetAgent.name} recovered strength`
+                : `${settlement.name} took heart from the sign`;
+    const miracle: Miracle = {
+        id,
+        name: makeMiracleName(simulation.options.seed, id, kind, settlement),
+        kind,
+        year: simulation.year,
+        civilizationId: belief.civilizationId,
+        settlementId: settlement.id,
+        beliefId: belief.id,
+        godId: god?.id,
+        prophecyId: options.prophecy?.id,
+        civilizationGoalId: options.civilizationGoal?.id,
+        sacredSiteId: options.sacredSite?.id,
+        targetAgentId: options.targetAgent?.id,
+        strength,
+        effect,
+        subjectRefs: [],
+        description: "",
+        eventIds: [],
+    };
+    simulation.miracles.push(miracle);
+    if (!belief.miracleIds.includes(id)) belief.miracleIds.push(id);
+    if (god && !god.miracleIds.includes(id)) god.miracleIds.push(id);
+    addMiracleIdToCivilization(simulation.civilizations[belief.civilizationId], id);
+    miracle.subjectRefs = uniqueLegendRefs([
+        miracleRef(simulation, id),
+        beliefRef(simulation, belief.id),
+        ...(god ? [godRef(simulation, god.id)] : []),
+        ...(options.prophecy ? [prophecyRef(simulation, options.prophecy.id)] : []),
+        ...(options.civilizationGoal ? [civilizationGoalRef(simulation, options.civilizationGoal.id)] : []),
+        ...(options.sacredSite ? [sacredSiteRef(simulation, options.sacredSite.id)] : []),
+        ...(options.targetAgent ? [personRef(simulation, options.targetAgent.id)] : []),
+        settlementRef(simulation, settlement.id),
+        civilizationRef(simulation, belief.civilizationId),
+    ], 18);
+    miracle.description = `${miracle.name} was a ${miracleKindLabel(kind)} miracle of ${belief.name}${god ? ` attributed to ${god.name}` : ""}; ${effect}${god ? `. ${god.name}'s usual miracle bias is ${miracleKindLabel(god.miracleBias)}` : ""}.`;
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "miracle-witnessed",
+        headline: `${miracle.name} was witnessed.`,
+        description: miracle.description,
+        civilizationId: miracle.civilizationId,
+        settlementId: miracle.settlementId,
+        personId: miracle.targetAgentId,
+        beliefId: miracle.beliefId,
+        godId: miracle.godId,
+        prophecyId: miracle.prophecyId,
+        civilizationGoalId: miracle.civilizationGoalId,
+        sacredSiteId: miracle.sacredSiteId,
+        miracleId: miracle.id,
+        entityRefs: miracle.subjectRefs,
+    });
+    if (!miracle.eventIds.includes(eventId)) miracle.eventIds.push(eventId);
+    return miracle;
+}
+
 function createMyth(
     simulation: CivilizationSimulation,
     belief: Belief,
     settlement: Settlement,
     centralAgent?: Agent,
+    god?: God,
 ): Myth {
     const id = simulation.myths.length;
     const kind = chooseMythKind(simulation.options.seed, id, belief.domain);
@@ -16366,6 +18897,7 @@ function createMyth(
         beliefId: belief.id,
         originSettlementId: settlement.id,
         year: simulation.year,
+        godId: god?.id,
         centralAgentId: centralAgent?.id,
         subjectRefs: [],
         description: "",
@@ -16375,11 +18907,16 @@ function createMyth(
     const naturalFeatureText = naturalFeatureRefs.length
         ? ` Its symbols are tied to ${naturalFeatureRefs.map(ref => legendRefName(simulation, ref)).join(" and ")}.`
         : "";
-    myth.description = `${myth.name} is a ${mythKindLabel(kind)} of ${beliefDomainLabel(belief.domain)} first told in ${settlement.name}${centralAgent ? ` around ${centralAgent.name}` : ""}.${naturalFeatureText}`;
+    const creationText = god && (kind === "creation" || god.controlSpheres.includes("creation"))
+        ? ` The creation claim says ${god.name} ${god.creationClaim}.`
+        : "";
+    myth.description = `${myth.name} is a ${mythKindLabel(kind)} of ${beliefDomainLabel(belief.domain)} first told in ${settlement.name}${centralAgent ? ` around ${centralAgent.name}` : ""}${god ? ` under ${god.name}` : ""}.${creationText}${naturalFeatureText}`;
     simulation.myths.push(myth);
+    if (god && !god.mythIds.includes(id)) god.mythIds.push(id);
     myth.subjectRefs = uniqueLegendRefs([
         mythRef(simulation, id),
         beliefRef(simulation, belief.id),
+        ...(god ? [godRef(simulation, god.id)] : []),
         ...(centralAgent ? [personRef(simulation, centralAgent.id)] : []),
         settlementRef(simulation, settlement.id),
         ...naturalFeatureRefs,
@@ -16397,6 +18934,7 @@ function createMyth(
         settlementId: myth.originSettlementId,
         personId: myth.centralAgentId,
         beliefId: myth.beliefId,
+        godId: myth.godId,
         mythId: myth.id,
         entityRefs: myth.subjectRefs,
     });
@@ -16409,6 +18947,7 @@ function createDoctrine(
     belief: Belief,
     settlement: Settlement,
     myth?: Myth,
+    god: God | undefined = myth?.godId === undefined ? godForBeliefControl(simulation, belief, "religion") : simulation.gods[myth.godId],
 ): Doctrine {
     const id = simulation.doctrines.length;
     const kind = chooseDoctrineKind(simulation.options.seed, id, belief.domain);
@@ -16421,6 +18960,7 @@ function createDoctrine(
         civilizationId: belief.civilizationId,
         beliefId: belief.id,
         mythId: myth?.id,
+        godId: god?.id,
         originSettlementId: settlement.id,
         foundedYear: simulation.year,
         principle: principles.principle,
@@ -16431,12 +18971,14 @@ function createDoctrine(
         description: "",
         eventIds: [],
     };
-    doctrine.description = `${doctrine.name} is a doctrine of ${doctrineKindLabel(kind)} teaching that ${doctrine.principle}. Its honored virtue is ${doctrine.virtue}, and its taboo is ${doctrine.taboo}.`;
+    doctrine.description = `${doctrine.name} is a doctrine of ${doctrineKindLabel(kind)}${god ? ` under ${god.name}` : ""} teaching that ${doctrine.principle}. Its honored virtue is ${doctrine.virtue}, and its taboo is ${doctrine.taboo}${god ? `. The religious mandate behind it says ${god.religiousMandate}` : ""}.`;
     simulation.doctrines.push(doctrine);
+    if (god && !god.doctrineIds.includes(id)) god.doctrineIds.push(id);
     const naturalFeatureRefs = mythicNaturalFeatureRefs(simulation, belief, settlement);
     doctrine.subjectRefs = uniqueLegendRefs([
         doctrineRef(simulation, id),
         beliefRef(simulation, belief.id),
+        ...(god ? [godRef(simulation, god.id)] : []),
         ...(myth ? [mythRef(simulation, myth.id)] : []),
         settlementRef(simulation, settlement.id),
         ...naturalFeatureRefs,
@@ -16453,6 +18995,7 @@ function createDoctrine(
         civilizationId: doctrine.civilizationId,
         settlementId: doctrine.originSettlementId,
         beliefId: doctrine.beliefId,
+        godId: doctrine.godId,
         mythId: doctrine.mythId,
         doctrineId: doctrine.id,
         entityRefs: doctrine.subjectRefs,
@@ -16465,6 +19008,9 @@ function civilizationGoalDescription(simulation: CivilizationSimulation, goal: C
     const civ = simulation.civilizations[goal.civilizationId];
     const settlement = goal.settlementId === undefined ? undefined : simulation.settlements[goal.settlementId];
     const belief = goal.beliefId === undefined ? undefined : simulation.beliefs[goal.beliefId];
+    const god = goal.godId === undefined ? undefined : simulation.gods[goal.godId];
+    const commandment = goal.commandmentId === undefined ? undefined : simulation.commandments[goal.commandmentId];
+    const destiny = goal.destinyId === undefined ? undefined : simulation.destinies[goal.destinyId];
     const doctrine = goal.doctrineId === undefined ? undefined : simulation.doctrines[goal.doctrineId];
     const magicRole = goal.magicRoleId === undefined ? undefined : simulation.magicRoles[goal.magicRoleId];
     const prophecy = goal.prophecyId === undefined ? undefined : simulation.prophecies[goal.prophecyId];
@@ -16472,7 +19018,7 @@ function civilizationGoalDescription(simulation: CivilizationSimulation, goal: C
     const targetArtifact = goal.targetArtifactId === undefined ? undefined : simulation.artifacts[goal.targetArtifactId];
     const targetCivilization = goal.targetCivilizationId === undefined ? undefined : simulation.civilizations[goal.targetCivilizationId];
     const target = targetArtifact?.name ?? targetSettlement?.name ?? targetCivilization?.name ?? settlement?.name ?? "the realm";
-    const source = prophecy?.name ?? doctrine?.name ?? magicRole?.name ?? belief?.name ?? civ?.name ?? "the realm";
+    const source = destiny?.name ?? commandment?.name ?? prophecy?.name ?? doctrine?.name ?? magicRole?.name ?? god?.name ?? belief?.name ?? civ?.name ?? "the realm";
     return `${civ?.name ?? "The civilization"} set a goal to ${civilizationGoalKindLabel(goal.kind)} at ${target}, shaped by ${source}.`;
 }
 
@@ -16488,6 +19034,9 @@ function civilizationGoalSubjectRefs(simulation: CivilizationSimulation, goal: C
         ...(goal.targetArtifactId === undefined ? [] : [artifactRef(simulation, goal.targetArtifactId)]),
         ...(goal.targetCivilizationId === undefined || goal.targetCivilizationId === goal.civilizationId ? [] : [civilizationRef(simulation, goal.targetCivilizationId)]),
         ...(goal.beliefId === undefined ? [] : [beliefRef(simulation, goal.beliefId)]),
+        ...(goal.godId === undefined ? [] : [godRef(simulation, goal.godId)]),
+        ...(goal.commandmentId === undefined ? [] : [commandmentRef(simulation, goal.commandmentId)]),
+        ...(goal.destinyId === undefined ? [] : [destinyRef(simulation, goal.destinyId)]),
         ...(goal.mythId === undefined ? [] : [mythRef(simulation, goal.mythId)]),
         ...(goal.doctrineId === undefined ? [] : [doctrineRef(simulation, goal.doctrineId)]),
         ...(goal.magicRoleId === undefined ? [] : [magicRoleRef(simulation, goal.magicRoleId)]),
@@ -16508,6 +19057,9 @@ function createCivilizationGoal(
         doctrine?: Doctrine;
         magicRole?: MagicRole;
         prophecy?: Prophecy;
+        god?: God;
+        commandment?: Commandment;
+        destiny?: Destiny;
         targetSettlementId?: number;
         targetArtifactId?: number;
         targetCivilizationId?: number;
@@ -16519,6 +19071,15 @@ function createCivilizationGoal(
     const sourceEvent = options.sourceEventId === undefined ? undefined : simulation.legendEvents[options.sourceEventId];
     const magicRole = options.magicRole
         ?? (options.prophecy?.magicRoleId === undefined ? undefined : simulation.magicRoles[options.prophecy.magicRoleId]);
+    const god = options.god
+        ?? (options.prophecy?.godId === undefined ? undefined : simulation.gods[options.prophecy.godId])
+        ?? (options.doctrine?.godId === undefined ? undefined : simulation.gods[options.doctrine.godId])
+        ?? (options.myth?.godId === undefined ? undefined : simulation.gods[options.myth.godId])
+        ?? (options.belief?.patronGodId === undefined ? undefined : simulation.gods[options.belief.patronGodId]);
+    const commandment = options.commandment
+        ?? (options.doctrine?.commandmentId === undefined ? undefined : simulation.commandments[options.doctrine.commandmentId]);
+    const destiny = options.destiny
+        ?? (options.prophecy?.destinyId === undefined ? undefined : simulation.destinies[options.prophecy.destinyId]);
     const goal: CivilizationGoal = {
         id,
         name: makeCivilizationGoalName(simulation.options.seed, id, kind, civilization),
@@ -16532,6 +19093,9 @@ function createCivilizationGoal(
         doctrineId: options.doctrine?.id,
         magicRoleId: magicRole?.id,
         prophecyId: options.prophecy?.id,
+        godId: god?.id,
+        commandmentId: commandment?.id,
+        destinyId: destiny?.id,
         targetSettlementId: options.targetSettlementId ?? options.prophecy?.targetSettlementId ?? options.settlement?.id,
         targetArtifactId: options.targetArtifactId ?? options.prophecy?.targetArtifactId,
         targetCivilizationId: options.targetCivilizationId,
@@ -16546,6 +19110,9 @@ function createCivilizationGoal(
     goal.subjectRefs = civilizationGoalSubjectRefs(simulation, goal, sourceEvent);
     addCivilizationGoalIdToCivilization(civilization, id);
     addCivilizationGoalIdToBelief(options.belief, id);
+    addCivilizationGoalIdToGod(god, id);
+    addCivilizationGoalIdToCommandment(commandment, id);
+    addCivilizationGoalIdToDestiny(destiny, id);
     addCivilizationGoalIdToDoctrine(options.doctrine, id);
     addCivilizationGoalIdToProphecy(options.prophecy, id);
     addCivilizationGoalIdToMagicRole(magicRole, id);
@@ -16558,6 +19125,9 @@ function createCivilizationGoal(
         civilizationId: goal.civilizationId,
         settlementId: goal.settlementId,
         beliefId: goal.beliefId,
+        godId: goal.godId,
+        commandmentId: goal.commandmentId,
+        destinyId: goal.destinyId,
         mythId: goal.mythId,
         doctrineId: goal.doctrineId,
         magicRoleId: goal.magicRoleId,
@@ -16644,12 +19214,16 @@ function createCivilizationGoalFromDoctrine(
     const civilization = simulation.civilizations[belief.civilizationId];
     if (!civilization) return undefined;
     const kind = civilizationGoalKindForDoctrine(doctrine.kind, belief.domain);
+    const god = doctrine.godId === undefined ? godForBeliefControl(simulation, belief, "commandments") : simulation.gods[doctrine.godId];
+    const commandment = doctrine.commandmentId === undefined ? undefined : simulation.commandments[doctrine.commandmentId];
     return createCivilizationGoal(simulation, civilization, kind, {
         settlement,
         belief,
         myth,
         doctrine,
         magicRole,
+        god,
+        commandment,
         targetSettlementId: settlement.id,
         priority: 0.54 + hashFloat(simulation.options.seed, doctrine.id, 967, 1) * 0.26,
     });
@@ -16666,6 +19240,8 @@ function createCivilizationGoalFromProphecy(
     const civilization = simulation.civilizations[prophecy.civilizationId];
     if (!civilization) return undefined;
     const doctrine = belief.doctrineIds.map(id => simulation.doctrines[id]).find(Boolean);
+    const god = prophecy.godId === undefined ? godForBeliefControl(simulation, belief, "prophecy") : simulation.gods[prophecy.godId];
+    const destiny = prophecy.destinyId === undefined ? undefined : simulation.destinies[prophecy.destinyId];
     return createCivilizationGoal(simulation, civilization, "fulfill-prophecy", {
         settlement,
         belief,
@@ -16673,6 +19249,8 @@ function createCivilizationGoalFromProphecy(
         doctrine,
         magicRole,
         prophecy,
+        god,
+        destiny,
         targetSettlementId: prophecy.targetSettlementId,
         targetArtifactId: prophecy.targetArtifactId,
         sourceEventId: prophecy.sourceEventId,
@@ -16699,6 +19277,7 @@ function sacredSiteSubjectRefs(
         settlementRef(simulation, site.settlementId),
         ...(site.founderAgentId === undefined ? [] : [personRef(simulation, site.founderAgentId)]),
         ...(site.beliefId === undefined ? [] : [beliefRef(simulation, site.beliefId)]),
+        ...(site.godId === undefined ? [] : [godRef(simulation, site.godId)]),
         ...(site.mythId === undefined ? [] : [mythRef(simulation, site.mythId)]),
         ...(site.doctrineId === undefined ? [] : [doctrineRef(simulation, site.doctrineId)]),
         ...(site.magicRoleId === undefined ? [] : [magicRoleRef(simulation, site.magicRoleId)]),
@@ -16710,11 +19289,12 @@ function sacredSiteSubjectRefs(
 
 function sacredSiteDescription(simulation: CivilizationSimulation, site: SacredSite): string {
     const belief = site.beliefId === undefined ? undefined : simulation.beliefs[site.beliefId];
+    const god = site.godId === undefined ? undefined : simulation.gods[site.godId];
     const myth = site.mythId === undefined ? undefined : simulation.myths[site.mythId];
     const prophecy = site.prophecyId === undefined ? undefined : simulation.prophecies[site.prophecyId];
     const goal = site.civilizationGoalId === undefined ? undefined : simulation.civilizationGoals[site.civilizationGoalId];
     const settlement = simulation.settlements[site.settlementId];
-    const source = prophecy?.name ?? goal?.name ?? myth?.name ?? belief?.name ?? "local sacred memory";
+    const source = prophecy?.name ?? goal?.name ?? myth?.name ?? god?.name ?? belief?.name ?? "local sacred memory";
     return `${site.name} is a ${sacredSiteKindLabel(site.kind)} near ${settlement?.name ?? "the settlement"}, remembered through ${source}.`;
 }
 
@@ -16728,11 +19308,16 @@ function createSacredSite(
         magicRole?: MagicRole;
         prophecy?: Prophecy;
         civilizationGoal?: CivilizationGoal;
+        god?: God;
         founder?: Agent;
     } = {},
 ): SacredSite {
     const id = simulation.sacredSites.length;
     const kind = sacredSiteKindForBelief(belief.domain, options.myth, options.prophecy, options.civilizationGoal);
+    const god = options.god
+        ?? (options.prophecy?.godId === undefined ? undefined : simulation.gods[options.prophecy.godId])
+        ?? (options.civilizationGoal?.godId === undefined ? undefined : simulation.gods[options.civilizationGoal.godId])
+        ?? (options.myth?.godId === undefined ? godForBeliefControl(simulation, belief, "religion") : simulation.gods[options.myth.godId]);
     const coordinates = sacredSiteCoordinates(simulation, settlement, id);
     const site: SacredSite = {
         id,
@@ -16750,12 +19335,14 @@ function createSacredSite(
         magicRoleId: options.magicRole?.id,
         prophecyId: options.prophecy?.id,
         civilizationGoalId: options.civilizationGoal?.id,
+        godId: god?.id,
         renown: Math.round(clamp(0.34 + (options.prophecy ? 0.16 : 0) + (options.civilizationGoal ? 0.1 : 0) + hashFloat(simulation.options.seed, id, 1047, 1) * 0.32, 0, 1) * 1000) / 1000,
         subjectRefs: [],
         description: "",
         eventIds: [],
     };
     simulation.sacredSites.push(site);
+    if (god && !god.sacredSiteIds.includes(id)) god.sacredSiteIds.push(id);
     site.subjectRefs = sacredSiteSubjectRefs(simulation, site);
     site.description = sacredSiteDescription(simulation, site);
     const eventId = recordLegendEvent(simulation, {
@@ -16767,6 +19354,7 @@ function createSacredSite(
         settlementId: site.settlementId,
         personId: site.founderAgentId,
         beliefId: site.beliefId,
+        godId: site.godId,
         mythId: site.mythId,
         doctrineId: site.doctrineId,
         magicRoleId: site.magicRoleId,
@@ -16803,6 +19391,7 @@ function createMagicRole(
     agent: Agent,
     myth?: Myth,
     organization?: Organization,
+    god: God | undefined = myth?.godId === undefined ? godForBeliefControl(simulation, belief, "prophecy") : simulation.gods[myth.godId],
 ): MagicRole {
     const id = simulation.magicRoles.length;
     const kind = chooseMagicRoleKind(simulation.options.seed, id, belief.domain);
@@ -16818,6 +19407,7 @@ function createMagicRole(
         beliefId: belief.id,
         organizationId: organization?.id,
         mythId: myth?.id,
+        godId: god?.id,
         prophecyIds: [],
         civilizationGoalIds: [],
         subjectRefs: [],
@@ -16828,12 +19418,14 @@ function createMagicRole(
     const naturalFeatureText = naturalFeatureRefs.length
         ? ` with signs read from ${naturalFeatureRefs.map(ref => legendRefName(simulation, ref)).join(" and ")}`
         : "";
-    role.description = `${agent.name} became ${magicRoleKindLabel(kind)} for ${belief.name} in ${settlement.name}, interpreting ${myth?.name ?? "the sacred signs"}${naturalFeatureText}.`;
+    role.description = `${agent.name} became ${magicRoleKindLabel(kind)} for ${belief.name} in ${settlement.name}, interpreting ${myth?.name ?? "the sacred signs"}${god ? ` of ${god.name}` : ""}${naturalFeatureText}.`;
     simulation.magicRoles.push(role);
+    if (god && !god.magicRoleIds.includes(id)) god.magicRoleIds.push(id);
     role.subjectRefs = uniqueLegendRefs([
         magicRoleRef(simulation, id),
         personRef(simulation, agent.id),
         beliefRef(simulation, belief.id),
+        ...(god ? [godRef(simulation, god.id)] : []),
         ...(myth ? [mythRef(simulation, myth.id)] : []),
         ...(organization ? [organizationRef(simulation, organization.id)] : []),
         settlementRef(simulation, settlement.id),
@@ -16853,6 +19445,7 @@ function createMagicRole(
         settlementId: role.settlementId,
         personId: role.agentId,
         beliefId: role.beliefId,
+        godId: role.godId,
         mythId: role.mythId,
         magicRoleId: role.id,
         organizationId: role.organizationId,
@@ -16899,6 +19492,7 @@ function prophecyTargetAgent(
 
 function prophecyDescription(simulation: CivilizationSimulation, prophecy: Prophecy): string {
     const belief = prophecy.beliefId === undefined ? undefined : simulation.beliefs[prophecy.beliefId];
+    const god = prophecy.godId === undefined ? undefined : simulation.gods[prophecy.godId];
     const settlement = simulation.settlements[prophecy.settlementId];
     const speaker = prophecy.speakerAgentId === undefined ? undefined : simulation.agents[prophecy.speakerAgentId];
     const targetSettlement = prophecy.targetSettlementId === undefined ? undefined : simulation.settlements[prophecy.targetSettlementId];
@@ -16906,7 +19500,7 @@ function prophecyDescription(simulation: CivilizationSimulation, prophecy: Proph
     const targetAgent = prophecy.targetAgentId === undefined ? undefined : simulation.agents[prophecy.targetAgentId];
     const target = targetArtifact?.name ?? targetAgent?.name ?? targetSettlement?.name ?? settlement?.name ?? "the realm";
     const source = speaker ? `${speaker.name} spoke` : "A voice spoke";
-    return `${source} ${prophecy.name}, a prophecy of ${prophecyKindLabel(prophecy.kind)} tied to ${belief?.name ?? "local belief"}, naming ${target} as its sign.`;
+    return `${source} ${prophecy.name}, a prophecy of ${prophecyKindLabel(prophecy.kind)} tied to ${belief?.name ?? "local belief"}${god ? ` and ${god.name}` : ""}, naming ${target} as its sign${god ? ` through ${god.prophecyMethod}` : ""}.`;
 }
 
 function prophecySubjectRefs(simulation: CivilizationSimulation, prophecy: Prophecy, sourceEvent?: LegendEvent): LegendEntityRef[] {
@@ -16920,6 +19514,8 @@ function prophecySubjectRefs(simulation: CivilizationSimulation, prophecy: Proph
         ...(prophecy.magicRoleId === undefined ? [] : [magicRoleRef(simulation, prophecy.magicRoleId)]),
         ...(prophecy.mythId === undefined ? [] : [mythRef(simulation, prophecy.mythId)]),
         ...(prophecy.beliefId === undefined ? [] : [beliefRef(simulation, prophecy.beliefId)]),
+        ...(prophecy.godId === undefined ? [] : [godRef(simulation, prophecy.godId)]),
+        ...(prophecy.destinyId === undefined ? [] : [destinyRef(simulation, prophecy.destinyId)]),
         ...(prophecy.targetArtifactId === undefined ? [] : [artifactRef(simulation, prophecy.targetArtifactId)]),
         ...(prophecy.targetSettlementId === undefined ? [] : [settlementRef(simulation, prophecy.targetSettlementId)]),
         settlementRef(simulation, prophecy.settlementId),
@@ -16940,6 +19536,9 @@ function createProphecy(
 ): Prophecy {
     const id = simulation.prophecies.length;
     const kind = chooseProphecyKind(simulation.options.seed, id, belief.domain, sourceEvent);
+    const god = (magicRole?.godId === undefined ? undefined : simulation.gods[magicRole.godId])
+        ?? (myth?.godId === undefined ? undefined : simulation.gods[myth.godId])
+        ?? godForBeliefControl(simulation, belief, "prophecy");
     const prophecy: Prophecy = {
         id,
         name: makeProphecyName(simulation.options.seed, id, kind, settlement),
@@ -16950,6 +19549,7 @@ function createProphecy(
         settlementId: settlement.id,
         beliefId: belief.id,
         mythId: myth?.id,
+        godId: god?.id,
         speakerAgentId: speaker?.id,
         magicRoleId: magicRole?.id,
         targetSettlementId: prophecyTargetSettlement(simulation, settlement, kind, id, sourceEvent),
@@ -16963,6 +19563,7 @@ function createProphecy(
     };
     prophecy.description = prophecyDescription(simulation, prophecy);
     simulation.prophecies.push(prophecy);
+    if (god && !god.prophecyIds.includes(id)) god.prophecyIds.push(id);
     prophecy.subjectRefs = prophecySubjectRefs(simulation, prophecy, sourceEvent);
     belief.prophecyIds.push(id);
     if (magicRole && !magicRole.prophecyIds.includes(id)) magicRole.prophecyIds.push(id);
@@ -16977,6 +19578,7 @@ function createProphecy(
         settlementId: prophecy.settlementId,
         personId: prophecy.speakerAgentId,
         beliefId: prophecy.beliefId,
+        godId: prophecy.godId,
         mythId: prophecy.mythId,
         magicRoleId: prophecy.magicRoleId,
         prophecyId: prophecy.id,
@@ -16986,7 +19588,20 @@ function createProphecy(
     prophecy.sourceEventId = eventId;
     if (!prophecy.eventIds.includes(eventId)) prophecy.eventIds.push(eventId);
     prophecy.eventScanCursor = simulation.legendEvents.length;
+    const destiny = createDestiny(simulation, belief, settlement, {
+        god,
+        prophecy,
+        targetSettlementId: prophecy.targetSettlementId,
+        targetArtifactId: prophecy.targetArtifactId,
+        targetAgentId: prophecy.targetAgentId,
+        sourceEventId: eventId,
+    });
+    prophecy.subjectRefs = prophecySubjectRefs(simulation, prophecy, sourceEvent);
     const prophecyGoal = createCivilizationGoalFromProphecy(simulation, prophecy, belief, settlement, myth, magicRole);
+    if (prophecyGoal && destiny.civilizationGoalId === undefined) {
+        destiny.civilizationGoalId = prophecyGoal.id;
+        if (prophecyGoal.destinyId === undefined) prophecyGoal.destinyId = destiny.id;
+    }
 
     const ambitionAgent = prophecy.targetAgentId === undefined ? speaker : simulation.agents[prophecy.targetAgentId];
     const ambitionSettlement = ambitionAgent ? simulation.settlements[ambitionAgent.settlementId] ?? settlement : settlement;
@@ -17025,6 +19640,10 @@ function createBelief(
         adherenceIds: [],
         organizationIds: [],
         structureIds: [],
+        godIds: [],
+        commandmentIds: [],
+        destinyIds: [],
+        miracleIds: [],
         mythIds: [],
         doctrineIds: [],
         magicRoleIds: [],
@@ -17146,6 +19765,53 @@ function maybeCreateProphecyForBelief(
     createProphecy(simulation, belief, settlement, speaker, magicRole, myth, recentProphecySourceEvent(simulation, belief, settlement));
 }
 
+function maybeCreateMiracleForBelief(
+    simulation: CivilizationSimulation,
+    belief: Belief,
+    settlement: Settlement,
+    adherents: Agent[],
+    magicRole?: MagicRole,
+) {
+    const god = godForBeliefControl(simulation, belief, "miracles") ?? godForBeliefControl(simulation, belief);
+    if (!god) return;
+    const recentMiracleCount = belief.miracleIds.reduce((sum, id) => {
+        const miracle = simulation.miracles[id];
+        return sum + (miracle && simulation.year - miracle.year <= 12 ? 1 : 0);
+    }, 0);
+    if (recentMiracleCount >= 2) return;
+    const openProphecy = belief.prophecyIds
+        .map(id => simulation.prophecies[id])
+        .filter((prophecy): prophecy is Prophecy => !!prophecy && prophecy.status === "open")
+        .sort((a, b) => b.strength - a.strength || a.id - b.id)[0];
+    const activeGoal = belief.civilizationGoalIds
+        .map(id => simulation.civilizationGoals[id])
+        .filter((goal): goal is CivilizationGoal => !!goal && goal.status === "active")
+        .sort((a, b) => b.priority - a.priority || a.id - b.id)[0];
+    const sacredSite = simulation.sacredSites
+        .filter(site => site.beliefId === belief.id)
+        .sort((a, b) => b.renown - a.renown || a.id - b.id)[0];
+    const chance = clamp(
+        0.0025
+        + god.favor * 0.004
+        + (openProphecy ? 0.003 : 0)
+        + (magicRole ? 0.002 : 0)
+        + settlement.unrest * 0.006
+        - recentMiracleCount * 0.002,
+        0.0005,
+        0.018,
+    );
+    if (hashFloat(simulation.options.seed, simulation.year, belief.id, god.id + 941) >= chance) return;
+    const targetAgent = magicRole ? simulation.agents[magicRole.agentId] : adherents[Math.floor(hashFloat(simulation.options.seed, simulation.year, belief.id, 9417) * adherents.length)];
+    createMiracle(simulation, belief, settlement, {
+        god,
+        prophecy: openProphecy,
+        civilizationGoal: activeGoal,
+        sacredSite,
+        targetAgent: targetAgent?.alive ? targetAgent : undefined,
+    });
+    god.favor = Math.round(clamp(god.favor + 0.008, 0, 1) * 1000) / 1000;
+}
+
 function foundingMythCount(settlement: Settlement, adherentCount: number): number {
     const base = settlement.type === "capital" ? 2 : 1;
     const scaleBonus = adherentCount >= 600 ? 1 : 0;
@@ -17156,6 +19822,11 @@ function foundingMagicRoleCount(adherents: Agent[]): number {
     const adultCount = adherents.filter(agent => agent.alive && agent.age >= 15).length;
     if (adultCount <= 0) return 0;
     return Math.min(3, 1 + (adultCount >= 60 ? 1 : 0) + (adultCount >= 220 ? 1 : 0));
+}
+
+function foundingGodCount(settlement: Settlement, adherentCount: number): number {
+    const base = settlement.type === "capital" ? 2 : 1;
+    return Math.min(4, base + (adherentCount >= 120 ? 1 : 0) + (adherentCount >= 520 ? 1 : 0));
 }
 
 function foundingMythCentralAgent(simulation: CivilizationSimulation, belief: Belief, adherents: Agent[], founder: Agent | undefined, index: number): Agent | undefined {
@@ -17177,10 +19848,17 @@ function seedFoundingMythsAndMagic(
     initialAdherents: Agent[],
     founder?: Agent,
 ) {
+    const godCount = foundingGodCount(settlement, initialAdherents.length);
+    const gods: God[] = [];
+    for (let i = 0; i < godCount; i++) {
+        gods.push(createGod(simulation, belief, settlement, i, godCount));
+    }
+
     const mythCount = foundingMythCount(settlement, initialAdherents.length);
     const myths: Myth[] = [];
     for (let i = 0; i < mythCount; i++) {
-        myths.push(createMyth(simulation, belief, settlement, foundingMythCentralAgent(simulation, belief, initialAdherents, founder, i)));
+        const god = gods[i % Math.max(1, gods.length)] ?? godForBeliefControl(simulation, belief, i === 0 ? "creation" : "religion");
+        myths.push(createMyth(simulation, belief, settlement, foundingMythCentralAgent(simulation, belief, initialAdherents, founder, i), god));
     }
 
     const magicRoles: MagicRole[] = [];
@@ -17188,16 +19866,27 @@ function seedFoundingMythsAndMagic(
     for (let i = 0; i < roleCount; i++) {
         const holder = chooseMagicRoleHolder(simulation, belief, initialAdherents, i === 0 ? founder : undefined);
         const myth = myths[i % Math.max(1, myths.length)];
+        const god = (myth?.godId === undefined ? undefined : simulation.gods[myth.godId])
+            ?? gods.find(candidate => candidate.controlSpheres.includes("prophecy"))
+            ?? gods[0];
         if (!holder) continue;
-        magicRoles.push(createMagicRole(simulation, belief, settlement, holder, myth));
+        magicRoles.push(createMagicRole(simulation, belief, settlement, holder, myth, undefined, god));
     }
 
     const doctrineGoals: CivilizationGoal[] = [];
     for (let i = 0; i < myths.length; i++) {
         const myth = myths[i];
-        const doctrine = createDoctrine(simulation, belief, settlement, myth);
+        const god = (myth?.godId === undefined ? undefined : simulation.gods[myth.godId])
+            ?? gods.find(candidate => candidate.controlSpheres.includes("commandments"))
+            ?? gods[0];
+        const doctrine = createDoctrine(simulation, belief, settlement, myth, god);
+        const commandment = createCommandment(simulation, belief, settlement, doctrine, god);
         const magicRole = magicRoles.length === 0 ? undefined : magicRoles[i % magicRoles.length];
         const goal = createCivilizationGoalFromDoctrine(simulation, belief, settlement, doctrine, myth, magicRole);
+        if (goal && goal.commandmentId === undefined) {
+            goal.commandmentId = commandment.id;
+            addCivilizationGoalIdToCommandment(commandment, goal.id);
+        }
         if (goal) doctrineGoals.push(goal);
     }
 
@@ -17210,12 +19899,23 @@ function seedFoundingMythsAndMagic(
         prophecies.push(createProphecy(simulation, belief, settlement, speaker, magicRole, myth));
     }
 
+    if (gods[0]) {
+        createMiracle(simulation, belief, settlement, {
+            god: gods.find(god => god.controlSpheres.includes("miracles")) ?? gods[0],
+            prophecy: prophecies[0],
+            civilizationGoal: doctrineGoals[0],
+            targetAgent: founder,
+            kind: prophecies[0] ? undefined : "omen",
+        });
+    }
+
     createSacredSite(simulation, settlement, belief, {
         myth: myths[0],
         doctrine: belief.doctrineIds[0] === undefined ? undefined : simulation.doctrines[belief.doctrineIds[0]],
         magicRole: magicRoles[0],
         prophecy: prophecies[0],
         civilizationGoal: doctrineGoals[0],
+        god: gods[0],
         founder,
     });
 
@@ -17226,6 +19926,7 @@ function seedFoundingMythsAndMagic(
             magicRole: magicRoles[1] ?? magicRoles[0],
             prophecy: prophecies[1],
             civilizationGoal: doctrineGoals[1],
+            god: gods[1] ?? gods[0],
             founder: foundingMythCentralAgent(simulation, belief, initialAdherents, founder, 1),
         });
     }
@@ -17294,6 +19995,7 @@ function maintainBeliefs(simulation: CivilizationSimulation) {
         }
 
         maybeCreateProphecyForBelief(simulation, belief, settlement, adherents, magicRole);
+        maybeCreateMiracleForBelief(simulation, belief, settlement, adherents, magicRole);
         maybeCreateMythicThoughtForBelief(simulation, belief, settlement, adherents, magicRole);
         maybeCreateSacredSitePilgrimage(simulation, belief, adherents, magicRole);
     }
@@ -17350,6 +20052,12 @@ function resolveProphecy(simulation: CivilizationSimulation, prophecy: Prophecy,
     prophecy.status = status;
     prophecy.resolvedYear = simulation.year;
     prophecy.resolvedEventId = resolvedEvent?.id;
+    const destiny = prophecy.destinyId === undefined ? undefined : simulation.destinies[prophecy.destinyId];
+    if (destiny?.status === "active") {
+        destiny.status = status === "fulfilled" ? "fulfilled" : "broken";
+        destiny.resolvedYear = simulation.year;
+        destiny.resolvedEventId = resolvedEvent?.id;
+    }
     const settlement = simulation.settlements[prophecy.settlementId];
     const speaker = prophecy.speakerAgentId === undefined ? undefined : simulation.agents[prophecy.speakerAgentId];
     const refs = uniqueLegendRefs([
@@ -17363,12 +20071,14 @@ function resolveProphecy(simulation: CivilizationSimulation, prophecy: Prophecy,
         type: status === "fulfilled" ? "prophecy-fulfilled" : "prophecy-failed",
         headline: `${prophecy.name} was ${status}.`,
         description: status === "fulfilled"
-            ? `${prophecy.name} was judged fulfilled in ${settlement?.name ?? "the realm"}${resolvedEvent ? ` after ${resolvedEvent.headline}` : ""}.`
+            ? `${prophecy.name} was judged fulfilled in ${settlement?.name ?? "the realm"}${resolvedEvent ? ` after ${legendEventHeadline(resolvedEvent)}` : ""}.`
             : `${prophecy.name} failed to come to pass in ${settlement?.name ?? "the realm"}.`,
         civilizationId: prophecy.civilizationId,
         settlementId: prophecy.settlementId,
         personId: speaker?.id,
         beliefId: prophecy.beliefId,
+        godId: prophecy.godId,
+        destinyId: prophecy.destinyId,
         mythId: prophecy.mythId,
         magicRoleId: prophecy.magicRoleId,
         prophecyId: prophecy.id,
@@ -17377,6 +20087,33 @@ function resolveProphecy(simulation: CivilizationSimulation, prophecy: Prophecy,
         entityRefs: refs,
     });
     if (!prophecy.eventIds.includes(eventId)) prophecy.eventIds.push(eventId);
+    if (destiny && !destiny.eventIds.includes(eventId)) {
+        destiny.eventIds.push(eventId);
+        recordLegendEvent(simulation, {
+            year: simulation.year,
+            type: status === "fulfilled" ? "destiny-fulfilled" : "destiny-broken",
+            headline: `${destiny.name} was ${status === "fulfilled" ? "fulfilled" : "broken"}.`,
+            description: `${destiny.name} was ${status === "fulfilled" ? "fulfilled" : "broken"} when ${prophecy.name} was ${status}.`,
+            civilizationId: destiny.civilizationId,
+            settlementId: destiny.settlementId,
+            beliefId: destiny.beliefId,
+            godId: destiny.godId,
+            prophecyId: prophecy.id,
+            civilizationGoalId: destiny.civilizationGoalId,
+            destinyId: destiny.id,
+            artifactId: destiny.targetArtifactId,
+            sourceEventId: eventId,
+            entityRefs: uniqueLegendRefs([
+                destinyRef(simulation, destiny.id),
+                prophecyRef(simulation, prophecy.id),
+                ...(destiny.godId === undefined ? [] : [godRef(simulation, destiny.godId)]),
+                ...(destiny.beliefId === undefined ? [] : [beliefRef(simulation, destiny.beliefId)]),
+                ...(destiny.civilizationGoalId === undefined ? [] : [civilizationGoalRef(simulation, destiny.civilizationGoalId)]),
+                ...(resolvedEvent ? [eventRef(simulation, resolvedEvent.id)] : []),
+                civilizationRef(simulation, destiny.civilizationId),
+            ], 16),
+        });
+    }
     if (status === "fulfilled" && prophecy.ambitionId !== undefined) {
         const ambition = simulation.ambitions[prophecy.ambitionId];
         const agent = ambition === undefined ? undefined : simulation.agents[ambition.personId];
@@ -17721,8 +20458,8 @@ function resolveCivilizationGoal(
         type: status === "fulfilled" ? "civilization-goal-fulfilled" : "civilization-goal-failed",
         headline: `${goal.name} was ${status}.`,
         description: status === "fulfilled"
-            ? `${goal.name} was fulfilled${resolvedEvent ? ` after ${resolvedEvent.headline}` : ""}.`
-            : `${goal.name} failed to guide the realm to its intended end${resolvedEvent ? ` after ${resolvedEvent.headline}` : ""}.`,
+            ? `${goal.name} was fulfilled${resolvedEvent ? ` after ${legendEventHeadline(resolvedEvent)}` : ""}.`
+            : `${goal.name} failed to guide the realm to its intended end${resolvedEvent ? ` after ${legendEventHeadline(resolvedEvent)}` : ""}.`,
         civilizationId: goal.civilizationId,
         settlementId: goal.settlementId ?? goal.targetSettlementId,
         beliefId: goal.beliefId,
@@ -18687,8 +21424,8 @@ function conversationName(kind: ConversationKind, speaker: Agent, listener: Agen
 }
 
 function bestConversationRelationship(simulation: CivilizationSimulation, a: Agent, b: Agent): SocialBond | undefined {
-    return simulation.socialBonds
-        .filter(bond => bond.active && sameSocialPair(bond, a.id, b.id))
+    return socialBondsForPair(simulation, a.id, b.id)
+        .filter(bond => bond.active)
         .sort((x, y) => y.familiarity - x.familiarity || y.strength - x.strength || x.id - y.id)[0];
 }
 
@@ -20947,11 +23684,12 @@ function maybeFoundOrganization(simulation: CivilizationSimulation, settlement: 
     createOrganization(simulation, settlement, kind, agents);
 }
 
-function maintainOrganizations(simulation: CivilizationSimulation) {
+function maintainOrganizations(simulation: CivilizationSimulation, aliveAgentsBySettlement?: Agent[][]) {
     for (let organization of simulation.organizations) {
         const settlement = simulation.settlements[organization.settlementId];
         if (!settlement) continue;
-        const localAgents = simulation.agents.filter(agent =>
+        const settlementAgents = aliveAgentsBySettlement?.[organization.settlementId] ?? simulation.agents;
+        const localAgents = settlementAgents.filter(agent =>
             agent.alive
             && agent.civilizationId === organization.civilizationId
             && agent.settlementId === organization.settlementId
@@ -20986,12 +23724,23 @@ function socialPairKey(aId: number, bId: number): string {
     return aId < bId ? `${aId}:${bId}` : `${bId}:${aId}`;
 }
 
+function socialBondsForPair(simulation: CivilizationSimulation, aId: number, bId: number): SocialBond[] {
+    const ids = simulation.socialBondPairIndex.get(socialPairKey(aId, bId));
+    if (!ids) return [];
+    const bonds: SocialBond[] = [];
+    for (let id of ids) {
+        const bond = simulation.socialBonds[id];
+        if (bond) bonds.push(bond);
+    }
+    return bonds;
+}
+
 function findSocialBond(simulation: CivilizationSimulation, kind: SocialBondKind, aId: number, bId: number): SocialBond | undefined {
-    return simulation.socialBonds.find(bond => bond.kind === kind && sameSocialPair(bond, aId, bId));
+    return socialBondsForPair(simulation, aId, bId).find(bond => bond.kind === kind);
 }
 
 function hasAnySocialBond(simulation: CivilizationSimulation, aId: number, bId: number): boolean {
-    return simulation.socialBonds.some(bond => sameSocialPair(bond, aId, bId));
+    return (simulation.socialBondPairIndex.get(socialPairKey(aId, bId))?.length ?? 0) > 0;
 }
 
 function sharedOrganizationId(a: Agent, b: Agent): number | undefined {
@@ -21185,7 +23934,7 @@ function recordRelationshipMilestone(
         settlementRef(simulation, milestone.settlementId),
         civilizationRef(simulation, bond.civilizationId),
     ], 18);
-    milestone.description = `${name} was recorded in year ${milestone.year} after ${sourceEvent.headline}. Status ${status}; affinity ${milestone.affinity}; trust ${milestone.trust}; tension ${milestone.tension}; familiarity ${milestone.familiarity}.${options.note ? ` ${options.note}` : ""}`;
+    milestone.description = `${name} was recorded in year ${milestone.year} after ${legendEventHeadline(sourceEvent)}. Status ${status}; affinity ${milestone.affinity}; trust ${milestone.trust}; tension ${milestone.tension}; familiarity ${milestone.familiarity}.${options.note ? ` ${options.note}` : ""}`;
     sourceEvent.relationshipMilestoneId = id;
     sourceEvent.entityRefs = internLegendRefs(simulation, uniqueLegendRefs([...sourceEvent.entityRefs, relationshipMilestoneRef(simulation, id)], 24));
     return milestone;
@@ -21225,6 +23974,10 @@ function createSocialBond(
         eventIds: [],
     };
     simulation.socialBonds.push(bond);
+    const pairKey = socialPairKey(agentIds[0], agentIds[1]);
+    const pairBondIds = simulation.socialBondPairIndex.get(pairKey);
+    if (pairBondIds) pairBondIds.push(id);
+    else simulation.socialBondPairIndex.set(pairKey, [id]);
     if (!first.socialBondIds.includes(id)) first.socialBondIds.push(id);
     if (!second.socialBondIds.includes(id)) second.socialBondIds.push(id);
 
@@ -21714,7 +24467,7 @@ function maintainSocialClaims(simulation: CivilizationSimulation) {
                     claim,
                     "repaid",
                     relationship,
-                    `${target.name} repaid the favor ${agent.name} remembered from ${simulation.legendEvents[claim.sourceEventId]?.headline ?? "an earlier event"}.`,
+                    `${target.name} repaid the favor ${agent.name} remembered from ${legendEventHeadlineOr(simulation.legendEvents[claim.sourceEventId], "an earlier event")}.`,
                 );
             }
         } else {
@@ -21727,7 +24480,7 @@ function maintainSocialClaims(simulation: CivilizationSimulation) {
                     claim,
                     "settled",
                     relationship,
-                    `${agent.name} set aside the grudge against ${target.name} that began with ${simulation.legendEvents[claim.sourceEventId]?.headline ?? "an earlier event"}.`,
+                    `${agent.name} set aside the grudge against ${target.name} that began with ${legendEventHeadlineOr(simulation.legendEvents[claim.sourceEventId], "an earlier event")}.`,
                 );
             }
         }
@@ -21944,6 +24697,48 @@ function hasRiverTriangle(world: GeneratedWorldMap, t: number): boolean {
     return false;
 }
 
+function civilizationCreationDomain(seed: number, civilizationId: number): BeliefDomain {
+    return BELIEF_DOMAINS[Math.floor(hashFloat(seed, civilizationId, 9541, 1) * BELIEF_DOMAINS.length)] ?? "ancestors";
+}
+
+function creationSeatPreference(domain: BeliefDomain): string {
+    if (domain === "ancestors") return "stable lowland where graves, lineages, and councils can endure";
+    if (domain === "forge") return "stone-rich upland close enough to support craft and fuel";
+    if (domain === "harvest") return "wet fertile ground with room for grain stores and shared fields";
+    if (domain === "rivers") return "river or coast crossings where travel and hospitality can begin";
+    if (domain === "mountains") return "defensible high ground near stone signs and boundaries";
+    if (domain === "stars") return "dry open ground or high places where night signs can be watched";
+    if (domain === "storms") return "coasts, heights, and wet margins where warning weather is visible";
+    return "river, coast, or lowland trade ground where bargains can be witnessed";
+}
+
+function creationSeatAffinity(world: GeneratedWorldMap, triangle: number, domain: BeliefDomain): number {
+    const elevation = clamp(world.map.elevation_t[triangle] ?? 0, 0, 1);
+    const moisture = clamp(world.map.moisture_t[triangle] ?? 0.5, 0, 1.5);
+    const wet = clamp(moisture / 1.05, 0, 1);
+    const dry = 1 - clamp(moisture / 0.85, 0, 1);
+    const high = clamp((elevation - 0.24) / 0.46, 0, 1);
+    const lowland = 1 - clamp(Math.abs(elevation - 0.14) / 0.42, 0, 1);
+    const river = hasRiverTriangle(world, triangle) ? 1 : 0;
+    const coast = isCoastalTriangle(world, triangle) ? 1 : 0;
+    const slope = triangleSlopePenalty(world, triangle);
+    if (domain === "ancestors") return clamp(lowland * 0.44 + wet * 0.16 + (1 - slope) * 0.18, 0, 1);
+    if (domain === "forge") return clamp(high * 0.36 + (1 - slope) * 0.22 + lowland * 0.14, 0, 1);
+    if (domain === "harvest") return clamp(wet * 0.42 + lowland * 0.34 + river * 0.18, 0, 1);
+    if (domain === "rivers") return clamp(river * 0.56 + coast * 0.22 + wet * 0.16 + lowland * 0.08, 0, 1);
+    if (domain === "mountains") return clamp(high * 0.52 + (1 - slope) * 0.12 + river * 0.08, 0, 1);
+    if (domain === "stars") return clamp(dry * 0.34 + high * 0.3 + (1 - wet) * 0.14 + lowland * 0.08, 0, 1);
+    if (domain === "storms") return clamp(coast * 0.36 + high * 0.26 + wet * 0.24 + river * 0.12, 0, 1);
+    return clamp(river * 0.36 + coast * 0.3 + lowland * 0.2 + (1 - slope) * 0.08, 0, 1);
+}
+
+function creationSeatScore(world: GeneratedWorldMap, suitability: Float32Array, triangle: number, domain: BeliefDomain, seed: number, civilizationId: number): number {
+    const base = suitability[triangle] ?? 0;
+    const affinity = creationSeatAffinity(world, triangle, domain);
+    const jitter = hashFloat(seed, civilizationId, triangle, 9543) * 0.08;
+    return base + affinity * 0.24 + jitter;
+}
+
 function triangleSlopePenalty(world: GeneratedWorldMap, t: number): number {
     const {mesh, map} = world;
     let sum = 0, count = 0;
@@ -21958,7 +24753,7 @@ function triangleSlopePenalty(world: GeneratedWorldMap, t: number): number {
 
 function computeSuitability(world: GeneratedWorldMap): Float32Array {
     const {mesh, map} = world;
-    const suitability = new Float32Array(mesh.numTriangles);
+    const suitability = sharedFloat32Array(mesh.numTriangles);
 
     for (let t = 0; t < mesh.numSolidTriangles; t++) {
         const elevation = map.elevation_t[t];
@@ -21991,12 +24786,14 @@ function computeSettlementCandidateTriangles(world: GeneratedWorldMap, suitabili
         candidates.push(t);
     }
 
-    return Int32Array.from(candidates);
+    const result = sharedInt32Array(candidates.length);
+    result.set(candidates);
+    return result;
 }
 
 function computeSettlementSiteBonus(world: GeneratedWorldMap): Float32Array {
     const {mesh, map} = world;
-    const siteBonus = new Float32Array(mesh.numTriangles);
+    const siteBonus = sharedFloat32Array(mesh.numTriangles);
 
     for (let t = 0; t < mesh.numSolidTriangles; t++) {
         if (mesh.is_boundary_t[t] || map.elevation_t[t] <= 0) continue;
@@ -22004,6 +24801,54 @@ function computeSettlementSiteBonus(world: GeneratedWorldMap): Float32Array {
     }
 
     return siteBonus;
+}
+
+function terrainAnalysisWorkerInput(world: GeneratedWorldMap): TerrainAnalysisWorkerInput {
+    const {mesh, map, param} = world;
+    const triangleNeighbors = sharedInt32Array(mesh.numTriangles * 3);
+    triangleNeighbors.fill(-1);
+    const sideOpposites = sharedInt32Array(mesh.numSides);
+    sideOpposites.fill(-1);
+    const isBoundaryTriangle = sharedInt8Array(mesh.numTriangles);
+    const elevation = sharedFloat32Array(mesh.numTriangles);
+    const moisture = sharedFloat32Array(mesh.numTriangles);
+    const flowSides = sharedFloat32Array(mesh.numSides);
+
+    for (let t = 0; t < mesh.numTriangles; t++) {
+        isBoundaryTriangle[t] = mesh.is_boundary_t[t] ?? 0;
+        elevation[t] = map.elevation_t[t] ?? 0;
+        moisture[t] = map.moisture_t[t] ?? 0;
+        for (let i = 0; i < 3; i++) {
+            triangleNeighbors[3*t + i] = mesh.t_outer_s(3*t + i);
+        }
+    }
+    for (let s = 0; s < mesh.numSides; s++) {
+        sideOpposites[s] = mesh.s_opposite_s(s);
+        flowSides[s] = map.flow_s[s] ?? 0;
+    }
+
+    return {
+        numTriangles: mesh.numTriangles,
+        numSolidTriangles: mesh.numSolidTriangles,
+        numSides: mesh.numSides,
+        minFlow: Math.exp(param.rivers.lg_min_flow),
+        triangleNeighbors,
+        sideOpposites,
+        isBoundaryTriangle,
+        elevation,
+        moisture,
+        flowSides,
+    };
+}
+
+function computeCivilizationTerrainAnalysis(world: GeneratedWorldMap, workerPool?: CivilizationWorkerPool): CivilizationTerrainAnalysis {
+    if (workerPool) return workerPool.computeTerrainAnalysis(terrainAnalysisWorkerInput(world));
+    const suitability = computeSuitability(world);
+    return {
+        suitability,
+        settlementCandidateTriangles: computeSettlementCandidateTriangles(world, suitability),
+        settlementSiteBonus: computeSettlementSiteBonus(world),
+    };
 }
 
 function neighborsOf(world: GeneratedWorldMap, t: number): number[] {
@@ -22018,78 +24863,194 @@ function neighborsOf(world: GeneratedWorldMap, t: number): number[] {
     return out;
 }
 
-function chooseHomelands(world: GeneratedWorldMap, suitability: Float32Array, options: Required<CivilizationOptions>): number[] {
-    const random = makeRandom(options.seed);
-    const candidates: Array<{triangle: number; score: number}> = [];
-
-    for (let t = 0; t < world.mesh.numSolidTriangles; t++) {
-        const score = suitability[t];
-        if (score < 0.42) continue;
-        candidates.push({triangle: t, score: score + random() * 0.08});
+function chooseHomelands(world: GeneratedWorldMap, suitability: Float32Array, options: Required<CivilizationOptions>, creationDomains: BeliefDomain[]): number[] {
+    const rankedByCivilization: Array<Array<{triangle: number; score: number}>> = [];
+    for (let civilizationId = 0; civilizationId < options.count; civilizationId++) {
+        const domain = creationDomains[civilizationId] ?? civilizationCreationDomain(options.seed, civilizationId);
+        const candidates: Array<{triangle: number; score: number}> = [];
+        for (let t = 0; t < world.mesh.numSolidTriangles; t++) {
+            if (suitability[t] < 0.42) continue;
+            candidates.push({
+                triangle: t,
+                score: creationSeatScore(world, suitability, t, domain, options.seed, civilizationId),
+            });
+        }
+        candidates.sort((a, b) => b.score - a.score || a.triangle - b.triangle);
+        rankedByCivilization.push(candidates);
     }
 
-    candidates.sort((a, b) => b.score - a.score);
-
-    const selected: number[] = [];
+    const selected = new Array<number>(options.count).fill(-1);
+    const selectedTriangles = new Set<number>();
     let minDistance = 165;
-    while (selected.length < options.count && minDistance >= 45) {
-        for (let candidate of candidates) {
-            if (selected.length >= options.count) break;
-            if (selected.includes(candidate.triangle)) continue;
-            const farEnough = selected.every(t => triangleDistance2(world, t, candidate.triangle) >= minDistance * minDistance);
-            if (farEnough) selected.push(candidate.triangle);
+    while (selectedTriangles.size < options.count && minDistance >= 45) {
+        for (let civilizationId = 0; civilizationId < options.count; civilizationId++) {
+            if (selected[civilizationId] >= 0) continue;
+            for (let candidate of rankedByCivilization[civilizationId] ?? []) {
+                if (selectedTriangles.has(candidate.triangle)) continue;
+                const farEnough = [...selectedTriangles].every(triangle => triangleDistance2(world, triangle, candidate.triangle) >= minDistance * minDistance);
+                if (!farEnough) continue;
+                selected[civilizationId] = candidate.triangle;
+                selectedTriangles.add(candidate.triangle);
+                break;
+            }
         }
         minDistance *= 0.75;
     }
 
-    return selected.slice(0, options.count);
-}
-
-function bestSettlementSite(world: GeneratedWorldMap, simulation: CivilizationSimulation, civilizationId: number): number {
-    const settlements = simulation.settlements.filter(settlement => settlement.civilizationId === civilizationId);
-    if (settlements.length === 0) return -1;
-
-    const minDistance2 = simulation.options.minSettlementDistance * simulation.options.minSettlementDistance;
-    const maxDistance2 = simulation.options.expansionSearchRadius * simulation.options.expansionSearchRadius;
-    const closeEnemyDistance2 = simulation.options.minSettlementDistance * simulation.options.minSettlementDistance * 2.25;
-    const claimDistance2 = simulation.options.settlementClaimRadius * simulation.options.settlementClaimRadius;
-    const idealDistance = simulation.options.settlementClaimRadius + simulation.options.minSettlementDistance * 0.85;
-    let bestTriangle = -1;
-    let bestScore = -Infinity;
-
-    for (let i = 0; i < simulation.settlementCandidateTriangles.length; i++) {
-        const triangle = simulation.settlementCandidateTriangles[i];
-        const suitability = simulation.suitability_t[triangle];
-
-        const owner = simulation.territory_t[triangle] ?? -1;
-        if (owner >= 0 && owner !== civilizationId) continue;
-
-        let nearestSameDistance2 = Number.POSITIVE_INFINITY;
-        for (let settlement of settlements) {
-            nearestSameDistance2 = Math.min(nearestSameDistance2, triangleDistance2(world, settlement.triangle, triangle));
-        }
-        if (nearestSameDistance2 < minDistance2 || nearestSameDistance2 > maxDistance2) continue;
-
-        let enemyPressure = 0;
-        for (let settlement of simulation.settlements) {
-            if (settlement.civilizationId === civilizationId) continue;
-            const distance2 = triangleDistance2(world, settlement.triangle, triangle);
-            if (distance2 < closeEnemyDistance2) enemyPressure += 0.35;
-            else if (distance2 < claimDistance2) enemyPressure += 0.12;
-        }
-
-        const distance = Math.sqrt(nearestSameDistance2);
-        const distanceScore = 1 - clamp(Math.abs(distance - idealDistance) / Math.max(1, idealDistance), 0, 1);
-        const frontierBonus = owner < 0 ? 0.18 : 0.04;
-        const jitter = hashFloat(simulation.options.seed, civilizationId, simulation.year, triangle) * 0.04;
-        const score = suitability * 1.25 + simulation.settlementSiteBonus_t[triangle] + distanceScore * 0.26 + frontierBonus - enemyPressure + jitter;
-        if (score > bestScore) {
-            bestScore = score;
-            bestTriangle = triangle;
-        }
+    for (let civilizationId = 0; civilizationId < options.count; civilizationId++) {
+        if (selected[civilizationId] >= 0) continue;
+        const fallback = (rankedByCivilization[civilizationId] ?? []).find(candidate => !selectedTriangles.has(candidate.triangle));
+        if (!fallback) continue;
+        selected[civilizationId] = fallback.triangle;
+        selectedTriangles.add(fallback.triangle);
     }
 
-    return bestTriangle;
+    return selected.filter(triangle => triangle >= 0).slice(0, options.count);
+}
+
+function settlementSiteSelectionInput(world: GeneratedWorldMap, simulation: CivilizationSimulation, topCandidateLimit: number): SettlementSiteSelectionCommonInput {
+    const candidateTriangles = simulation.settlementCandidateTriangles;
+    const candidateX = sharedFloat32Array(candidateTriangles.length);
+    const candidateY = sharedFloat32Array(candidateTriangles.length);
+    const territory = sharedInt16Array(simulation.territory_t.length);
+    territory.set(simulation.territory_t);
+    for (let i = 0; i < candidateTriangles.length; i++) {
+        const triangle = candidateTriangles[i];
+        candidateX[i] = world.mesh.x_of_t(triangle);
+        candidateY[i] = world.mesh.y_of_t(triangle);
+    }
+
+    return {
+        year: simulation.year,
+        seed: simulation.options.seed,
+        minSettlementDistance: simulation.options.minSettlementDistance,
+        expansionSearchRadius: simulation.options.expansionSearchRadius,
+        settlementClaimRadius: simulation.options.settlementClaimRadius,
+        topCandidateLimit,
+        candidateTriangles,
+        candidateX,
+        candidateY,
+        suitability: simulation.suitability_t,
+        siteBonus: simulation.settlementSiteBonus_t,
+        territory,
+        settlements: simulation.settlements.map(settlement => ({
+            civilizationId: settlement.civilizationId,
+            x: settlement.x,
+            y: settlement.y,
+        })),
+    };
+}
+
+function settlementSitesForCivilizations(
+    world: GeneratedWorldMap,
+    simulation: CivilizationSimulation,
+    civilizationIds: number[],
+    workerPool?: CivilizationWorkerPool,
+): Map<number, number> {
+    const topCandidateLimit = Math.max(8, Math.min(32, civilizationIds.length * 4));
+    const input = settlementSiteSelectionInput(world, simulation, topCandidateLimit);
+    const rankedSites = workerPool
+        ? workerPool.selectSettlementSites(input, civilizationIds)
+        : new Map(civilizationIds.map(civilizationId => [
+            civilizationId,
+            settlementSiteCandidatesFromInput(input, civilizationId),
+        ]));
+
+    const selected = new Map<number, number>();
+    const reservedTriangles = new Set<number>();
+    for (let civilizationId of civilizationIds) {
+        for (let triangle of rankedSites.get(civilizationId) ?? []) {
+            if (reservedTriangles.has(triangle)) continue;
+            selected.set(civilizationId, triangle);
+            reservedTriangles.add(triangle);
+            break;
+        }
+    }
+    return selected;
+}
+
+function settlementAgentSeedPlanRequestsForSites(
+    simulation: CivilizationSimulation,
+    settlementSites: Map<number, number>,
+): SettlementAgentSeedPlanRequest[] {
+    const requests: SettlementAgentSeedPlanRequest[] = [];
+    let nextSettlementId = simulation.settlements.length;
+    let nextAgentId = simulation.agents.length;
+    for (let civ of simulation.civilizations) {
+        const triangle = settlementSites.get(civ.id) ?? -1;
+        if (triangle < 0) continue;
+        const suitability = simulation.suitability_t[triangle];
+        const targetPopulation = initialSettlementPopulation("town", suitability);
+        requests.push({
+            settlementId: nextSettlementId,
+            targetPopulation,
+            firstAgentId: nextAgentId,
+            civilizationId: civ.id,
+            type: "town",
+            suitability,
+            prosperity: initialSettlementProsperity(suitability),
+            unrest: initialSettlementUnrest(suitability),
+        });
+        nextSettlementId++;
+        nextAgentId += targetPopulation;
+    }
+    return requests;
+}
+
+function settlementAgentSeedPlansForSites(
+    simulation: CivilizationSimulation,
+    settlementSites: Map<number, number>,
+    workerPool?: CivilizationWorkerPool,
+): Map<number, SettlementAgentSeedPlan> {
+    const requests = settlementAgentSeedPlanRequestsForSites(simulation, settlementSites);
+    if (requests.length === 0) return new Map();
+    if (workerPool && requests.length > 1) {
+        return workerPool.buildSettlementAgentSeedPlans(simulation.options.seed, requests);
+    }
+    return new Map(requests.map(request => [
+        request.settlementId,
+        buildSettlementAgentSeedPlan(simulation.options.seed, request),
+    ]));
+}
+
+function capitalSeedPlanRequests(simulation: CivilizationSimulation, homelandTriangles: number[]): SettlementAgentSeedPlanRequest[] {
+    const requests: SettlementAgentSeedPlanRequest[] = [];
+    let nextSettlementId = simulation.settlements.length;
+    let nextAgentId = simulation.agents.length;
+    for (let civ of simulation.civilizations) {
+        const triangle = homelandTriangles[civ.id];
+        const suitability = simulation.suitability_t[triangle];
+        const targetPopulation = initialSettlementPopulation("capital", suitability);
+        requests.push({
+            settlementId: nextSettlementId,
+            targetPopulation,
+            firstAgentId: nextAgentId,
+            civilizationId: civ.id,
+            type: "capital",
+            suitability,
+            prosperity: initialSettlementProsperity(suitability),
+            unrest: initialSettlementUnrest(suitability),
+        });
+        nextSettlementId++;
+        nextAgentId += targetPopulation;
+    }
+    return requests;
+}
+
+function capitalSeedPlans(
+    simulation: CivilizationSimulation,
+    homelandTriangles: number[],
+    workerPool?: CivilizationWorkerPool,
+): Map<number, SettlementAgentSeedPlan> {
+    const requests = capitalSeedPlanRequests(simulation, homelandTriangles);
+    if (requests.length === 0) return new Map();
+    if (workerPool && requests.length > 1) {
+        return workerPool.buildSettlementAgentSeedPlans(simulation.options.seed, requests);
+    }
+    return new Map(requests.map(request => [
+        request.settlementId,
+        buildSettlementAgentSeedPlan(simulation.options.seed, request),
+    ]));
 }
 
 function settlementControlName(simulation: CivilizationSimulation, settlementId: number, civilizationId: number): string {
@@ -22127,9 +25088,13 @@ function refreshSettlementControl(simulation: CivilizationSimulation, control: S
         : `from year ${control.startedYear} to year ${control.endedYear ?? simulation.year}`;
     const start = control.startReason === "founded"
         ? `${civilizationName} founded ${settlementName}`
-        : `${civilizationName} captured ${settlementName}${previousCivilization ? ` from ${previousCivilization.name}` : ""}`;
+        : control.startReason === "seceded"
+            ? `${settlementName} seceded to ${civilizationName}${previousCivilization ? ` from ${previousCivilization.name}` : ""}`
+            : control.startReason === "restored"
+                ? `${settlementName} restored ${civilizationName}${previousCivilization ? ` from the fall of ${previousCivilization.name}` : ""}`
+                : `${civilizationName} captured ${settlementName}${previousCivilization ? ` from ${previousCivilization.name}` : ""}`;
     const end = control.status === "ended"
-        ? ` It ended when ${settlementName} was captured.`
+        ? ` It ended when ${control.endReason === "seceded" ? `${settlementName} seceded` : control.endReason === "restored" ? `${settlementName} was restored under a successor` : `${settlementName} was captured`}.`
         : "";
     control.subjectRefs = settlementControlSubjectRefs(simulation, control);
     control.description = `${civilizationName} controlled ${settlementName} ${span}. ${start}.${end}`;
@@ -22215,15 +25180,42 @@ function closeSettlementControl(
     refreshSettlementControl(simulation, control);
 }
 
+function initialSettlementPopulation(type: "capital" | "town", suitability: number): number {
+    return type === "capital" ? Math.round(900 + 700 * suitability) : Math.round(140 + 420 * suitability);
+}
+
+function expansionAttemptChance(options: Required<CivilizationOptions>): number {
+    const opportunitiesPerCentury = Math.max(1, 100 / Math.max(1, options.settlementInterval));
+    return clamp(options.expansionRate / opportunitiesPerCentury, 0, 1);
+}
+
+function expandingCivilizationIdsThisYear(simulation: CivilizationSimulation): number[] {
+    if (simulation.year % simulation.options.settlementInterval !== 0) return [];
+    const chance = expansionAttemptChance(simulation.options);
+    return simulation.civilizations
+        .filter(civ => civ.status !== "fallen" && (chance >= 1 || hashFloat(simulation.options.seed, simulation.year, civ.id, 7109) < chance))
+        .map(civ => civ.id);
+}
+
+function initialSettlementProsperity(suitability: number): number {
+    return clamp(0.45 + suitability * 0.35, 0, 1);
+}
+
+function initialSettlementUnrest(suitability: number): number {
+    return clamp(0.14 - suitability * 0.08, 0, 1);
+}
+
 function createSettlement(
     world: GeneratedWorldMap,
     simulation: CivilizationSimulation,
     civilizationId: number,
     triangle: number,
     type: "capital" | "town",
+    seedPlan?: SettlementAgentSeedPlan,
 ) {
     const id = simulation.settlements.length;
     const suitability = simulation.suitability_t[triangle];
+    const resourceProfile = settlementResourceProfileForTriangle(world, triangle, suitability);
     const settlement: Settlement = {
         id,
         civilizationId,
@@ -22234,12 +25226,14 @@ function createSettlement(
         y: world.mesh.y_of_t(triangle),
         foundedYear: simulation.year,
         controlledSinceYear: simulation.year,
-        population: type === "capital" ? Math.round(900 + 700 * suitability) : Math.round(140 + 420 * suitability),
+        population: initialSettlementPopulation(type, suitability),
         suitability,
+        foodPotential: resourceProfile.foodPotential,
+        materialPotential: resourceProfile.materialPotential,
         food: Math.round((type === "capital" ? 900 : 240) * (0.8 + suitability)),
         materials: Math.round((type === "capital" ? 460 : 120) * (0.7 + suitability)),
-        prosperity: clamp(0.45 + suitability * 0.35, 0, 1),
-        unrest: clamp(0.14 - suitability * 0.08, 0, 1),
+        prosperity: initialSettlementProsperity(suitability),
+        unrest: initialSettlementUnrest(suitability),
         structureIds: [],
         controlIds: [],
         traditionIds: [],
@@ -22251,11 +25245,15 @@ function createSettlement(
         simulation.civilizations[civilizationId].capitalSettlementId = id;
     }
     const control = createSettlementControl(simulation, settlement, civilizationId, "founded");
+    const civilization = simulation.civilizations[civilizationId];
+    const creationSeatText = type === "capital"
+        ? ` It answered the ${beliefDomainLabel(civilization.creationDomain)} creation-seat mandate to seek ${civilization.creationSeatPreference}.`
+        : "";
     const foundingEventId = recordLegendEvent(simulation, {
         year: simulation.year,
         type: "settlement-founded",
         headline: `${settlement.name} was founded.`,
-        description: `${settlement.name} was founded by ${simulation.civilizations[civilizationId].name}.`,
+        description: `${settlement.name} was founded by ${civilization.name}.${creationSeatText}`,
         civilizationId,
         settlementId: id,
         settlementControlId: control.id,
@@ -22269,7 +25267,7 @@ function createSettlement(
     control.startEventId = foundingEventId;
     addSettlementControlRefToEvent(simulation, control, foundingEventId, true);
     refreshSettlementControl(simulation, control);
-    const localAgents = timedPhase(simulation, "settlement-seed-agents", () => seedSettlementAgents(simulation, settlement));
+    const localAgents = timedPhase(simulation, "settlement-seed-agents", () => seedSettlementAgents(simulation, settlement, seedPlan));
     timedPhase(simulation, "settlement-seed-beliefs", () => {
         if (type === "capital" && civilizationBeliefs(simulation, civilizationId).length === 0) {
             createBelief(world, simulation, settlement, localAgents);
@@ -22302,6 +25300,606 @@ function settlementDistance(a: Settlement, b: Settlement): number {
     return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
+function militaryUnitKindLabel(kind: MilitaryUnitKind): string {
+    if (kind === "garrison") return "garrison";
+    if (kind === "militia") return "militia";
+    if (kind === "warband") return "warband";
+    return "scouts";
+}
+
+function equipmentCacheKindLabel(kind: EquipmentCacheKind): string {
+    if (kind === "weapon-cache") return "weapon cache";
+    if (kind === "armor-cache") return "armor cache";
+    return "siege kit";
+}
+
+function spyOperationKindLabel(kind: SpyOperationKind): string {
+    if (kind === "scout-border") return "border scouting";
+    if (kind === "sabotage-supplies") return "supply sabotage";
+    if (kind === "bribe-gate") return "gate bribery";
+    return "counterspy sweep";
+}
+
+function spyOperationOutcomeLabel(outcome: SpyOperationOutcome): string {
+    if (outcome === "success") return "succeeded";
+    if (outcome === "partial") return "partly succeeded";
+    if (outcome === "exposed") return "was exposed";
+    return "failed";
+}
+
+const militaryWeaponClasses: WeaponClass[] = ["spears", "bows", "blades", "axes", "siege-tools"];
+const militaryArmorClasses: ArmorClass[] = ["none", "hide", "leather", "mail", "lamellar"];
+const spyNetworkCovers: SpyNetworkCover[] = ["merchants", "pilgrims", "envoys", "smugglers", "scribes"];
+const spyOperationKinds: SpyOperationKind[] = ["scout-border", "sabotage-supplies", "bribe-gate", "counterspy-sweep"];
+
+function unitKindForSettlement(settlement: Settlement): MilitaryUnitKind {
+    return settlement.type === "capital" ? "garrison" : "militia";
+}
+
+function unitWeaponClass(seed: number, civilizationId: number, settlementId: number): WeaponClass {
+    return militaryWeaponClasses[Math.floor(hashFloat(seed, civilizationId, settlementId, 3011) * militaryWeaponClasses.length) % militaryWeaponClasses.length];
+}
+
+function unitArmorClass(seed: number, civilizationId: number, settlementId: number, settlement: Settlement): ArmorClass {
+    const roll = hashFloat(seed, civilizationId, settlementId, 3023) + settlement.prosperity * 0.25;
+    if (roll > 1.12) return "lamellar";
+    if (roll > 0.86) return "mail";
+    if (roll > 0.52) return "leather";
+    if (roll > 0.2) return "hide";
+    return "none";
+}
+
+function equipmentConditionForQuality(quality: number): EquipmentCondition {
+    if (quality >= 0.74) return "fine";
+    if (quality >= 0.36) return "serviceable";
+    return "poor";
+}
+
+function militaryUnitName(simulation: CivilizationSimulation, id: number, kind: MilitaryUnitKind, settlement: Settlement): string {
+    const civ = simulation.civilizations[settlement.civilizationId];
+    const noun = kind === "garrison" ? "Garrison"
+        : kind === "militia" ? "Militia"
+        : kind === "warband" ? "Warband"
+        : "Scouts";
+    return `${settlement.name} ${noun} of ${civ?.name ?? `Civilization ${settlement.civilizationId}`} ${id + 1}`;
+}
+
+function equipmentCacheName(cache: EquipmentCache, settlement: Settlement): string {
+    const item = cache.weaponClass ?? cache.armorClass ?? "siege tools";
+    return `${settlement.name} ${String(item).replace(/-/g, " ")} ${equipmentCacheKindLabel(cache.kind)}`;
+}
+
+function spyNetworkName(simulation: CivilizationSimulation, id: number, origin: Settlement, target: Settlement): string {
+    const civ = simulation.civilizations[origin.civilizationId];
+    return `${origin.name} ${spyNetworkCovers[id % spyNetworkCovers.length]} watching ${target.name} for ${civ?.name ?? `Civilization ${origin.civilizationId}`}`;
+}
+
+function spyOperationName(network: SpyNetwork, operationKind: SpyOperationKind, target: Settlement, id: number): string {
+    return `${spyOperationKindLabel(operationKind)} at ${target.name} ${network.id + 1}.${id + 1}`;
+}
+
+function activeMilitaryUnitForSettlement(simulation: CivilizationSimulation, settlementId: number, civilizationId: number): MilitaryUnit | undefined {
+    return simulation.militaryUnits.find(unit => unit.status === "active" && unit.settlementId === settlementId && unit.civilizationId === civilizationId);
+}
+
+function activeMilitaryUnitsForCivilization(simulation: CivilizationSimulation, civilizationId: number): MilitaryUnit[] {
+    return simulation.militaryUnits.filter(unit => unit.status === "active" && unit.civilizationId === civilizationId);
+}
+
+function selectUnitTroops(simulation: CivilizationSimulation, settlement: Settlement, kind: MilitaryUnitKind): Agent[] {
+    const limit = kind === "garrison" ? 48 : kind === "warband" ? 38 : kind === "scouts" ? 18 : 30;
+    const desired = Math.max(kind === "garrison" ? 16 : 8, Math.min(limit, Math.floor(Math.sqrt(Math.max(1, settlement.population)) * (kind === "garrison" ? 1.25 : 0.95))));
+    return simulation.agents
+        .filter(agent => agent.alive && agent.age >= 16 && agent.civilizationId === settlement.civilizationId && agent.settlementId === settlement.id)
+        .map(agent => ({
+            agent,
+            score: battleAgentScore(simulation, agent, settlement)
+                + (agent.profession === "guard" ? 0.28 : 0)
+                + (agent.profession === "merchant" && kind === "scouts" ? 0.18 : 0)
+                + hashFloat(simulation.options.seed, simulation.year * 4099 + settlement.id, agent.id, 3037) * 0.1,
+        }))
+        .sort((a, b) => b.score - a.score || a.agent.id - b.agent.id)
+        .slice(0, desired)
+        .map(candidate => candidate.agent);
+}
+
+function militaryUnitSubjectRefs(simulation: CivilizationSimulation, unit: MilitaryUnit): LegendEntityRef[] {
+    return uniqueLegendRefs([
+        militaryUnitRef(simulation, unit.id),
+        civilizationRef(simulation, unit.civilizationId),
+        settlementRef(simulation, unit.settlementId),
+        ...(unit.commanderAgentId === undefined ? [] : [personRef(simulation, unit.commanderAgentId)]),
+        ...unit.equipmentCacheIds.map(id => equipmentCacheRef(simulation, id)),
+        ...unit.battleIds.slice(-6).map(id => battleRef(simulation, id)),
+        ...unit.spyOperationIds.slice(-4).map(id => spyOperationRef(simulation, id)),
+        ...unit.troopAgentIds.slice(0, 8).map(id => personRef(simulation, id)),
+    ], 26);
+}
+
+function equipmentCacheSubjectRefs(simulation: CivilizationSimulation, cache: EquipmentCache): LegendEntityRef[] {
+    return uniqueLegendRefs([
+        equipmentCacheRef(simulation, cache.id),
+        civilizationRef(simulation, cache.civilizationId),
+        settlementRef(simulation, cache.settlementId),
+        ...(cache.unitId === undefined ? [] : [militaryUnitRef(simulation, cache.unitId)]),
+        ...(cache.sourceEventId === undefined ? [] : [eventRef(simulation, cache.sourceEventId)]),
+    ], 10);
+}
+
+function refreshEquipmentCache(simulation: CivilizationSimulation, cache: EquipmentCache, unit: MilitaryUnit | undefined) {
+    const settlement = simulation.settlements[cache.settlementId];
+    if (unit) {
+        cache.quantity = Math.max(1, unit.troopAgentIds.length);
+        cache.quality = clamp(cache.quality * 0.88 + (unit.training * 0.08 + (settlement?.prosperity ?? 0.5) * 0.04), 0.05, 1);
+    }
+    cache.condition = equipmentConditionForQuality(cache.quality);
+    const settlementName = settlement?.name ?? `Settlement ${cache.settlementId}`;
+    const item = cache.weaponClass ?? cache.armorClass ?? "siege tools";
+    cache.name = equipmentCacheName(cache, settlement ?? ({name: settlementName} as Settlement));
+    cache.description = `${cache.name} holds ${cache.quantity} ${String(item).replace(/-/g, " ")} item ${cache.quantity === 1 ? "set" : "sets"} in ${cache.condition} condition with quality ${cache.quality.toFixed(2)}.`;
+    cache.subjectRefs = equipmentCacheSubjectRefs(simulation, cache);
+}
+
+function createEquipmentCache(
+    simulation: CivilizationSimulation,
+    unit: MilitaryUnit,
+    kind: EquipmentCacheKind,
+    options: {weaponClass?: WeaponClass; armorClass?: ArmorClass},
+): EquipmentCache {
+    const id = simulation.equipmentCaches.length;
+    const settlement = simulation.settlements[unit.settlementId];
+    const baseQuality = clamp(0.24 + (settlement?.prosperity ?? 0.5) * 0.45 + unit.training * 0.18 + hashFloat(simulation.options.seed, unit.id, id, 3049) * 0.12, 0.05, 1);
+    const cache: EquipmentCache = {
+        id,
+        name: "",
+        kind,
+        year: simulation.year,
+        civilizationId: unit.civilizationId,
+        settlementId: unit.settlementId,
+        unitId: unit.id,
+        weaponClass: options.weaponClass,
+        armorClass: options.armorClass,
+        quality: baseQuality,
+        quantity: Math.max(1, unit.troopAgentIds.length),
+        condition: equipmentConditionForQuality(baseQuality),
+        subjectRefs: [],
+        description: "",
+        eventIds: [],
+    };
+    simulation.equipmentCaches.push(cache);
+    refreshEquipmentCache(simulation, cache, unit);
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "equipment-cache-stocked",
+        headline: `${cache.name} was stocked.`,
+        description: `${cache.name} was stocked for ${unit.name} in ${settlement?.name ?? `Settlement ${unit.settlementId}`}.`,
+        civilizationId: unit.civilizationId,
+        settlementId: unit.settlementId,
+        equipmentCacheId: cache.id,
+        militaryUnitId: unit.id,
+        entityRefs: cache.subjectRefs,
+    });
+    cache.sourceEventId = eventId;
+    cache.eventIds.push(eventId);
+    refreshEquipmentCache(simulation, cache, unit);
+    return cache;
+}
+
+function refreshMilitaryUnit(simulation: CivilizationSimulation, unit: MilitaryUnit) {
+    const settlement = simulation.settlements[unit.settlementId];
+    if (!settlement || settlement.civilizationId !== unit.civilizationId) {
+        unit.status = "disbanded";
+        unit.disbandedYear ??= simulation.year;
+        unit.supply = clamp(unit.supply - 0.28, 0, 1);
+        unit.morale = clamp(unit.morale - 0.2, 0, 1);
+        return;
+    }
+
+    const troops = selectUnitTroops(simulation, settlement, unit.kind);
+    unit.troopAgentIds = troops.map(agent => agent.id);
+    unit.commanderAgentId = chooseBattleCommander(simulation, troops, settlement)?.id;
+    const avgSkill = troops.length ? troops.reduce((sum, agent) => sum + agent.skill, 0) / troops.length : 0.2;
+    const avgMorale = troops.length ? troops.reduce((sum, agent) => sum + agent.morale, 0) / troops.length : 0.4;
+    const guardShare = troops.length ? troops.filter(agent => agent.profession === "guard").length / troops.length : 0;
+    unit.training = clamp(unit.training * 0.86 + avgSkill * 0.08 + guardShare * 0.06 + (settlement.type === "capital" ? 0.02 : 0), 0.04, 1);
+    unit.morale = clamp(unit.morale * 0.72 + avgMorale * 0.18 + settlement.prosperity * 0.1 - settlement.unrest * 0.08, 0.02, 1);
+    unit.supply = clamp(unit.supply * 0.74 + settlement.prosperity * 0.2 + (settlement.food > settlement.population ? 0.06 : -0.04) - settlement.unrest * 0.05, 0.02, 1);
+    unit.strength = Math.round(troops.length * (0.7 + unit.training * 0.42 + unit.morale * 0.25 + unit.supply * 0.18));
+    for (let cacheId of unit.equipmentCacheIds) refreshEquipmentCache(simulation, simulation.equipmentCaches[cacheId], unit);
+    const weaponCache = unit.equipmentCacheIds.map(id => simulation.equipmentCaches[id]).find(cache => cache?.kind === "weapon-cache");
+    const armorCache = unit.equipmentCacheIds.map(id => simulation.equipmentCaches[id]).find(cache => cache?.kind === "armor-cache");
+    if (weaponCache) unit.weaponQuality = weaponCache.quality;
+    if (armorCache) unit.armorQuality = armorCache.quality;
+    unit.name = militaryUnitName(simulation, unit.id, unit.kind, settlement);
+    unit.description = `${unit.name} is an ${unit.status} ${militaryUnitKindLabel(unit.kind)} at ${settlement.name} with ${unit.troopAgentIds.length} listed troops, strength ${unit.strength}, training ${unit.training.toFixed(2)}, morale ${unit.morale.toFixed(2)}, supply ${unit.supply.toFixed(2)}, ${unit.weaponClass} weapons, and ${unit.armorClass} armor.`;
+    unit.subjectRefs = militaryUnitSubjectRefs(simulation, unit);
+}
+
+function createMilitaryUnit(simulation: CivilizationSimulation, settlement: Settlement): MilitaryUnit {
+    const id = simulation.militaryUnits.length;
+    const kind = unitKindForSettlement(settlement);
+    const weaponClass = unitWeaponClass(simulation.options.seed, settlement.civilizationId, settlement.id);
+    const armorClass = unitArmorClass(simulation.options.seed, settlement.civilizationId, settlement.id, settlement);
+    const unit: MilitaryUnit = {
+        id,
+        name: militaryUnitName(simulation, id, kind, settlement),
+        kind,
+        status: "active",
+        formedYear: simulation.year,
+        civilizationId: settlement.civilizationId,
+        settlementId: settlement.id,
+        troopAgentIds: [],
+        equipmentCacheIds: [],
+        battleIds: [],
+        spyOperationIds: [],
+        strength: 0,
+        training: clamp(0.2 + settlement.prosperity * 0.18 + (kind === "garrison" ? 0.1 : 0) + hashFloat(simulation.options.seed, id, 3061, 1) * 0.12, 0.04, 1),
+        morale: clamp(0.38 + settlement.prosperity * 0.18 - settlement.unrest * 0.12, 0.02, 1),
+        supply: clamp(0.36 + settlement.prosperity * 0.28, 0.02, 1),
+        weaponClass,
+        armorClass,
+        weaponQuality: 0.3,
+        armorQuality: 0.2,
+        subjectRefs: [],
+        description: "",
+        eventIds: [],
+    };
+    simulation.militaryUnits.push(unit);
+    refreshMilitaryUnit(simulation, unit);
+    unit.equipmentCacheIds.push(createEquipmentCache(simulation, unit, "weapon-cache", {weaponClass}).id);
+    if (armorClass !== "none") unit.equipmentCacheIds.push(createEquipmentCache(simulation, unit, "armor-cache", {armorClass}).id);
+    if (weaponClass === "siege-tools") unit.equipmentCacheIds.push(createEquipmentCache(simulation, unit, "siege-kit", {weaponClass}).id);
+    refreshMilitaryUnit(simulation, unit);
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "military-unit-formed",
+        headline: `${unit.name} was formed.`,
+        description: `${unit.name} formed at ${settlement.name} with ${unit.troopAgentIds.length} listed troops and ${unit.equipmentCacheIds.length} equipment ${unit.equipmentCacheIds.length === 1 ? "cache" : "caches"}.`,
+        civilizationId: unit.civilizationId,
+        settlementId: unit.settlementId,
+        personId: unit.commanderAgentId,
+        militaryUnitId: unit.id,
+        entityRefs: unit.subjectRefs,
+    });
+    unit.formedEventId = eventId;
+    unit.eventIds.push(eventId);
+    return unit;
+}
+
+function maintainMilitaryForces(simulation: CivilizationSimulation) {
+    for (let unit of simulation.militaryUnits) {
+        if (unit.status !== "active") continue;
+        const settlement = simulation.settlements[unit.settlementId];
+        if (!settlement || settlement.civilizationId !== unit.civilizationId) {
+            unit.status = "disbanded";
+            unit.disbandedYear = simulation.year;
+            refreshMilitaryUnit(simulation, unit);
+        }
+    }
+
+    for (let settlement of simulation.settlements) {
+        if (settlement.civilizationId < 0) continue;
+        let unit = activeMilitaryUnitForSettlement(simulation, settlement.id, settlement.civilizationId);
+        if (!unit) unit = createMilitaryUnit(simulation, settlement);
+        else refreshMilitaryUnit(simulation, unit);
+    }
+}
+
+function militaryUnitPower(unit: MilitaryUnit): number {
+    const kindFactor = unit.kind === "garrison" ? 1.18 : unit.kind === "warband" ? 1.08 : unit.kind === "scouts" ? 0.82 : 1;
+    const weaponFactor = 0.76 + unit.weaponQuality * 0.58 + (unit.weaponClass === "siege-tools" ? 0.12 : 0);
+    const armorFactor = 0.82 + unit.armorQuality * 0.36 + (unit.armorClass === "none" ? -0.08 : 0);
+    return Math.max(0, unit.strength * kindFactor * (0.54 + unit.training * 0.48 + unit.morale * 0.22 + unit.supply * 0.2) * weaponFactor * armorFactor);
+}
+
+function activeMilitaryUnitsForBattle(simulation: CivilizationSimulation, civilizationId: number, target: Settlement, side: BattleParticipationSide): MilitaryUnit[] {
+    const units = activeMilitaryUnitsForCivilization(simulation, civilizationId)
+        .filter(unit => {
+            const settlement = simulation.settlements[unit.settlementId];
+            if (!settlement) return false;
+            if (side === "defender") return unit.settlementId === target.id;
+            return settlementDistance(settlement, target) <= simulation.options.invasionRange;
+        })
+        .sort((a, b) => {
+            const settlementA = simulation.settlements[a.settlementId];
+            const settlementB = simulation.settlements[b.settlementId];
+            const distanceA = settlementA ? settlementDistance(settlementA, target) : Number.POSITIVE_INFINITY;
+            const distanceB = settlementB ? settlementDistance(settlementB, target) : Number.POSITIVE_INFINITY;
+            return distanceA - distanceB || militaryUnitPower(b) - militaryUnitPower(a) || a.id - b.id;
+        });
+    return side === "attacker" ? units.slice(0, 4) : units;
+}
+
+function militaryPowerForCivilizationNearTarget(simulation: CivilizationSimulation, civilizationId: number, target: Settlement): number {
+    let power = 0;
+    for (let unit of activeMilitaryUnitsForBattle(simulation, civilizationId, target, "attacker")) {
+        const settlement = simulation.settlements[unit.settlementId];
+        const distanceFactor = settlement ? 1 - clamp(settlementDistance(settlement, target) / simulation.options.invasionRange, 0, 0.7) : 0.4;
+        power += militaryUnitPower(unit) * (0.55 + distanceFactor * 0.45);
+    }
+    return power;
+}
+
+function militaryDefenseForSettlement(simulation: CivilizationSimulation, settlement: Settlement): number {
+    return activeMilitaryUnitsForBattle(simulation, settlement.civilizationId, settlement, "defender")
+        .reduce((sum, unit) => sum + militaryUnitPower(unit) * 1.22, 0);
+}
+
+function activeUnitTroopIdsForBattle(simulation: CivilizationSimulation, civilizationId: number, target: Settlement, side: BattleParticipationSide): Set<number> {
+    return new Set(activeMilitaryUnitsForBattle(simulation, civilizationId, target, side).flatMap(unit => unit.troopAgentIds));
+}
+
+function spyNetworkSubjectRefs(simulation: CivilizationSimulation, network: SpyNetwork): LegendEntityRef[] {
+    return uniqueLegendRefs([
+        spyNetworkRef(simulation, network.id),
+        civilizationRef(simulation, network.civilizationId),
+        settlementRef(simulation, network.settlementId),
+        ...(network.targetCivilizationId === undefined ? [] : [civilizationRef(simulation, network.targetCivilizationId)]),
+        ...(network.targetSettlementId === undefined ? [] : [settlementRef(simulation, network.targetSettlementId)]),
+        ...(network.handlerAgentId === undefined ? [] : [personRef(simulation, network.handlerAgentId)]),
+        ...network.agentIds.slice(0, 6).map(id => personRef(simulation, id)),
+        ...network.operationIds.slice(-6).map(id => spyOperationRef(simulation, id)),
+    ], 20);
+}
+
+function spyOperationSubjectRefs(simulation: CivilizationSimulation, operation: SpyOperation): LegendEntityRef[] {
+    return uniqueLegendRefs([
+        spyOperationRef(simulation, operation.id),
+        spyNetworkRef(simulation, operation.networkId),
+        civilizationRef(simulation, operation.civilizationId),
+        civilizationRef(simulation, operation.targetCivilizationId),
+        settlementRef(simulation, operation.targetSettlementId),
+        ...operation.agentIds.slice(0, 6).map(id => personRef(simulation, id)),
+        ...(operation.battleId === undefined ? [] : [battleRef(simulation, operation.battleId)]),
+        ...(operation.conflictId === undefined ? [] : [conflictRef(simulation, operation.conflictId)]),
+    ], 18);
+}
+
+function refreshSpyNetwork(simulation: CivilizationSimulation, network: SpyNetwork) {
+    const origin = simulation.settlements[network.settlementId];
+    const target = network.targetSettlementId === undefined ? undefined : simulation.settlements[network.targetSettlementId];
+    if (!origin || !target || origin.civilizationId !== network.civilizationId || target.civilizationId === network.civilizationId) {
+        network.status = network.status === "exposed" ? "exposed" : "dormant";
+        network.description = `${network.name} no longer has an active foreign target.`;
+        network.subjectRefs = spyNetworkSubjectRefs(simulation, network);
+        return;
+    }
+    network.targetCivilizationId = target.civilizationId;
+    const agents = simulation.agents
+        .filter(agent => agent.alive && agent.age >= 16 && agent.civilizationId === network.civilizationId && agent.settlementId === origin.id)
+        .map(agent => ({
+            agent,
+            score: agent.skill * 0.34
+                + agent.morale * 0.18
+                + (agent.profession === "merchant" ? 0.24 : agent.profession === "scholar" ? 0.18 : agent.profession === "guard" ? 0.12 : 0)
+                + hashFloat(simulation.options.seed, network.id, agent.id, 3091) * 0.1,
+        }))
+        .sort((a, b) => b.score - a.score || a.agent.id - b.agent.id)
+        .slice(0, 8)
+        .map(entry => entry.agent);
+    network.agentIds = agents.map(agent => agent.id);
+    network.handlerAgentId = agents[0]?.id;
+    const avgSkill = agents.length ? agents.reduce((sum, agent) => sum + agent.skill, 0) / agents.length : 0.2;
+    network.secrecy = clamp(network.secrecy * 0.9 + avgSkill * 0.05 + (origin.prosperity * 0.03) - target.unrest * 0.02, 0.02, 1);
+    network.infiltration = clamp(network.infiltration * 0.92 + avgSkill * 0.04 + (1 - settlementDistance(origin, target) / Math.max(1, simulation.options.invasionRange * 1.4)) * 0.04, 0.02, 1);
+    network.intelligence = clamp(network.intelligence * 0.88 + network.infiltration * 0.07 + network.secrecy * 0.03, 0.02, 1);
+    if (network.status !== "exposed") network.status = "active";
+    network.description = `${network.name} uses ${network.cover} cover from ${origin.name} toward ${target.name}; secrecy ${network.secrecy.toFixed(2)}, infiltration ${network.infiltration.toFixed(2)}, intelligence ${network.intelligence.toFixed(2)}.`;
+    network.subjectRefs = spyNetworkSubjectRefs(simulation, network);
+}
+
+function chooseSpyTarget(simulation: CivilizationSimulation, civilizationId: number): Settlement | undefined {
+    const origins = simulation.settlements.filter(settlement => settlement.civilizationId === civilizationId);
+    if (origins.length === 0) return undefined;
+    let best: {origin: Settlement; target: Settlement; score: number} | undefined;
+    for (let origin of origins) {
+        for (let target of simulation.settlements) {
+            if (target.civilizationId === civilizationId) continue;
+            const distance = settlementDistance(origin, target);
+            if (distance > simulation.options.invasionRange * 1.35) continue;
+            if (simulation.spyNetworks.some(network => network.status === "active" && network.civilizationId === civilizationId && network.targetSettlementId === target.id)) continue;
+            const score = (1 - distance / (simulation.options.invasionRange * 1.35))
+                + target.population / 1800
+                + target.unrest * 0.2
+                + hashFloat(simulation.options.seed, civilizationId * 4099 + origin.id, target.id, 3109) * 0.12;
+            if (!best || score > best.score) best = {origin, target, score};
+        }
+    }
+    return best?.target;
+}
+
+function bestOriginForSpyTarget(simulation: CivilizationSimulation, civilizationId: number, target: Settlement): Settlement | undefined {
+    return simulation.settlements
+        .filter(settlement => settlement.civilizationId === civilizationId)
+        .sort((a, b) => settlementDistance(a, target) - settlementDistance(b, target) || b.population - a.population || a.id - b.id)[0];
+}
+
+function createSpyNetwork(simulation: CivilizationSimulation, civilizationId: number, target: Settlement): SpyNetwork | undefined {
+    const origin = bestOriginForSpyTarget(simulation, civilizationId, target);
+    if (!origin) return undefined;
+    const id = simulation.spyNetworks.length;
+    const network: SpyNetwork = {
+        id,
+        name: spyNetworkName(simulation, id, origin, target),
+        status: "active",
+        cover: spyNetworkCovers[Math.floor(hashFloat(simulation.options.seed, id * 4099 + civilizationId, target.id, 3119) * spyNetworkCovers.length) % spyNetworkCovers.length],
+        formedYear: simulation.year,
+        civilizationId,
+        settlementId: origin.id,
+        targetCivilizationId: target.civilizationId,
+        targetSettlementId: target.id,
+        agentIds: [],
+        operationIds: [],
+        secrecy: clamp(0.32 + origin.prosperity * 0.18 + hashFloat(simulation.options.seed, id, 3137, 1) * 0.18, 0.02, 1),
+        infiltration: clamp(0.18 + target.unrest * 0.12 + hashFloat(simulation.options.seed, id, 3149, 1) * 0.16, 0.02, 1),
+        intelligence: clamp(0.16 + hashFloat(simulation.options.seed, id, 3163, 1) * 0.14, 0.02, 1),
+        subjectRefs: [],
+        description: "",
+        eventIds: [],
+    };
+    simulation.spyNetworks.push(network);
+    refreshSpyNetwork(simulation, network);
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "spy-network-formed",
+        headline: `${network.name} was formed.`,
+        description: `${network.name} began watching ${target.name} for ${simulation.civilizations[civilizationId]?.name ?? `Civilization ${civilizationId}`}.`,
+        civilizationId,
+        settlementId: origin.id,
+        spyNetworkId: network.id,
+        entityRefs: network.subjectRefs,
+    });
+    network.formedEventId = eventId;
+    network.eventIds.push(eventId);
+    return network;
+}
+
+function createSpyOperation(simulation: CivilizationSimulation, network: SpyNetwork, forcedKind?: SpyOperationKind): SpyOperation | undefined {
+    if (network.status !== "active" || network.targetSettlementId === undefined || network.targetCivilizationId === undefined) return undefined;
+    const target = simulation.settlements[network.targetSettlementId];
+    if (!target || target.civilizationId === network.civilizationId) return undefined;
+    const id = simulation.spyOperations.length;
+    const kind = forcedKind ?? spyOperationKinds[Math.floor(hashFloat(simulation.options.seed, network.id * 4099 + simulation.year, id, 3181) * spyOperationKinds.length) % spyOperationKinds.length];
+    const baseRisk = kind === "counterspy-sweep" ? 0.34 : kind === "sabotage-supplies" ? 0.56 : kind === "bribe-gate" ? 0.48 : 0.28;
+    const risk = clamp(baseRisk + (1 - network.secrecy) * 0.32 - network.infiltration * 0.16, 0.05, 0.95);
+    const roll = hashFloat(simulation.options.seed, network.id * 4099 + simulation.year, id, 3191);
+    const success = clamp(network.intelligence * 0.42 + network.infiltration * 0.34 + network.secrecy * 0.18 + roll * 0.14, 0, 1);
+    const detected = hashFloat(simulation.options.seed, network.id * 4099 + simulation.year, id, 3203) < risk * (success < 0.42 ? 0.9 : 0.44);
+    const outcome: SpyOperationOutcome = detected && success < 0.54 ? "exposed"
+        : success >= 0.72 ? "success"
+        : success >= 0.48 ? "partial"
+        : "failed";
+    const operation: SpyOperation = {
+        id,
+        name: spyOperationName(network, kind, target, id),
+        kind,
+        outcome,
+        year: simulation.year,
+        networkId: network.id,
+        civilizationId: network.civilizationId,
+        targetCivilizationId: target.civilizationId,
+        targetSettlementId: target.id,
+        agentIds: [...network.agentIds],
+        risk,
+        success,
+        detected,
+        subjectRefs: [],
+        description: "",
+        eventIds: [],
+    };
+    simulation.spyOperations.push(operation);
+    network.operationIds.push(operation.id);
+    if (outcome === "success" || outcome === "partial") {
+        const strength = outcome === "success" ? 1 : 0.45;
+        network.intelligence = clamp(network.intelligence + 0.08 * strength, 0, 1);
+        network.infiltration = clamp(network.infiltration + 0.04 * strength, 0, 1);
+        if (kind === "sabotage-supplies") {
+            target.prosperity = clamp(target.prosperity - 0.025 * strength, 0, 1);
+            target.unrest = clamp(target.unrest + 0.035 * strength, 0, 1);
+        } else if (kind === "bribe-gate") {
+            target.unrest = clamp(target.unrest + 0.02 * strength, 0, 1);
+        } else if (kind === "counterspy-sweep") {
+            network.secrecy = clamp(network.secrecy + 0.04 * strength, 0, 1);
+        }
+    }
+    if (outcome === "exposed") {
+        network.status = "exposed";
+        network.exposedYear = simulation.year;
+        network.secrecy = clamp(network.secrecy - 0.2, 0, 1);
+    } else if (outcome === "failed") {
+        network.secrecy = clamp(network.secrecy - 0.04, 0, 1);
+    }
+    const localUnit = activeMilitaryUnitForSettlement(simulation, network.settlementId, network.civilizationId);
+    if (localUnit) addUniqueId(localUnit.spyOperationIds, operation.id);
+    operation.subjectRefs = spyOperationSubjectRefs(simulation, operation);
+    operation.description = `${operation.name} ${spyOperationOutcomeLabel(outcome)} with risk ${risk.toFixed(2)} and success pressure ${success.toFixed(2)}.`;
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "spy-operation",
+        headline: `${operation.name} ${spyOperationOutcomeLabel(outcome)}.`,
+        description: operation.description,
+        civilizationId: operation.civilizationId,
+        settlementId: operation.targetSettlementId,
+        spyNetworkId: network.id,
+        spyOperationId: operation.id,
+        entityRefs: operation.subjectRefs,
+    });
+    operation.sourceEventId = eventId;
+    operation.eventIds.push(eventId);
+    if (outcome === "exposed") network.exposedEventId = eventId;
+    refreshSpyNetwork(simulation, network);
+    return operation;
+}
+
+function maintainSpyNetworks(simulation: CivilizationSimulation) {
+    if (simulation.year < 8) return;
+    for (let network of simulation.spyNetworks) {
+        if (network.status !== "active") continue;
+        refreshSpyNetwork(simulation, network);
+        const lastOperation = network.operationIds.map(id => simulation.spyOperations[id]).filter(Boolean).sort((a, b) => b.year - a.year || b.id - a.id)[0];
+        if ((!lastOperation || simulation.year - lastOperation.year >= 12) && (simulation.year + network.id * 5) % 12 === 0) {
+            createSpyOperation(simulation, network);
+        }
+    }
+
+    for (let civ of simulation.civilizations) {
+        if ((simulation.year + civ.id * 3) % 9 !== 0) continue;
+        const activeCount = simulation.spyNetworks.filter(network => network.status === "active" && network.civilizationId === civ.id).length;
+        const targetLimit = Math.max(1, Math.min(4, Math.ceil(simulation.settlements.filter(settlement => settlement.civilizationId === civ.id).length / 2)));
+        if (activeCount >= targetLimit) continue;
+        const target = chooseSpyTarget(simulation, civ.id);
+        if (target) createSpyNetwork(simulation, civ.id, target);
+    }
+}
+
+function spyIntelAdvantage(simulation: CivilizationSimulation, civilizationId: number, target: Settlement): number {
+    const networks = simulation.spyNetworks.filter(network =>
+        network.status === "active"
+        && network.civilizationId === civilizationId
+        && network.targetSettlementId === target.id
+    );
+    if (networks.length === 0) return 0;
+    const intelligence = Math.max(...networks.map(network => network.intelligence * 0.62 + network.infiltration * 0.28 + network.secrecy * 0.1));
+    const recentOps = simulation.spyOperations.filter(operation =>
+        operation.civilizationId === civilizationId
+        && operation.targetSettlementId === target.id
+        && simulation.year - operation.year <= 18
+        && (operation.outcome === "success" || operation.outcome === "partial")
+    ).length;
+    return clamp(intelligence * 0.26 + Math.min(0.12, recentOps * 0.04), 0, 0.38);
+}
+
+function recentSpyOperationsForBattle(simulation: CivilizationSimulation, civilizationId: number, target: Settlement): SpyOperation[] {
+    return simulation.spyOperations
+        .filter(operation =>
+            operation.civilizationId === civilizationId
+            && operation.targetSettlementId === target.id
+            && simulation.year - operation.year <= 24
+            && operation.outcome !== "failed"
+        )
+        .sort((a, b) => b.year - a.year || b.success - a.success || b.id - a.id)
+        .slice(0, 5);
+}
+
+function linkSpyOperationsToBattle(simulation: CivilizationSimulation, battle: Battle) {
+    for (let operationId of battle.spyOperationIds) {
+        const operation = simulation.spyOperations[operationId];
+        if (!operation) continue;
+        operation.battleId = battle.id;
+        operation.conflictId = battle.conflictId;
+        operation.subjectRefs = spyOperationSubjectRefs(simulation, operation);
+        for (let eventId of operation.eventIds) {
+            const event = simulation.legendEvents[eventId];
+            if (!event) continue;
+            if (event.battleId === undefined) event.battleId = battle.id;
+            if (event.conflictId === undefined) event.conflictId = battle.conflictId;
+            if (!event.entityRefs.some(ref => ref.kind === "battle" && ref.id === battle.id)) {
+                event.entityRefs.push(internLegendRef(simulation, battleRef(simulation, battle.id)));
+            }
+        }
+    }
+}
+
 function localCivilizationStrength(simulation: CivilizationSimulation, civilizationId: number, target: Settlement): number {
     let strength = 0;
     for (let settlement of simulation.settlements) {
@@ -22313,17 +25911,18 @@ function localCivilizationStrength(simulation: CivilizationSimulation, civilizat
         const distanceFactor = 1 - clamp(distance / simulation.options.invasionRange, 0, 1);
         strength += settlement.population * (0.25 + distanceFactor) * ageFactor * (0.75 + settlement.prosperity * 0.5);
     }
-    return strength;
+    return strength + militaryPowerForCivilizationNearTarget(simulation, civilizationId, target);
 }
 
 function settlementDefense(simulation: CivilizationSimulation, settlement: Settlement): number {
     const age = Math.max(0, simulation.year - settlement.controlledSinceYear);
     const ageFactor = 0.65 + clamp(age / 160, 0, 1) * 0.35;
     const capitalFactor = settlement.type === "capital" ? 1.55 : 1;
-    return Math.max(60, settlement.population * capitalFactor * ageFactor * (0.8 + settlement.prosperity * 0.25 + settlement.unrest * 0.15));
+    return Math.max(60, settlement.population * capitalFactor * ageFactor * (0.8 + settlement.prosperity * 0.25 + settlement.unrest * 0.15) + militaryDefenseForSettlement(simulation, settlement));
 }
 
 function chooseInvasionTarget(world: GeneratedWorldMap, simulation: CivilizationSimulation, civilizationId: number): Settlement | undefined {
+    if (simulation.civilizations[civilizationId]?.status === "fallen") return undefined;
     const attackerSettlements = simulation.settlements.filter(settlement => settlement.civilizationId === civilizationId);
     if (attackerSettlements.length === 0) return undefined;
 
@@ -22332,6 +25931,7 @@ function chooseInvasionTarget(world: GeneratedWorldMap, simulation: Civilization
 
     for (let target of simulation.settlements) {
         if (target.civilizationId === civilizationId) continue;
+        if (simulation.civilizations[target.civilizationId]?.status === "fallen") continue;
         let nearestDistance = Number.POSITIVE_INFINITY;
         for (let settlement of attackerSettlements) {
             nearestDistance = Math.min(nearestDistance, settlementDistance(settlement, target));
@@ -22339,14 +25939,15 @@ function chooseInvasionTarget(world: GeneratedWorldMap, simulation: Civilization
         if (nearestDistance > simulation.options.invasionRange) continue;
 
         const strength = localCivilizationStrength(simulation, civilizationId, target);
-        const defense = settlementDefense(simulation, target);
+        const intelligenceAdvantage = spyIntelAdvantage(simulation, civilizationId, target);
+        const defense = settlementDefense(simulation, target) * (1 - intelligenceAdvantage * 0.45);
         if (strength < defense * 1.18) continue;
 
         const terrainPenalty = triangleSlopePenalty(world, target.triangle) * 0.2;
         const prize = target.population / 900 + target.suitability * 0.7 + (target.type === "capital" ? 0.35 : 0);
         const distancePenalty = nearestDistance / simulation.options.invasionRange;
         const jitter = hashFloat(simulation.options.seed, civilizationId, simulation.year, target.id) * 0.08;
-        const score = prize + strength / Math.max(1, defense) * 0.45 - distancePenalty - terrainPenalty + jitter;
+        const score = prize + strength / Math.max(1, defense) * 0.45 + intelligenceAdvantage * 0.35 - distancePenalty - terrainPenalty + jitter;
         if (score > bestScore) {
             bestScore = score;
             bestTarget = target;
@@ -22390,6 +25991,7 @@ function selectBattleParticipants(
     side: "attacker" | "defender",
     kind: BattleKind,
 ): Agent[] {
+    const unitTroopIds = activeUnitTroopIdsForBattle(simulation, civilizationId, target, side);
     const candidates = simulation.agents
         .filter(agent =>
             agent.alive
@@ -22400,6 +26002,7 @@ function selectBattleParticipants(
         .map(agent => ({
             agent,
             score: battleAgentScore(simulation, agent, target)
+                + (unitTroopIds.has(agent.id) ? 0.42 : 0)
                 + hashFloat(simulation.options.seed, simulation.year, target.id, agent.id) * 0.08,
         }))
         .sort((a, b) => b.score - a.score || a.agent.id - b.agent.id);
@@ -22577,6 +26180,7 @@ function conflictRefs(simulation: CivilizationSimulation, conflict: Conflict, op
         ...settlementIds.map(id => settlementRef(simulation, id)),
         ...battleIds.map(id => battleRef(simulation, id)),
         ...conflict.capturedArtifactIds.slice(-4).map(id => artifactRef(simulation, id)),
+        ...conflict.spyOperationIds.slice(-4).map(id => spyOperationRef(simulation, id)),
     ], 24);
 }
 
@@ -22610,6 +26214,7 @@ function createOrUpdateConflictForBattle(
             casualtyAgentIds: [],
             capturedSettlementIds: [],
             capturedArtifactIds: [],
+            spyOperationIds: [...battle.spyOperationIds],
             eventIds: [],
         };
         simulation.conflicts.push(conflict);
@@ -22665,6 +26270,7 @@ function syncConflictFromBattle(simulation: CivilizationSimulation, battle: Batt
     addUniqueId(conflict.contestedSettlementIds, battle.settlementId);
     for (let agentId of battle.casualtyAgentIds) addUniqueId(conflict.casualtyAgentIds, agentId);
     for (let artifactId of battle.capturedArtifactIds) addUniqueId(conflict.capturedArtifactIds, artifactId);
+    for (let operationId of battle.spyOperationIds) addUniqueId(conflict.spyOperationIds, operationId);
     conflict.lastBattleYear = Math.max(conflict.lastBattleYear, battle.year);
 }
 
@@ -22706,7 +26312,7 @@ function maintainConflicts(simulation: CivilizationSimulation) {
 }
 
 function battleRefs(simulation: CivilizationSimulation, battle: Battle): LegendEntityRef[] {
-    return [
+    return uniqueLegendRefs([
         ...(battle.conflictId === undefined ? [] : [conflictRef(simulation, battle.conflictId)]),
         battleRef(simulation, battle.id),
         settlementRef(simulation, battle.settlementId),
@@ -22714,7 +26320,10 @@ function battleRefs(simulation: CivilizationSimulation, battle: Battle): LegendE
         civilizationRef(simulation, battle.defenderCivilizationId),
         ...(battle.attackerCommanderId === undefined ? [] : [personRef(simulation, battle.attackerCommanderId)]),
         ...(battle.defenderCommanderId === undefined ? [] : [personRef(simulation, battle.defenderCommanderId)]),
-    ];
+        ...battle.attackerUnitIds.map(id => militaryUnitRef(simulation, id)),
+        ...battle.defenderUnitIds.map(id => militaryUnitRef(simulation, id)),
+        ...battle.spyOperationIds.map(id => spyOperationRef(simulation, id)),
+    ], 28);
 }
 
 function selectBattleCasualtyIds(simulation: CivilizationSimulation, battle: Battle): number[] {
@@ -22859,6 +26468,34 @@ function createBattleInjuries(simulation: CivilizationSimulation, battle: Battle
     }
 }
 
+function battlefieldTerrainForSettlement(settlement: Settlement): BattlefieldTerrain {
+    if (settlement.type === "capital") return "capital-approach";
+    if (settlement.suitability >= 0.68) return "fertile-fields";
+    if (settlement.suitability <= 0.46) return "rough-ground";
+    return settlement.controlIds.length > 1 ? "frontier-road" : "town-approach";
+}
+
+function battlefieldTerrainLabel(terrain: BattlefieldTerrain): string {
+    return terrain.replace(/-/g, " ");
+}
+
+function battlefieldNameForSettlement(settlement: Settlement, kind: BattleKind, terrain: BattlefieldTerrain): string {
+    if (kind === "siege") return `${settlement.name} ${terrain === "capital-approach" ? "Approaches" : "Gate Field"}`;
+    if (terrain === "fertile-fields") return `${settlement.name} Fields`;
+    if (terrain === "rough-ground") return `${settlement.name} Uplands`;
+    if (terrain === "frontier-road") return `${settlement.name} Roadfield`;
+    return `${settlement.name} Watch Field`;
+}
+
+function battlefieldCoordinates(simulation: CivilizationSimulation, target: Settlement, battleId: number, kind: BattleKind): {x: number; y: number} {
+    const angle = hashFloat(simulation.options.seed, target.id, battleId, 3217) * Math.PI * 2;
+    const radius = kind === "siege" ? 4 + hashFloat(simulation.options.seed, target.id, battleId, 3229) * 8 : 10 + hashFloat(simulation.options.seed, target.id, battleId, 3251) * 18;
+    return {
+        x: Math.round((target.x + Math.cos(angle) * radius) * 100) / 100,
+        y: Math.round((target.y + Math.sin(angle) * radius) * 100) / 100,
+    };
+}
+
 function createBattle(
     simulation: CivilizationSimulation,
     attackerId: number,
@@ -22867,11 +26504,23 @@ function createBattle(
     kind: BattleKind,
     outcome: BattleOutcome,
 ): Battle | undefined {
+    if (simulation.civilizations[attackerId]?.status === "fallen" || simulation.civilizations[defenderId]?.status === "fallen") return undefined;
     const attackerParticipants = selectBattleParticipants(simulation, attackerId, target, "attacker", kind);
     const defenderParticipants = selectBattleParticipants(simulation, defenderId, target, "defender", kind);
     if (attackerParticipants.length === 0 || defenderParticipants.length === 0) return undefined;
 
     const id = simulation.battles.length;
+    const attackerUnits = activeMilitaryUnitsForBattle(simulation, attackerId, target, "attacker");
+    const defenderUnits = activeMilitaryUnitsForBattle(simulation, defenderId, target, "defender");
+    const recentSpyOperations = recentSpyOperationsForBattle(simulation, attackerId, target);
+    const intelligenceAdvantage = spyIntelAdvantage(simulation, attackerId, target);
+    const attackerPower = attackerParticipants.reduce((sum, agent) => sum + battleAgentScore(simulation, agent, target) * 8, 0)
+        + attackerUnits.reduce((sum, unit) => sum + militaryUnitPower(unit), 0)
+        + intelligenceAdvantage * 80;
+    const defenderPower = defenderParticipants.reduce((sum, agent) => sum + battleAgentScore(simulation, agent, target) * 8, 0)
+        + defenderUnits.reduce((sum, unit) => sum + militaryUnitPower(unit), 0);
+    const battlefieldTerrain = battlefieldTerrainForSettlement(target);
+    const battlefield = battlefieldCoordinates(simulation, target, id, kind);
     const attackerCommander = chooseBattleCommander(simulation, attackerParticipants, target);
     const defenderCommander = chooseBattleCommander(simulation, defenderParticipants, target);
     const battle: Battle = {
@@ -22880,20 +26529,33 @@ function createBattle(
         kind,
         year: simulation.year,
         settlementId: target.id,
+        battlefieldName: battlefieldNameForSettlement(target, kind, battlefieldTerrain),
+        battlefieldTriangle: target.triangle,
+        battlefieldX: battlefield.x,
+        battlefieldY: battlefield.y,
+        battlefieldTerrain,
         attackerCivilizationId: attackerId,
         defenderCivilizationId: defenderId,
         attackerCommanderId: attackerCommander?.id,
         defenderCommanderId: defenderCommander?.id,
         attackerParticipantIds: attackerParticipants.map(agent => agent.id),
         defenderParticipantIds: defenderParticipants.map(agent => agent.id),
+        attackerUnitIds: attackerUnits.map(unit => unit.id),
+        defenderUnitIds: defenderUnits.map(unit => unit.id),
+        spyOperationIds: recentSpyOperations.map(operation => operation.id),
         battleParticipationIds: [],
         casualtyAgentIds: [],
         capturedArtifactIds: [],
+        attackerPower: Math.round(attackerPower * 100) / 100,
+        defenderPower: Math.round(defenderPower * 100) / 100,
+        intelligenceAdvantage: Math.round(intelligenceAdvantage * 1000) / 1000,
         outcome,
         eventIds: [],
     };
     simulation.battles.push(battle);
     createOrUpdateConflictForBattle(simulation, battle, target, kind, outcome);
+    for (let unitId of [...battle.attackerUnitIds, ...battle.defenderUnitIds]) addUniqueId(simulation.militaryUnits[unitId]?.battleIds ?? [], battle.id);
+    linkSpyOperationsToBattle(simulation, battle);
 
     for (let agentId of [...battle.attackerParticipantIds, ...battle.defenderParticipantIds]) {
         addBattleIdToAgent(simulation.agents[agentId], battle.id);
@@ -22904,11 +26566,12 @@ function createBattle(
     const outcomeClause = outcome === "attacker-victory"
         ? `${attacker.name} prevailed`
         : `${defender.name} held the field`;
+    const powerClause = ` Recorded power: ${attacker.name} ${battle.attackerPower.toFixed(1)} against ${defender.name} ${battle.defenderPower.toFixed(1)}; intelligence advantage ${battle.intelligenceAdvantage.toFixed(2)}.`;
     const battleEventId = recordLegendEvent(simulation, {
         year: simulation.year,
         type: "battle-fought",
         headline: `${battle.name} was fought.`,
-        description: `${battle.name} was fought at ${target.name} between ${attacker.name} and ${defender.name}; ${outcomeClause}.`,
+        description: `${battle.name} was fought at ${battle.battlefieldName} near ${target.name} (${battlefieldTerrainLabel(battle.battlefieldTerrain)}, ${battle.battlefieldX}, ${battle.battlefieldY}) between ${attacker.name} and ${defender.name}; ${outcomeClause}.${powerClause}`,
         civilizationId: attackerId,
         settlementId: target.id,
         personId: attackerCommander?.id ?? defenderCommander?.id,
@@ -23237,6 +26900,415 @@ function captureSettlement(simulation: CivilizationSimulation, attackerId: numbe
         });
     }
     return battle;
+}
+
+function civilizationFailureKindLabel(kind: CivilizationCollapseFailureKind): string {
+    if (kind === "lost-capital") return "lost capital";
+    if (kind === "lost-settlements") return "lost settlements";
+    if (kind === "unrest") return "unrest";
+    if (kind === "shortage") return "shortage";
+    if (kind === "war-loss") return "war losses";
+    if (kind === "failed-destiny") return "failed destiny";
+    if (kind === "broken-goals") return "broken kingdom goals";
+    return "divine disfavor";
+}
+
+function civilizationOriginKindLabel(kind: CivilizationOriginKind): string {
+    if (kind === "ash-born") return "ash-born successor";
+    if (kind === "breakaway") return "breakaway civilization";
+    if (kind === "god-seated") return "god-seated civilization";
+    if (kind === "magic-restored") return "magic-restored civilization";
+    return "founding civilization";
+}
+
+function activeCivilizationSettlements(simulation: CivilizationSimulation, civilizationId: number): Settlement[] {
+    return simulation.settlements.filter(settlement => settlement.civilizationId === civilizationId);
+}
+
+function recentCivilizationWarLosses(simulation: CivilizationSimulation, civilizationId: number, years: number): number {
+    return simulation.settlementControls.filter(control =>
+        control.previousCivilizationId === civilizationId
+        && control.startedYear >= simulation.year - years
+        && control.startReason === "captured"
+    ).length;
+}
+
+function recentCivilizationShortageCount(simulation: CivilizationSimulation, civilizationId: number, years: number): number {
+    return simulation.legendEvents.filter(event =>
+        event.type === "shortage"
+        && event.civilizationId === civilizationId
+        && event.year >= simulation.year - years
+    ).length;
+}
+
+function civilizationFailureSignals(simulation: CivilizationSimulation, civilization: Civilization): Array<{kind: CivilizationCollapseFailureKind; score: number; text: string}> {
+    const settlements = activeCivilizationSettlements(simulation, civilization.id);
+    if (settlements.length === 0) {
+        return [{kind: "lost-settlements", score: 1.35, text: `${civilization.name} no longer controls any settlement`}];
+    }
+    const signals: Array<{kind: CivilizationCollapseFailureKind; score: number; text: string}> = [];
+    const avgUnrest = settlements.reduce((sum, settlement) => sum + settlement.unrest, 0) / settlements.length;
+    const avgProsperity = settlements.reduce((sum, settlement) => sum + settlement.prosperity, 0) / settlements.length;
+    const recentLosses = recentCivilizationWarLosses(simulation, civilization.id, 45);
+    const recentShortages = recentCivilizationShortageCount(simulation, civilization.id, 18);
+    const failedGoals = civilization.civilizationGoalIds
+        .map(id => simulation.civilizationGoals[id])
+        .filter(goal => goal?.status === "failed" && (goal.resolvedYear ?? 0) >= Math.max(simulation.year - 40, civilization.foundedYear))
+        .length;
+    const brokenDestinies = civilization.destinyIds
+        .map(id => simulation.destinies[id])
+        .filter(destiny => destiny?.status === "broken" && (destiny.resolvedYear ?? 0) >= Math.max(simulation.year - 55, civilization.foundedYear))
+        .length;
+    const gods = civilization.godIds.map(id => simulation.gods[id]).filter((god): god is God => !!god);
+    const avgFavor = gods.length ? gods.reduce((sum, god) => sum + god.favor, 0) / gods.length : 0.5;
+    if (civilization.capitalSettlementId < 0) signals.push({kind: "lost-capital", score: 0.9, text: "the capital seat is gone"});
+    if (settlements.length <= 1 && simulation.year - civilization.foundedYear > 90) signals.push({kind: "lost-settlements", score: 0.34, text: "only one settlement remains"});
+    if (avgUnrest >= 0.42) signals.push({kind: "unrest", score: clamp((avgUnrest - 0.32) * 1.2, 0.12, 0.42), text: `average unrest reached ${Math.round(avgUnrest * 100) / 100}`});
+    if (avgProsperity <= 0.32) signals.push({kind: "shortage", score: clamp((0.38 - avgProsperity) * 1.1 + recentShortages * 0.05, 0.12, 0.48), text: `prosperity weakened to ${Math.round(avgProsperity * 100) / 100}`});
+    else if (recentShortages >= 2) signals.push({kind: "shortage", score: clamp(recentShortages * 0.08, 0.12, 0.32), text: `${recentShortages} recent shortage records accumulated`});
+    if (recentLosses > 0) signals.push({kind: "war-loss", score: clamp(recentLosses * 0.16, 0.16, 0.56), text: `${recentLosses} settlement ${recentLosses === 1 ? "loss" : "losses"} in recent wars`});
+    if (brokenDestinies > 0) signals.push({kind: "failed-destiny", score: clamp(brokenDestinies * 0.12, 0.12, 0.38), text: `${brokenDestinies} broken ${brokenDestinies === 1 ? "destiny" : "destinies"}`});
+    if (failedGoals > 0) signals.push({kind: "broken-goals", score: clamp(failedGoals * 0.09, 0.09, 0.34), text: `${failedGoals} failed kingdom ${failedGoals === 1 ? "goal" : "goals"}`});
+    if (avgFavor < 0.24 && signals.length > 0) signals.push({kind: "divine-disfavor", score: clamp((0.28 - avgFavor) * 0.9, 0.08, 0.24), text: `divine favor fell to ${Math.round(avgFavor * 100) / 100}`});
+    return signals;
+}
+
+function collapseStageForPressure(pressure: number): number {
+    if (pressure >= 1.35) return 3;
+    if (pressure >= 0.88) return 2;
+    if (pressure >= 0.42) return 1;
+    return 0;
+}
+
+function collapseStageLabel(stage: number): string {
+    if (stage >= 3) return "terminal collapse";
+    if (stage === 2) return "deep crisis";
+    if (stage === 1) return "decline";
+    return "recovery";
+}
+
+function civilizationLifecycleRefs(simulation: CivilizationSimulation, civilization: Civilization, settlement?: Settlement, god?: God): LegendEntityRef[] {
+    return uniqueLegendRefs([
+        civilizationRef(simulation, civilization.id),
+        ...(civilization.parentCivilizationId === undefined ? [] : [civilizationRef(simulation, civilization.parentCivilizationId)]),
+        ...(civilization.restoredCivilizationId === undefined ? [] : [civilizationRef(simulation, civilization.restoredCivilizationId)]),
+        ...(settlement ? [settlementRef(simulation, settlement.id)] : []),
+        ...(god ? [godRef(simulation, god.id)] : []),
+        ...civilization.beliefIds.slice(0, 4).map(id => beliefRef(simulation, id)),
+        ...civilization.destinyIds.slice(-3).map(id => destinyRef(simulation, id)),
+        ...civilization.civilizationGoalIds.slice(-3).map(id => civilizationGoalRef(simulation, id)),
+    ], 20);
+}
+
+function recordCivilizationCrisisEvent(
+    simulation: CivilizationSimulation,
+    civilization: Civilization,
+    signals: Array<{kind: CivilizationCollapseFailureKind; score: number; text: string}>,
+    stage: number,
+) {
+    const settlements = activeCivilizationSettlements(simulation, civilization.id);
+    const seat = settlements.sort((a, b) => b.unrest - a.unrest || a.id - b.id)[0] ?? simulation.settlements[civilization.capitalSettlementId];
+    const failureKinds = signals.map(signal => signal.kind);
+    const description = `${civilization.name} entered ${collapseStageLabel(stage)} as a chain of failures built: ${signals.map(signal => signal.text).join("; ")}. Collapse pressure is ${Math.round(civilization.collapsePressure * 100) / 100}.`;
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "civilization-crisis",
+        headline: `${civilization.name} suffered ${collapseStageLabel(stage)}.`,
+        description,
+        civilizationId: civilization.id,
+        settlementId: seat?.id,
+        entityRefs: [
+            civilizationRef(simulation, civilization.id),
+            ...(seat ? [settlementRef(simulation, seat.id)] : []),
+            ...failureKinds.slice(0, 6).map(kind => ({kind: "civilization" as const, id: civilization.id, name: `${civilization.name}: ${civilizationFailureKindLabel(kind)}`})),
+        ],
+    });
+    civilization.lastCollapseEventYear = simulation.year;
+    addUniqueId(civilization.eventIds, eventId);
+}
+
+function successorRiseKind(simulation: CivilizationSimulation, civilization: Civilization, seat: Settlement): {kind: CivilizationOriginKind; god?: God} {
+    const gods = civilization.godIds.map(id => simulation.gods[id]).filter((god): god is God => !!god);
+    const creationGod = civilization.creationGodId === undefined ? undefined : simulation.gods[civilization.creationGodId];
+    const miracleGod = gods
+        .filter(god => god.controlSpheres.includes("miracles") || god.controlSpheres.includes("creation"))
+        .sort((a, b) => b.favor - a.favor || a.id - b.id)[0];
+    const recentMiracle = civilization.miracleIds
+        .map(id => simulation.miracles[id])
+        .filter(miracle => miracle && simulation.year - miracle.year <= 80)
+        .sort((a, b) => (b?.strength ?? 0) - (a?.strength ?? 0))[0];
+    const magicChance = recentMiracle && miracleGod
+        ? clamp(0.22 + (recentMiracle.strength ?? 0.4) * 0.28 + miracleGod.favor * 0.18, 0.24, 0.68)
+        : 0;
+    if (magicChance > 0 && hashFloat(simulation.options.seed, simulation.year, civilization.id, seat.id + 8109) < magicChance) return {kind: "magic-restored", god: miracleGod};
+    if (creationGod && hashFloat(simulation.options.seed, simulation.year, civilization.id, seat.id + 8111) < 0.48) return {kind: "god-seated", god: creationGod};
+    if (hashFloat(simulation.options.seed, simulation.year, civilization.id, seat.id + 8117) < 0.5) return {kind: "ash-born", god: creationGod ?? miracleGod};
+    return {kind: "breakaway", god: creationGod ?? miracleGod};
+}
+
+function makeSuccessorCivilizationName(simulation: CivilizationSimulation, parent: Civilization, originKind: CivilizationOriginKind, id: number): string {
+    const baseName = parent.name.replace(/(?: Restored| Renewal| Covenant| Ashen| Freehold)+$/g, "");
+    if (originKind === "magic-restored") return `${baseName} ${parent.restoredCivilizationId === undefined ? "Restored" : "Renewal"}`;
+    if (originKind === "ash-born") return `${makeName(simulation.options.seed, id, "civ")} Ashen`;
+    if (originKind === "god-seated") return `${makeName(simulation.options.seed, id, "civ")} Covenant`;
+    if (originKind === "breakaway") return `${makeName(simulation.options.seed, id, "civ")} Freehold`;
+    return makeName(simulation.options.seed, id, "civ");
+}
+
+function createSuccessorCivilization(
+    world: GeneratedWorldMap,
+    simulation: CivilizationSimulation,
+    parent: Civilization,
+    seat: Settlement,
+    originKind: CivilizationOriginKind,
+    god?: God,
+): Civilization {
+    const id = simulation.civilizations.length;
+    const creationDomain = god?.domain ?? parent.creationDomain;
+    const civilization: Civilization = {
+        id,
+        name: makeSuccessorCivilizationName(simulation, parent, originKind, id),
+        color: CIVILIZATION_COLORS[id % CIVILIZATION_COLORS.length],
+        status: "active",
+        originKind,
+        foundedYear: simulation.year,
+        parentCivilizationId: parent.id,
+        restoredCivilizationId: originKind === "magic-restored" ? parent.id : undefined,
+        capitalSettlementId: -1,
+        creationDomain,
+        creationSeatPreference: creationSeatPreference(creationDomain),
+        creationSeatScore: Math.round(creationSeatScore(world, simulation.suitability_t, seat.triangle, creationDomain, simulation.options.seed, id) * 1000) / 1000,
+        creationGodId: god?.id,
+        collapsePressure: 0,
+        collapseStage: 0,
+        collapseFailureKinds: [],
+        territoryCount: 0,
+        population: 0,
+        traditionIds: [],
+        beliefIds: [],
+        godIds: god ? [god.id] : [],
+        commandmentIds: [],
+        destinyIds: [],
+        miracleIds: [],
+        mythIds: [],
+        doctrineIds: [],
+        magicRoleIds: [],
+        prophecyIds: [],
+        civilizationGoalIds: [],
+        eventIds: [],
+    };
+    simulation.civilizations.push(civilization);
+    return civilization;
+}
+
+function inheritCulturalRecordsForSuccessor(simulation: CivilizationSimulation, parent: Civilization, successor: Civilization) {
+    for (let id of parent.traditionIds) addUniqueId(successor.traditionIds, id);
+    for (let id of parent.beliefIds) {
+        addUniqueId(successor.beliefIds, id);
+        if (simulation.beliefs[id]) simulation.beliefs[id].civilizationId = successor.id;
+    }
+    const move = <T extends {civilizationId: number}>(ids: number[], records: T[], targetIds: number[]) => {
+        for (let id of ids) {
+            addUniqueId(targetIds, id);
+            if (records[id]) records[id].civilizationId = successor.id;
+        }
+    };
+    move(parent.godIds, simulation.gods, successor.godIds);
+    move(parent.commandmentIds, simulation.commandments, successor.commandmentIds);
+    move(parent.destinyIds, simulation.destinies, successor.destinyIds);
+    move(parent.miracleIds, simulation.miracles, successor.miracleIds);
+    move(parent.mythIds, simulation.myths, successor.mythIds);
+    move(parent.doctrineIds, simulation.doctrines, successor.doctrineIds);
+    move(parent.magicRoleIds, simulation.magicRoles, successor.magicRoleIds);
+    move(parent.prophecyIds, simulation.prophecies, successor.prophecyIds);
+    move(parent.civilizationGoalIds, simulation.civilizationGoals, successor.civilizationGoalIds);
+}
+
+function transferSettlementToSuccessor(
+    simulation: CivilizationSimulation,
+    settlement: Settlement,
+    successor: Civilization,
+    previousCivilizationId: number,
+    startReason: SettlementControlStartReason,
+    eventId: number,
+) {
+    const previousControl = activeSettlementControlForSettlement(simulation, settlement.id);
+    settlement.civilizationId = successor.id;
+    settlement.type = successor.capitalSettlementId < 0 ? "capital" : "town";
+    settlement.controlledSinceYear = simulation.year;
+    settlement.unrest = Math.round(clamp(settlement.unrest + (startReason === "seceded" ? 0.08 : -0.04), 0, 1) * 1000) / 1000;
+    if (successor.capitalSettlementId < 0) successor.capitalSettlementId = settlement.id;
+    const control = createSettlementControl(simulation, settlement, successor.id, startReason, {
+        previousCivilizationId,
+        startEventId: eventId,
+    });
+    closeSettlementControl(simulation, previousControl, eventId, startReason === "restored" ? "restored" : "seceded");
+    addSettlementControlRefToEvent(simulation, control, eventId);
+    for (let agent of simulation.agents) {
+        if (!agent.alive || agent.settlementId !== settlement.id) continue;
+        agent.civilizationId = successor.id;
+        startPersonAllegiance(simulation, agent, successor.id, settlement, startReason === "restored" ? "restored" : "seceded", {
+            previousCivilizationId,
+            startEventId: eventId,
+            includeEventRef: false,
+        });
+    }
+    for (let structure of simulation.structures) {
+        if (structure.settlementId === settlement.id) structure.civilizationId = successor.id;
+    }
+    for (let organization of simulation.organizations) {
+        if (organization.settlementId === settlement.id) organization.civilizationId = successor.id;
+    }
+    for (let office of simulation.offices) {
+        if (office.settlementId !== settlement.id) continue;
+        office.civilizationId = successor.id;
+        for (let law of simulation.laws) {
+            if (law.officeId === office.id) law.civilizationId = successor.id;
+        }
+    }
+    for (let artifact of simulation.artifacts) {
+        if (artifact.ownerSettlementId === settlement.id || (artifact.ownerAgentId !== undefined && simulation.agents[artifact.ownerAgentId]?.settlementId === settlement.id)) {
+            artifact.civilizationId = successor.id;
+        }
+    }
+}
+
+function recordCivilizationRiseEvent(
+    simulation: CivilizationSimulation,
+    successor: Civilization,
+    parent: Civilization,
+    seat: Settlement,
+    originKind: CivilizationOriginKind,
+    god: God | undefined,
+    transferredSettlements: Settlement[],
+): number {
+    const type: LegendEventType = originKind === "magic-restored" ? "civilization-restored" : "civilization-risen";
+    const description = `${successor.name} rose as a ${civilizationOriginKindLabel(originKind)} from ${parent.name}'s collapse chain, seated at ${seat.name}${god ? ` under ${god.name}` : ""}. It first claimed ${transferredSettlements.length} settlement ${transferredSettlements.length === 1 ? "seat" : "seats"}.`;
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type,
+        headline: `${successor.name} rose from ${parent.name}.`,
+        description,
+        civilizationId: successor.id,
+        settlementId: seat.id,
+        godId: god?.id,
+        entityRefs: uniqueLegendRefs([
+            civilizationRef(simulation, successor.id),
+            civilizationRef(simulation, parent.id),
+            settlementRef(simulation, seat.id),
+            ...(god ? [godRef(simulation, god.id)] : []),
+            ...transferredSettlements.slice(0, 6).map(settlement => settlementRef(simulation, settlement.id)),
+        ], 18),
+    });
+    addUniqueId(successor.eventIds, eventId);
+    addUniqueId(parent.eventIds, eventId);
+    return eventId;
+}
+
+function chooseSuccessorSeat(settlements: Settlement[]): Settlement | undefined {
+    return settlements
+        .sort((a, b) => b.population - a.population || a.unrest - b.unrest || a.id - b.id)[0];
+}
+
+function createSuccessorFromCivilization(
+    world: GeneratedWorldMap,
+    simulation: CivilizationSimulation,
+    parent: Civilization,
+    settlements: Settlement[],
+    forcedKind?: CivilizationOriginKind,
+): Civilization | undefined {
+    const seat = chooseSuccessorSeat(settlements);
+    if (!seat) return undefined;
+    const rise = forcedKind ? {kind: forcedKind, god: forcedKind === "breakaway" ? undefined : parent.creationGodId === undefined ? undefined : simulation.gods[parent.creationGodId]} : successorRiseKind(simulation, parent, seat);
+    const successor = createSuccessorCivilization(world, simulation, parent, seat, rise.kind, rise.god);
+    const transferred = forcedKind === "breakaway"
+        ? [seat]
+        : [...settlements];
+    const eventId = recordCivilizationRiseEvent(simulation, successor, parent, seat, rise.kind, rise.god, transferred);
+    if (rise.kind !== "breakaway") inheritCulturalRecordsForSuccessor(simulation, parent, successor);
+    for (let settlement of transferred) {
+        transferSettlementToSuccessor(simulation, settlement, successor, parent.id, rise.kind === "magic-restored" ? "restored" : "seceded", eventId);
+    }
+    if (successor.beliefIds.length === 0) {
+        const localAgents = simulation.agents.filter(agent => agent.alive && agent.settlementId === seat.id);
+        createBelief(world, simulation, seat, localAgents);
+    }
+    return successor;
+}
+
+function markCivilizationFallen(
+    world: GeneratedWorldMap,
+    simulation: CivilizationSimulation,
+    civilization: Civilization,
+    signals: Array<{kind: CivilizationCollapseFailureKind; score: number; text: string}>,
+): boolean {
+    if (civilization.status === "fallen") return false;
+    const settlements = activeCivilizationSettlements(simulation, civilization.id);
+    const seat = chooseSuccessorSeat(settlements) ?? simulation.settlements[civilization.capitalSettlementId];
+    civilization.status = "fallen";
+    civilization.fallenYear = simulation.year;
+    civilization.collapseStage = 3;
+    civilization.collapseFailureKinds = Array.from(new Set(signals.map(signal => signal.kind)));
+    const description = `${civilization.name} fell after a chain of failures: ${signals.map(signal => signal.text).join("; ") || "its institutions could no longer hold"}.`;
+    const eventId = recordLegendEvent(simulation, {
+        year: simulation.year,
+        type: "civilization-fallen",
+        headline: `${civilization.name} fell.`,
+        description,
+        civilizationId: civilization.id,
+        settlementId: seat?.id,
+        entityRefs: uniqueLegendRefs([
+            civilizationRef(simulation, civilization.id),
+            ...(seat ? [settlementRef(simulation, seat.id)] : []),
+            ...civilization.beliefIds.slice(0, 4).map(id => beliefRef(simulation, id)),
+            ...civilization.godIds.slice(0, 4).map(id => godRef(simulation, id)),
+        ], 18),
+    });
+    addUniqueId(civilization.eventIds, eventId);
+    if (settlements.length > 0) createSuccessorFromCivilization(world, simulation, civilization, settlements);
+    return settlements.length > 0;
+}
+
+function maybeCreateBreakawayCivilization(world: GeneratedWorldMap, simulation: CivilizationSimulation, civilization: Civilization): boolean {
+    if (civilization.status === "fallen" || civilization.collapsePressure < 0.9) return false;
+    if (simulation.year - civilization.foundedYear < 75) return false;
+    if (simulation.year % 29 !== civilization.id % 29) return false;
+    const settlements = activeCivilizationSettlements(simulation, civilization.id)
+        .filter(settlement => settlement.id !== civilization.capitalSettlementId);
+    if (settlements.length === 0) return false;
+    const chance = clamp((civilization.collapsePressure - 0.75) * 0.16, 0, 0.18);
+    if (hashFloat(simulation.options.seed, simulation.year, civilization.id, 8123) >= chance) return false;
+    const seat = settlements.sort((a, b) => b.unrest - a.unrest || b.population - a.population || a.id - b.id)[0];
+    return !!createSuccessorFromCivilization(world, simulation, civilization, [seat], "breakaway");
+}
+
+function maintainCivilizationLifecycles(world: GeneratedWorldMap, simulation: CivilizationSimulation): boolean {
+    let territoryChanged = false;
+    for (let civilization of [...simulation.civilizations]) {
+        if (civilization.status === "fallen") continue;
+        const signals = civilizationFailureSignals(simulation, civilization);
+        const severity = clamp(signals.reduce((sum, signal) => sum + signal.score, 0), 0, 1.3);
+        civilization.collapsePressure = Math.round(clamp(
+            severity > 0 ? civilization.collapsePressure * 0.88 + severity * 0.24 : civilization.collapsePressure - 0.055,
+            0,
+            2,
+        ) * 1000) / 1000;
+        const nextStage = collapseStageForPressure(civilization.collapsePressure);
+        const priorStage = civilization.collapseStage;
+        civilization.collapseStage = nextStage;
+        civilization.collapseFailureKinds = Array.from(new Set(signals.map(signal => signal.kind)));
+        civilization.status = nextStage > 0 ? "declining" : "active";
+        if (signals.length > 0 && (nextStage > priorStage || simulation.year - (civilization.lastCollapseEventYear ?? -9999) >= 25)) {
+            recordCivilizationCrisisEvent(simulation, civilization, signals, Math.max(1, nextStage));
+        }
+        if (maybeCreateBreakawayCivilization(world, simulation, civilization)) {
+            territoryChanged = true;
+        }
+        if (civilization.collapsePressure >= 1.45 || signals.some(signal => signal.kind === "lost-settlements" && signal.score >= 1)) {
+            if (markCivilizationFallen(world, simulation, civilization, signals)) territoryChanged = true;
+        }
+    }
+    return territoryChanged;
 }
 
 function createArtifact(
@@ -24737,7 +28809,7 @@ function createChronicle(simulation: CivilizationSimulation, settlement: Settlem
         year: simulation.year,
         type: "chronicle-written",
         headline: `${name} was written.`,
-        description: `${author.name} wrote ${name} in ${settlement.name}, preserving an account of ${sourceEvent.headline}`,
+        description: `${author.name} wrote ${name} in ${settlement.name}, preserving an account of ${legendEventHeadline(sourceEvent)}`,
         civilizationId: settlement.civilizationId,
         settlementId: settlement.id,
         personId: author.id,
@@ -24896,7 +28968,7 @@ function createWrittenWork(simulation: CivilizationSimulation, settlement: Settl
         subjectRefs,
         copies,
         influence,
-        description: `${author.name} authored a ${kind} in ${settlement.name}, drawing on ${sourceEvent.headline}`,
+        description: `${author.name} authored a ${kind} in ${settlement.name}, drawing on ${legendEventHeadline(sourceEvent)}`,
         eventIds: [],
     };
     simulation.writtenWorks.push(work);
@@ -25088,9 +29160,41 @@ function computeTriangleTerritoryFromRegions(world: GeneratedWorldMap, territory
     return territory_t;
 }
 
-function refreshTerritoryClaims(world: GeneratedWorldMap, simulation: CivilizationSimulation) {
+function triangleTerritoryWorkerInput(world: GeneratedWorldMap, territory_r: Int16Array): TriangleTerritoryWorkerInput {
+    const {mesh, map} = world;
+    const triangleRegions = sharedInt32Array(mesh.numTriangles * 3);
+    triangleRegions.fill(-1);
+    const isBoundaryTriangle = sharedInt8Array(mesh.numTriangles);
+    const elevation = sharedFloat32Array(mesh.numTriangles);
+    const territory = sharedInt16Array(mesh.numRegions);
+    territory.set(territory_r);
+    const regions: number[] = [];
+
+    for (let t = 0; t < mesh.numTriangles; t++) {
+        isBoundaryTriangle[t] = mesh.is_boundary_t[t] ?? 0;
+        elevation[t] = map.elevation_t[t] ?? -1;
+        mesh.r_around_t(t, regions);
+        for (let i = 0; i < Math.min(3, regions.length); i++) {
+            triangleRegions[3*t + i] = regions[i];
+        }
+    }
+
+    return {
+        numRegions: mesh.numRegions,
+        numTriangles: mesh.numTriangles,
+        numSolidTriangles: mesh.numSolidTriangles,
+        triangleRegions,
+        isBoundaryTriangle,
+        elevation,
+        territory,
+    };
+}
+
+function refreshTerritoryClaims(world: GeneratedWorldMap, simulation: CivilizationSimulation, workerPool?: CivilizationWorkerPool) {
     simulation.territory_r = computeSettlementClaimRegionTerritory(world, simulation);
-    simulation.territory_t = computeTriangleTerritoryFromRegions(world, simulation.territory_r);
+    simulation.territory_t = workerPool
+        ? workerPool.computeTriangleTerritory(triangleTerritoryWorkerInput(world, simulation.territory_r))
+        : computeTriangleTerritoryFromRegions(world, simulation.territory_r);
 }
 
 function pointDistance(a: RoadPoint, b: RoadPoint): number {
@@ -25227,7 +29331,74 @@ function chooseRoadTarget(world: GeneratedWorldMap, settlement: Settlement, conn
     });
 }
 
-function computeInternalRoads(world: GeneratedWorldMap, simulation: CivilizationSimulation): Road[] {
+function internalRoadWorkerInput(world: GeneratedWorldMap, simulation: CivilizationSimulation): InternalRoadWorkerInput {
+    const {mesh, map} = world;
+    const triangleNeighbors = sharedInt32Array(mesh.numTriangles * 3);
+    triangleNeighbors.fill(-1);
+    const triangleX = sharedFloat32Array(mesh.numTriangles);
+    const triangleY = sharedFloat32Array(mesh.numTriangles);
+    const isBoundaryTriangle = sharedInt8Array(mesh.numTriangles);
+    const elevation = sharedFloat32Array(mesh.numTriangles);
+    const suitability = sharedFloat32Array(mesh.numTriangles);
+    const territory = sharedInt16Array(mesh.numTriangles);
+    suitability.set(simulation.suitability_t);
+    territory.set(simulation.territory_t);
+
+    for (let t = 0; t < mesh.numTriangles; t++) {
+        triangleX[t] = mesh.x_of_t(t);
+        triangleY[t] = mesh.y_of_t(t);
+        isBoundaryTriangle[t] = mesh.is_boundary_t[t] ?? 0;
+        elevation[t] = map.elevation_t[t] ?? -1;
+        for (let i = 0; i < 3; i++) {
+            triangleNeighbors[3*t + i] = mesh.t_outer_s(3*t + i);
+        }
+    }
+
+    return {
+        year: simulation.year,
+        seed: simulation.options.seed,
+        roadMinSettlementAge: simulation.options.roadMinSettlementAge,
+        roadMaturationYears: simulation.options.roadMaturationYears,
+        numTriangles: mesh.numTriangles,
+        numSolidTriangles: mesh.numSolidTriangles,
+        triangleNeighbors,
+        triangleX,
+        triangleY,
+        isBoundaryTriangle,
+        elevation,
+        suitability,
+        territory,
+        settlements: simulation.settlements.map(settlement => ({
+            id: settlement.id,
+            civilizationId: settlement.civilizationId,
+            type: settlement.type,
+            triangle: settlement.triangle,
+            x: settlement.x,
+            y: settlement.y,
+            foundedYear: settlement.foundedYear,
+            controlledSinceYear: settlement.controlledSinceYear,
+            population: settlement.population,
+        })),
+    };
+}
+
+function finalizeRoadDrafts(drafts: InternalRoadWorkerDraft[]): Road[] {
+    return drafts.map((draft, id) => ({
+        id,
+        civilizationId: draft.civilizationId,
+        type: "internal",
+        fromSettlementId: draft.fromSettlementId,
+        toSettlementId: draft.toSettlementId,
+        openedYear: draft.openedYear,
+        strength: draft.strength,
+        length: draft.length,
+        cost: draft.cost,
+        triangles: draft.triangles,
+        points: draft.points,
+    }));
+}
+
+function computeInternalRoadsSerial(world: GeneratedWorldMap, simulation: CivilizationSimulation): Road[] {
     const roads: Road[] = [];
     const minAge = simulation.options.roadMinSettlementAge;
 
@@ -25280,10 +29451,19 @@ function computeInternalRoads(world: GeneratedWorldMap, simulation: Civilization
     return roads;
 }
 
-function refreshDerivedCivilizationState(world: GeneratedWorldMap, simulation: CivilizationSimulation) {
+function computeInternalRoads(world: GeneratedWorldMap, simulation: CivilizationSimulation, workerPool?: CivilizationWorkerPool): Road[] {
+    if (!workerPool || simulation.civilizations.length <= 1) return computeInternalRoadsSerial(world, simulation);
+    const drafts = workerPool.computeInternalRoads(
+        internalRoadWorkerInput(world, simulation),
+        simulation.civilizations.map(civ => civ.id),
+    );
+    return finalizeRoadDrafts(drafts);
+}
+
+function refreshDerivedCivilizationState(world: GeneratedWorldMap, simulation: CivilizationSimulation, workerPool?: CivilizationWorkerPool) {
     updateAllSettlementPopulations(simulation);
-    refreshTerritoryClaims(world, simulation);
-    simulation.roads = computeInternalRoads(world, simulation);
+    refreshTerritoryClaims(world, simulation, workerPool);
+    simulation.roads = timedPhase(simulation, "internal-road-computation", () => computeInternalRoads(world, simulation, workerPool));
 
     const territoryCounts = new Int32Array(simulation.civilizations.length);
     for (let owner of simulation.territory_t) {
@@ -25374,14 +29554,21 @@ function createYearSnapshot(
     };
 }
 
-function settlementResourceProfile(world: GeneratedWorldMap, settlement: Settlement): {foodPotential: number; materialPotential: number} {
-    const elevation = world.map.elevation_t[settlement.triangle];
-    const moisture = clamp(world.map.moisture_t[settlement.triangle] ?? 0.5, 0, 1.5);
-    const river = hasRiverTriangle(world, settlement.triangle) ? 0.16 : 0;
-    const coast = isCoastalTriangle(world, settlement.triangle) ? 0.08 : 0;
-    const foodPotential = clamp(0.45 + settlement.suitability * 0.45 + river + coast - Math.max(0, elevation - 0.45) * 0.35, 0.1, 1.4);
+function settlementResourceProfileForTriangle(world: GeneratedWorldMap, triangle: number, suitability: number): {foodPotential: number; materialPotential: number} {
+    const elevation = world.map.elevation_t[triangle];
+    const moisture = clamp(world.map.moisture_t[triangle] ?? 0.5, 0, 1.5);
+    const river = hasRiverTriangle(world, triangle) ? 0.16 : 0;
+    const coast = isCoastalTriangle(world, triangle) ? 0.08 : 0;
+    const foodPotential = clamp(0.45 + suitability * 0.45 + river + coast - Math.max(0, elevation - 0.45) * 0.35, 0.1, 1.4);
     const materialPotential = clamp(0.35 + Math.max(0, elevation) * 0.75 + (1 - Math.min(1, moisture)) * 0.12, 0.1, 1.35);
     return {foodPotential, materialPotential};
+}
+
+function settlementResourceProfile(settlement: Settlement): {foodPotential: number; materialPotential: number} {
+    return {
+        foodPotential: settlement.foodPotential,
+        materialPotential: settlement.materialPotential,
+    };
 }
 
 function specialtyLabel(specialty: AgentSpecialty): string {
@@ -25482,7 +29669,7 @@ function recordSkillPractice(
                 year: simulation.year,
                 type: "skill-ranked",
                 headline: `${agent.name} became ${existing.rank} at ${specialtyLabel(specialty)}.`,
-                description: `${agent.name}'s ${specialtyLabel(specialty)} skill rose from ${previousRank} to ${existing.rank} after ${sourceEvent.headline}.`,
+                description: `${agent.name}'s ${specialtyLabel(specialty)} skill rose from ${previousRank} to ${existing.rank} after ${legendEventHeadline(sourceEvent)}.`,
                 civilizationId: agent.civilizationId,
                 settlementId: settlement.id,
                 personId: agent.id,
@@ -25530,7 +29717,7 @@ function recordSkillPractice(
         projectIds: sourceEvent.projectId === undefined ? [] : [sourceEvent.projectId],
         apprenticeshipIds: sourceEvent.apprenticeshipId === undefined ? [] : [sourceEvent.apprenticeshipId],
         subjectRefs,
-        description: `${agent.name} first entered the record as ${rank} at ${specialtyLabel(specialty)} after ${sourceEvent.headline}.`,
+        description: `${agent.name} first entered the record as ${rank} at ${specialtyLabel(specialty)} after ${legendEventHeadline(sourceEvent)}.`,
         eventIds: [],
     };
     simulation.skills.push(record);
@@ -26196,7 +30383,7 @@ function maybeCreateTrinketArtifactForEvent(
             eventRef(simulation, sourceEvent.id),
             ...extraRefs,
         ],
-        description: `${agent.name} made ${kind === "timepiece" ? "a precise" : "a remembered"} ${artifactKindLabel(kind)} after ${sourceEvent.headline}`,
+        description: `${agent.name} made ${kind === "timepiece" ? "a precise" : "a remembered"} ${artifactKindLabel(kind)} after ${legendEventHeadline(sourceEvent)}`,
     });
 }
 
@@ -26521,7 +30708,7 @@ function obligationKindForEvent(simulation: CivilizationSimulation, event: Legen
     if (event.type === "oath-fulfilled") return "favor";
     if (event.type === "injury-sustained" || event.type === "battle-casualty") return "blood-price";
     if (event.type === "journey-made" && event.journeyId !== undefined && simulation.journeys[event.journeyId]?.kind === "trade") return "debt";
-    if (event.type === "verdict-reached") return event.description.includes("found guilty") || event.description.includes("decided guilty") ? "restitution" : undefined;
+    if (event.type === "verdict-reached") return legendEventDescription(event).includes("found guilty") || legendEventDescription(event).includes("decided guilty") ? "restitution" : undefined;
     if (event.relationshipId !== undefined && (event.type === "relationship-formed" || event.type === "relationship-deepened" || event.type === "relationship-reconciled")) {
         const bond = simulation.socialBonds[event.relationshipId];
         if (bond?.kind === "patronage") return "patronage";
@@ -26775,7 +30962,7 @@ function createObligation(simulation: CivilizationSimulation, settlement: Settle
         projectId: sourceEvent.projectId,
         oathId: sourceEvent.oathId,
         subjectRefs,
-        description: `${parties.debtor.name} owed ${parties.creditor.name} a ${obligationKindLabel(kind)} after ${sourceEvent.headline}`,
+        description: `${parties.debtor.name} owed ${parties.creditor.name} a ${obligationKindLabel(kind)} after ${legendEventHeadline(sourceEvent)}`,
         eventIds: [],
     };
     simulation.obligations.push(obligation);
@@ -27057,60 +31244,124 @@ function maybeHealSettlementInjuries(simulation: CivilizationSimulation, settlem
     }
 }
 
-function updateSettlementEconomy(
-    world: GeneratedWorldMap,
-    simulation: CivilizationSimulation,
-    settlement: Settlement,
-    agents: Agent[],
-): {births: number; deaths: number; migrations: number} {
+function professionCountsForAgents(agents: Agent[]): ProfessionCounts {
     const professions = emptyProfessionCounts();
     for (let agent of agents) professions[agent.profession]++;
+    return professions;
+}
 
-    const profile = settlementResourceProfile(world, settlement);
-    const workers = Math.max(1, agents.length - professions.child - professions.elder);
+function settlementEconomyWorkerSettlement(
+    settlement: Settlement,
+    agents: Agent[],
+): SettlementEconomyWorkerSettlement {
+    const profile = settlementResourceProfile(settlement);
+    return {
+        id: settlement.id,
+        civilizationId: settlement.civilizationId,
+        food: settlement.food,
+        materials: settlement.materials,
+        prosperity: settlement.prosperity,
+        unrest: settlement.unrest,
+        agentCount: agents.length,
+        foodPotential: profile.foodPotential,
+        materialPotential: profile.materialPotential,
+        professions: professionCountsForAgents(agents),
+    };
+}
+
+function computeSettlementEconomyDraft(seed: number, year: number, input: SettlementEconomyWorkerSettlement): SettlementEconomyDraft {
+    const professions = input.professions;
+    const workers = Math.max(1, input.agentCount - professions.child - professions.elder);
     const foodProduced = Math.round(
         (professions.farmer * 2.95 + professions.merchant * 0.45 + professions.child * 0.12)
-        * profile.foodPotential,
+        * input.foodPotential,
     );
     const materialsProduced = Math.round(
         (professions.miner * 1.65 + professions.artisan * 0.65 + professions.farmer * 0.08)
-        * profile.materialPotential,
+        * input.materialPotential,
     );
     const tradeProduced = professions.merchant * 0.85 + professions.artisan * 0.38 + professions.scholar * 0.18;
-    const foodNeeded = Math.round(agents.length * 0.54);
-    const materialNeeded = Math.round(workers * 0.11 + agents.length * 0.015);
+    const foodNeeded = Math.round(input.agentCount * 0.54);
+    const materialNeeded = Math.round(workers * 0.11 + input.agentCount * 0.015);
     const foodDelta = foodProduced - foodNeeded;
     const materialDelta = materialsProduced - materialNeeded;
-
-    settlement.food = clamp(settlement.food + foodDelta, 0, Math.max(650, agents.length * 4));
-    settlement.materials = clamp(settlement.materials + materialDelta, 0, Math.max(200, agents.length * 2));
-
-    const shortage = foodDelta < 0 && settlement.food < agents.length * 0.24;
-    const materialShortage = materialDelta < 0 && settlement.materials < agents.length * 0.15;
-    settlement.prosperity = clamp(
-        settlement.prosperity
-        + tradeProduced / Math.max(80, agents.length * 8)
+    const food = clamp(input.food + foodDelta, 0, Math.max(650, input.agentCount * 4));
+    const materials = clamp(input.materials + materialDelta, 0, Math.max(200, input.agentCount * 2));
+    const shortage = foodDelta < 0 && food < input.agentCount * 0.24;
+    const materialShortage = materialDelta < 0 && materials < input.agentCount * 0.15;
+    const prosperity = clamp(
+        input.prosperity
+        + tradeProduced / Math.max(80, input.agentCount * 8)
         + (foodDelta > 0 ? 0.01 : -0.012)
         + (materialDelta > 0 ? 0.006 : -0.006),
         0,
         1,
     );
-    settlement.unrest = clamp(
-        settlement.unrest
+    const unrest = clamp(
+        input.unrest
         + (shortage ? 0.045 : -0.024)
         + (materialShortage ? 0.025 : -0.006)
-        - settlement.prosperity * 0.01,
+        - prosperity * 0.01,
         0,
         1,
     );
+    const eventType = shortage
+        ? "shortage"
+        : prosperity > 0.78 && hashFloat(seed, year, input.id, 601) > 0.88
+            ? "prosperity"
+            : undefined;
+    return {
+        settlementId: input.id,
+        food,
+        materials,
+        prosperity,
+        unrest,
+        shortage,
+        materialShortage,
+        eventType,
+        eventSeverity: eventType === "shortage"
+            ? clamp(0.35 + unrest, 0, 1)
+            : eventType === "prosperity"
+                ? prosperity
+                : undefined,
+    };
+}
 
-    if (shortage) {
+function settlementEconomyDrafts(
+    world: GeneratedWorldMap,
+    simulation: CivilizationSimulation,
+    aliveAgentsBySettlement: Agent[][],
+    workerPool?: CivilizationWorkerPool,
+): Map<number, SettlementEconomyDraft> {
+    const inputs = simulation.settlements.map(settlement => settlementEconomyWorkerSettlement(
+        settlement,
+        aliveAgentsBySettlement[settlement.id] ?? [],
+    ));
+    if (workerPool && inputs.length > 1) {
+        return workerPool.computeSettlementEconomyDrafts(simulation.options.seed, simulation.year, inputs);
+    }
+    return new Map(inputs.map(input => [
+        input.id,
+        computeSettlementEconomyDraft(simulation.options.seed, simulation.year, input),
+    ]));
+}
+
+function applySettlementEconomyDraft(simulation: CivilizationSimulation, settlement: Settlement, draft: SettlementEconomyDraft) {
+    if (draft.settlementId !== settlement.id) {
+        throw new Error(`Economy draft for settlement ${draft.settlementId} applied to ${settlement.id}`);
+    }
+    settlement.food = draft.food;
+    settlement.materials = draft.materials;
+    settlement.prosperity = draft.prosperity;
+    settlement.unrest = draft.unrest;
+
+    if (draft.eventType === "shortage") {
         recordEvent(simulation, {
             year: simulation.year,
             type: "shortage",
             civilizationId: settlement.civilizationId,
             settlementId: settlement.id,
-            severity: clamp(0.35 + settlement.unrest, 0, 1),
+            severity: draft.eventSeverity ?? clamp(0.35 + settlement.unrest, 0, 1),
             description: `${settlement.name} suffered a food shortage.`,
         });
         recordLegendEvent(simulation, {
@@ -27125,13 +31376,13 @@ function updateSettlementEconomy(
                 civilizationRef(simulation, settlement.civilizationId),
             ],
         });
-    } else if (settlement.prosperity > 0.78 && hashFloat(simulation.options.seed, simulation.year, settlement.id, 601) > 0.88) {
+    } else if (draft.eventType === "prosperity") {
         recordEvent(simulation, {
             year: simulation.year,
             type: "prosperity",
             civilizationId: settlement.civilizationId,
             settlementId: settlement.id,
-            severity: settlement.prosperity,
+            severity: draft.eventSeverity ?? settlement.prosperity,
             description: `${settlement.name} prospered from trade and stored food.`,
         });
         recordLegendEvent(simulation, {
@@ -27147,15 +31398,30 @@ function updateSettlementEconomy(
             ],
         });
     }
+}
+
+function updateSettlementEconomy(
+    world: GeneratedWorldMap,
+    simulation: CivilizationSimulation,
+    settlement: Settlement,
+    agents: Agent[],
+    economyDraft?: SettlementEconomyDraft,
+): {births: number; deaths: number; migrations: number} {
+    const draft = economyDraft ?? computeSettlementEconomyDraft(
+        simulation.options.seed,
+        simulation.year,
+        settlementEconomyWorkerSettlement(settlement, agents),
+    );
+    applySettlementEconomyDraft(simulation, settlement, draft);
 
     maybeFoundOrganization(simulation, settlement, agents);
     maybeCreateSocialBonds(simulation, settlement, agents);
     maybeCreateArtifact(simulation, settlement, agents);
     maintainSettlementArtifactCustody(simulation, settlement, agents);
     maybeCreatePersonalMilestone(simulation, settlement, agents);
-    maybeCreateSettlementProject(simulation, settlement, agents, shortage, materialShortage);
+    maybeCreateSettlementProject(simulation, settlement, agents, draft.shortage, draft.materialShortage);
     maybeCreateRoundTripJourney(simulation, settlement, agents);
-    maybeCreateSettlementInjury(simulation, settlement, agents, shortage, materialShortage);
+    maybeCreateSettlementInjury(simulation, settlement, agents, draft.shortage, draft.materialShortage);
     maybeHealSettlementInjuries(simulation, settlement, agents);
     maintainSettlementAmbitions(simulation, settlement, agents);
     maintainSettlementApprenticeships(simulation, settlement, agents);
@@ -27247,26 +31513,188 @@ function settlementPopulationCapacity(settlement: Settlement): number {
     return Math.max(18, Math.round(base * clamp(multiplier, 0.35, 1.35)));
 }
 
-function birthCountFor(simulation: CivilizationSimulation, settlement: Settlement, agents: Agent[]): number {
+function birthCountWorkerSettlement(settlement: Settlement, agents: Agent[]): BirthCountWorkerSettlement {
     let adults = 0;
     for (let agent of agents) {
         if (agent.age >= 18 && agent.age <= 42 && agent.health > 0.35) adults++;
     }
-    if (adults === 0) return 0;
-    const capacity = settlementPopulationCapacity(settlement);
-    const recovery = clamp((capacity - settlement.population) / capacity, 0, 1);
-    const crowding = clamp((settlement.population - capacity) / capacity, 0, 1);
-    const fertility = 0.032 + settlement.prosperity * 0.018 + settlement.suitability * 0.012 - settlement.unrest * 0.018 + recovery * 0.025 - crowding * 0.05;
-    const expected = Math.max(0, adults * fertility);
-    const whole = Math.floor(expected);
-    const fractional = expected - whole;
-    return whole + (hashFloat(simulation.options.seed, simulation.year, settlement.id, 613) < fractional ? 1 : 0);
+    return {
+        id: settlement.id,
+        type: settlement.type,
+        population: settlement.population,
+        suitability: settlement.suitability,
+        prosperity: settlement.prosperity,
+        unrest: settlement.unrest,
+        adultCount: adults,
+    };
 }
 
-function migrateAgents(simulation: CivilizationSimulation, settlement: Settlement, agents: Agent[]): number {
-    if (settlement.unrest < 0.32 && settlement.food > settlement.population * 0.45) return 0;
+function computeBirthCountDraft(seed: number, year: number, input: BirthCountWorkerSettlement): BirthCountDraft {
+    if (input.adultCount === 0) return {settlementId: input.id, count: 0};
+    const base = input.type === "capital" ? 850 : 180;
+    const multiplier = 0.7 + input.suitability * 0.5 + input.prosperity * 0.2 - input.unrest * 0.2;
+    const capacity = Math.max(18, Math.round(base * clamp(multiplier, 0.35, 1.35)));
+    const recovery = clamp((capacity - input.population) / capacity, 0, 1);
+    const crowding = clamp((input.population - capacity) / capacity, 0, 1);
+    const fertility = 0.032 + input.prosperity * 0.018 + input.suitability * 0.012 - input.unrest * 0.018 + recovery * 0.025 - crowding * 0.05;
+    const expected = Math.max(0, input.adultCount * fertility);
+    const whole = Math.floor(expected);
+    const fractional = expected - whole;
+    return {
+        settlementId: input.id,
+        count: whole + (hashFloat(seed, year, input.id, 613) < fractional ? 1 : 0),
+    };
+}
 
-    const destinations = simulation.settlements
+function birthCountDrafts(
+    simulation: CivilizationSimulation,
+    aliveAgentsBySettlement: Agent[][],
+    workerPool?: CivilizationWorkerPool,
+): Map<number, BirthCountDraft> {
+    const inputs = simulation.settlements.map(settlement => birthCountWorkerSettlement(
+        settlement,
+        aliveAgentsBySettlement[settlement.id] ?? [],
+    ));
+    if (workerPool && inputs.length > 1) {
+        return workerPool.computeBirthCountDrafts(simulation.options.seed, simulation.year, inputs);
+    }
+    return new Map(inputs.map(input => [
+        input.id,
+        computeBirthCountDraft(simulation.options.seed, simulation.year, input),
+    ]));
+}
+
+function birthCountFor(simulation: CivilizationSimulation, settlement: Settlement, agents: Agent[]): number {
+    return computeBirthCountDraft(
+        simulation.options.seed,
+        simulation.year,
+        birthCountWorkerSettlement(settlement, agents),
+    ).count;
+}
+
+function birthParentWorkerAgent(agent: Agent): BirthParentWorkerAgent {
+    return {
+        id: agent.id,
+        civilizationId: agent.civilizationId,
+        settlementId: agent.settlementId,
+        age: agent.age,
+        spouseId: agent.spouseId,
+        alive: agent.alive,
+        childCount: agent.childIds.length,
+    };
+}
+
+function birthParentWorkerSettlement(
+    settlement: Settlement,
+    agents: Agent[],
+    count: number,
+): BirthParentWorkerSettlement {
+    return {
+        id: settlement.id,
+        civilizationId: settlement.civilizationId,
+        count,
+        agents: agents.map(birthParentWorkerAgent),
+    };
+}
+
+function computeBirthParentDraft(seed: number, year: number, input: BirthParentWorkerSettlement): BirthParentDraft {
+    const childCounts = new Map(input.agents.map(agent => [agent.id, agent.childCount]));
+    const parentIds: number[][] = [];
+
+    for (let ordinal = 0; ordinal < input.count; ordinal++) {
+        const adults = input.agents
+            .filter(agent =>
+                agent.alive
+                && agent.civilizationId === input.civilizationId
+                && agent.settlementId === input.id
+                && agent.age >= 18
+                && agent.age <= 52
+            );
+        if (adults.length === 0) {
+            parentIds.push([]);
+            continue;
+        }
+
+        const adultIds = new Set(adults.map(agent => agent.id));
+        const pairs = adults
+            .filter(agent => agent.spouseId !== undefined && agent.id < agent.spouseId && adultIds.has(agent.spouseId))
+            .sort((a, b) =>
+                ((childCounts.get(a.id) ?? 0) + (childCounts.get(a.spouseId!) ?? 0))
+                - ((childCounts.get(b.id) ?? 0) + (childCounts.get(b.spouseId!) ?? 0))
+                || hashFloat(seed, year + ordinal * 997, input.id, a.id)
+                - hashFloat(seed, year + ordinal * 997, input.id, b.id)
+            );
+
+        let chosen: number[];
+        if (pairs.length > 0) {
+            const pair = pairs[Math.floor(hashFloat(seed, year, input.id, ordinal + 811) * Math.min(4, pairs.length))];
+            chosen = [pair.id, pair.spouseId!];
+        } else {
+            chosen = adults
+                .sort((a, b) =>
+                    (childCounts.get(a.id) ?? 0) - (childCounts.get(b.id) ?? 0)
+                    || hashFloat(seed, year + ordinal * 997, input.id, a.id)
+                    - hashFloat(seed, year + ordinal * 997, input.id, b.id)
+                )
+                .slice(0, Math.min(2, adults.length))
+                .map(agent => agent.id);
+        }
+
+        parentIds.push(chosen);
+        for (let parentId of chosen) {
+            childCounts.set(parentId, (childCounts.get(parentId) ?? 0) + 1);
+        }
+    }
+
+    return {settlementId: input.id, parentIds};
+}
+
+function birthParentDrafts(
+    simulation: CivilizationSimulation,
+    aliveAgentsBySettlement: Agent[][],
+    birthPlans: Map<number, BirthCountDraft>,
+    workerPool?: CivilizationWorkerPool,
+): Map<number, BirthParentDraft> {
+    const inputs = simulation.settlements.map(settlement => birthParentWorkerSettlement(
+        settlement,
+        aliveAgentsBySettlement[settlement.id] ?? [],
+        birthPlans.get(settlement.id)?.count ?? 0,
+    ));
+    if (workerPool && inputs.length > 1) {
+        return workerPool.computeBirthParentDrafts(simulation.options.seed, simulation.year, inputs);
+    }
+    return new Map(inputs.map(input => [
+        input.id,
+        computeBirthParentDraft(simulation.options.seed, simulation.year, input),
+    ]));
+}
+
+function migrationWorkerSettlement(settlement: Settlement): MigrationWorkerSettlement {
+    return {
+        id: settlement.id,
+        civilizationId: settlement.civilizationId,
+        prosperity: settlement.prosperity,
+        food: settlement.food,
+        population: settlement.population,
+        unrest: settlement.unrest,
+    };
+}
+
+function migrationWorkerAgent(agent: Agent): MigrationWorkerAgent {
+    return {
+        id: agent.id,
+        age: agent.age,
+        morale: agent.morale,
+    };
+}
+
+function computeMigrationDraft(settlements: MigrationWorkerSettlement[], origin: MigrationWorkerOrigin): MigrationDraft {
+    const settlement = origin.settlement;
+    if (settlement.unrest < 0.32 && settlement.food > settlement.population * 0.45) {
+        return {settlementId: settlement.id, agentIds: []};
+    }
+
+    const destinations = settlements
         .filter(candidate =>
             candidate.civilizationId === settlement.civilizationId
             && candidate.id !== settlement.id
@@ -27274,14 +31702,57 @@ function migrateAgents(simulation: CivilizationSimulation, settlement: Settlemen
             && candidate.food > candidate.population * 0.6
         )
         .sort((a, b) => b.prosperity - a.prosperity || a.id - b.id);
-    if (destinations.length === 0) return 0;
+    if (destinations.length === 0) return {settlementId: settlement.id, agentIds: []};
 
     const destination = destinations[0];
-    const candidates = agents
+    const candidates = origin.agents
         .filter(agent => agent.age >= 16 && agent.age <= 46)
         .sort((a, b) => a.morale - b.morale || a.id - b.id);
     const moveCount = Math.min(candidates.length, Math.max(0, Math.floor(settlement.population * (0.004 + settlement.unrest * 0.018))));
-    const movedAgents = candidates.slice(0, moveCount);
+    return {
+        settlementId: settlement.id,
+        destinationSettlementId: moveCount > 0 ? destination.id : undefined,
+        agentIds: candidates.slice(0, moveCount).map(agent => agent.id),
+    };
+}
+
+function migrationDrafts(
+    simulation: CivilizationSimulation,
+    aliveAgentsBySettlement: Agent[][],
+    workerPool?: CivilizationWorkerPool,
+): Map<number, MigrationDraft> {
+    const settlements = simulation.settlements.map(migrationWorkerSettlement);
+    const origins = simulation.settlements.map(settlement => ({
+        settlement: migrationWorkerSettlement(settlement),
+        agents: (aliveAgentsBySettlement[settlement.id] ?? []).map(migrationWorkerAgent),
+    }));
+    if (workerPool && origins.length > 1) {
+        return workerPool.computeMigrationDrafts(settlements, origins);
+    }
+    return new Map(origins.map(origin => [
+        origin.settlement.id,
+        computeMigrationDraft(settlements, origin),
+    ]));
+}
+
+function migrateAgents(simulation: CivilizationSimulation, settlement: Settlement, agents: Agent[], migrationDraft?: MigrationDraft): number {
+    const draft = migrationDraft ?? computeMigrationDraft(
+        simulation.settlements.map(migrationWorkerSettlement),
+        {
+            settlement: migrationWorkerSettlement(settlement),
+            agents: agents.map(migrationWorkerAgent),
+        },
+    );
+    if (draft.settlementId !== settlement.id) {
+        throw new Error(`Migration draft for settlement ${draft.settlementId} applied to ${settlement.id}`);
+    }
+    if (draft.destinationSettlementId === undefined || draft.agentIds.length === 0) return 0;
+
+    const destination = simulation.settlements[draft.destinationSettlementId];
+    if (!destination) return 0;
+    const movedAgents = draft.agentIds
+        .map(id => simulation.agents[id])
+        .filter((agent): agent is Agent => !!agent && agent.alive && agent.settlementId === settlement.id);
     const originStructure = settlementStructureByKind(simulation, settlement.id, "hall") ?? simulation.structures[settlement.structureIds[0]];
     const destinationStructure = settlementStructureByKind(simulation, destination.id, "hall") ?? simulation.structures[destination.structureIds[0]];
     const journey = movedAgents.length > 0
@@ -27326,6 +31797,7 @@ function migrateAgents(simulation: CivilizationSimulation, settlement: Settlemen
         moveBelongingsWithAgent(simulation, agent, destination.id);
     }
 
+    const moveCount = movedAgents.length;
     if (moveCount > 0) {
         recordEvent(simulation, {
             year: simulation.year,
@@ -27340,7 +31812,7 @@ function migrateAgents(simulation: CivilizationSimulation, settlement: Settlemen
     return moveCount;
 }
 
-function advanceAgentsAndEconomy(world: GeneratedWorldMap, simulation: CivilizationSimulation): {births: number; deaths: number; migrations: number} {
+function advanceAgentsAndEconomy(world: GeneratedWorldMap, simulation: CivilizationSimulation, workerPool?: CivilizationWorkerPool): {births: number; deaths: number; migrations: number} {
     let births = 0;
     let deaths = 0;
     let migrations = 0;
@@ -27348,24 +31820,28 @@ function advanceAgentsAndEconomy(world: GeneratedWorldMap, simulation: Civilizat
     const deathsBySettlement = new Int32Array(simulation.settlements.length);
 
     timedPhase(simulation, "age-professions", () => {
+    const professionDrafts = annualAgentProfessionDrafts(simulation, workerPool);
     for (let agentId of simulation.aliveAgentIds) {
         const agent = simulation.agents[agentId];
         if (!agent?.alive) continue;
-        agent.age++;
-        updateAgentProfession(agent, simulation);
+        const draft = professionDrafts.get(agent.id);
+        if (!draft) throw new Error(`Missing annual profession draft for agent ${agent.id}`);
+        applyAnnualAgentProfessionDraft(agent, simulation, draft);
     }
     });
 
     let aliveAgentsBySettlement = buildAliveAgentsBySettlement(simulation);
     applySettlementPopulations(simulation, aliveAgentsBySettlement);
     timedPhase(simulation, "settlement-economy", () => {
+    const economyDrafts = settlementEconomyDrafts(world, simulation, aliveAgentsBySettlement, workerPool);
     for (let settlement of simulation.settlements) {
-        updateSettlementEconomy(world, simulation, settlement, aliveAgentsBySettlement[settlement.id] ?? []);
+        updateSettlementEconomy(world, simulation, settlement, aliveAgentsBySettlement[settlement.id] ?? [], economyDrafts.get(settlement.id));
     }
     });
     timedPhase(simulation, "households", () => {
+    const householdPlans = householdPairDrafts(simulation, aliveAgentsBySettlement, workerPool);
     for (let settlement of simulation.settlements) {
-        maybeFormHouseholds(simulation, settlement, aliveAgentsBySettlement[settlement.id] ?? []);
+        maybeFormHouseholds(simulation, settlement, aliveAgentsBySettlement[settlement.id] ?? [], householdPlans.get(settlement.id));
     }
     });
 
@@ -27436,10 +31912,22 @@ function advanceAgentsAndEconomy(world: GeneratedWorldMap, simulation: Civilizat
     aliveAgentsBySettlement = buildAliveAgentsBySettlement(simulation);
     applySettlementPopulations(simulation, aliveAgentsBySettlement);
     timedPhase(simulation, "births", () => {
+    const birthPlans = birthCountDrafts(simulation, aliveAgentsBySettlement, workerPool);
+    const parentPlans = birthParentDrafts(simulation, aliveAgentsBySettlement, birthPlans, workerPool);
     for (let settlement of simulation.settlements) {
-        const count = birthCountFor(simulation, settlement, aliveAgentsBySettlement[settlement.id] ?? []);
+        const draft = birthPlans.get(settlement.id);
+        if (!draft) throw new Error(`Missing birth count draft for settlement ${settlement.id}`);
+        if (draft.settlementId !== settlement.id) {
+            throw new Error(`Birth count draft for settlement ${draft.settlementId} applied to ${settlement.id}`);
+        }
+        const parentDraft = parentPlans.get(settlement.id);
+        if (!parentDraft) throw new Error(`Missing birth parent draft for settlement ${settlement.id}`);
+        if (parentDraft.settlementId !== settlement.id) {
+            throw new Error(`Birth parent draft for settlement ${parentDraft.settlementId} applied to ${settlement.id}`);
+        }
+        const count = draft.count;
         for (let i = 0; i < count; i++) {
-            const parentIds = chooseParentsForBirth(simulation, settlement, aliveAgentsBySettlement[settlement.id] ?? [], i);
+            const parentIds = parentDraft.parentIds[i] ?? [];
             const child = createAgent(simulation, settlement.civilizationId, settlement.id, 0, simulation.year, "child", parentIds);
             aliveAgentsBySettlement[settlement.id]?.push(child);
         }
@@ -27459,14 +31947,15 @@ function advanceAgentsAndEconomy(world: GeneratedWorldMap, simulation: Civilizat
 
     applySettlementPopulations(simulation, aliveAgentsBySettlement);
     timedPhase(simulation, "migrations", () => {
+    const migrationPlans = migrationDrafts(simulation, aliveAgentsBySettlement, workerPool);
     for (let settlement of simulation.settlements) {
-        migrations += migrateAgents(simulation, settlement, aliveAgentsBySettlement[settlement.id] ?? []);
+        migrations += migrateAgents(simulation, settlement, aliveAgentsBySettlement[settlement.id] ?? [], migrationPlans.get(settlement.id));
     }
     });
 
     aliveAgentsBySettlement = buildAliveAgentsBySettlement(simulation);
     applySettlementPopulations(simulation, aliveAgentsBySettlement);
-    timedPhase(simulation, "organizations", () => maintainOrganizations(simulation));
+    timedPhase(simulation, "organizations", () => maintainOrganizations(simulation, aliveAgentsBySettlement));
     timedPhase(simulation, "social-bonds", () => maintainSocialBonds(simulation));
     timedPhase(simulation, "social-claims", () => maintainSocialClaims(simulation));
     timedPhase(simulation, "beliefs", () => maintainBeliefs(simulation));
@@ -27510,18 +31999,35 @@ function advanceAgentsAndEconomy(world: GeneratedWorldMap, simulation: Civilizat
     return {births, deaths, migrations};
 }
 
-function advanceOneYear(world: GeneratedWorldMap, simulation: CivilizationSimulation): {births: number; deaths: number; migrations: number} {
+function advanceOneYear(world: GeneratedWorldMap, simulation: CivilizationSimulation, workerPool?: CivilizationWorkerPool): {births: number; deaths: number; migrations: number} {
     if (simulation.profilePhaseTimings) simulation.lastPhaseTimings = [];
     simulation.year++;
-    const agentStats = timedPhase(simulation, "agents-economy-total", () => advanceAgentsAndEconomy(world, simulation));
+    const agentStats = timedPhase(simulation, "agents-economy-total", () => advanceAgentsAndEconomy(world, simulation, workerPool));
+    timedPhase(simulation, "military-force-maintenance", () => maintainMilitaryForces(simulation));
+    timedPhase(simulation, "spy-network-maintenance", () => maintainSpyNetworks(simulation));
     let territoryChanged = false;
 
     timedPhase(simulation, "civilization-expansion-conflict", () => {
+        const expandingCivilizationIds = expandingCivilizationIdsThisYear(simulation);
+        const settlementSites = expandingCivilizationIds.length > 0
+            ? timedPhase(simulation, "settlement-site-selection", () => settlementSitesForCivilizations(
+                world,
+                simulation,
+                expandingCivilizationIds,
+                workerPool,
+            ))
+            : new Map<number, number>();
+        const settlementSeedPlans = expandingCivilizationIds.length > 0
+            ? timedPhase(simulation, "settlement-seed-agent-plan", () => settlementAgentSeedPlansForSites(simulation, settlementSites, workerPool))
+            : new Map<number, SettlementAgentSeedPlan>();
+
         for (let civ of simulation.civilizations) {
-            if (simulation.year % simulation.options.settlementInterval === 0) {
-                const site = timedPhase(simulation, "settlement-site-selection", () => bestSettlementSite(world, simulation, civ.id));
+            if (civ.status === "fallen") continue;
+            if (settlementSites.has(civ.id)) {
+                const site = settlementSites.get(civ.id) ?? -1;
                 if (site >= 0) {
-                    timedPhase(simulation, "settlement-creation", () => createSettlement(world, simulation, civ.id, site, "town"));
+                    const seedPlan = settlementSeedPlans.get(simulation.settlements.length);
+                    timedPhase(simulation, "settlement-creation", () => createSettlement(world, simulation, civ.id, site, "town", seedPlan));
                     territoryChanged = true;
                 }
             }
@@ -27546,8 +32052,9 @@ function advanceOneYear(world: GeneratedWorldMap, simulation: CivilizationSimula
     timedPhase(simulation, "civilization-goal-actions", () => maintainCivilizationGoalActions(simulation));
     timedPhase(simulation, "prophecy-maintenance", () => maintainProphecies(simulation));
     timedPhase(simulation, "civilization-goal-maintenance", () => maintainCivilizationGoals(simulation));
+    if (timedPhase(simulation, "civilization-lifecycle", () => maintainCivilizationLifecycles(world, simulation))) territoryChanged = true;
     if (agentStats.deaths > 0) compactAliveAgentIds(simulation);
-    if (territoryChanged) timedPhase(simulation, "territory-refresh", () => refreshTerritoryClaims(world, simulation));
+    if (territoryChanged) timedPhase(simulation, "territory-refresh", () => refreshTerritoryClaims(world, simulation, workerPool));
     return agentStats;
 }
 
@@ -27650,16 +32157,12 @@ function appendCompactedLegendRef(simulation: CivilizationSimulation, refs: Lege
     return true;
 }
 
-function existingEventRef(event: LegendEvent, kind: LegendEntityRef["kind"], id: number): LegendEntityRef {
-    return event.entityRefs.find(ref => ref.kind === kind && ref.id === id) ?? {kind, id};
-}
-
 function compactedLegendEventRefs(simulation: CivilizationSimulation, event: LegendEvent): LegendEntityRef[] {
     const refs: LegendEntityRef[] = [];
     for (let [field, kind] of compactedLegendEventFieldKinds) {
         if (!shouldStoreOldEventFieldRef(event, kind)) continue;
         const value = event[field];
-        if (typeof value === "number") appendCompactedLegendRef(simulation, refs, existingEventRef(event, kind, value));
+        if (typeof value === "number") appendCompactedLegendRef(simulation, refs, {kind, id: value});
     }
 
     const secondaryCounts = new Map<LegendEntityRef["kind"], number>();
@@ -27702,6 +32205,131 @@ function compactOldLegendEventRefs(simulation: CivilizationSimulation, retainedY
     return compactedRefs;
 }
 
+type LegendEventTextPair = [string, string];
+
+const legendEventTextStoreKey = Symbol("legendEventTextStore");
+
+type SpillableLegendEvent = LegendEvent & {
+    [legendEventTextStoreKey]?: LegendEventTextSpillStore;
+};
+
+class LegendEventTextSpillStore {
+    private readonly chunkSize = 4096;
+    private readonly cacheLimit: number;
+    private currentChunkId = -1;
+    private currentChunk: Array<LegendEventTextPair | null> = [];
+    private readonly chunkCache = new Map<number, Array<LegendEventTextPair | null>>();
+
+    constructor(private readonly directory: string, cacheChunks = 8) {
+        this.cacheLimit = Math.max(1, Math.floor(cacheChunks));
+        fs.mkdirSync(directory, {recursive: true});
+        for (let entry of fs.readdirSync(directory, {withFileTypes: true})) {
+            if (entry.isFile() && /^events-\d+\.json$/.test(entry.name)) {
+                fs.rmSync(path.join(directory, entry.name), {force: true});
+            }
+        }
+    }
+
+    writeText(eventId: number, headline: string, description: string) {
+        const chunkId = Math.floor(eventId / this.chunkSize);
+        if (chunkId !== this.currentChunkId) {
+            this.flush();
+            this.currentChunkId = chunkId;
+            this.currentChunk = [];
+        }
+        this.currentChunk[eventId % this.chunkSize] = [headline, description];
+    }
+
+    readText(eventId: number): LegendEventTextPair | undefined {
+        const chunkId = Math.floor(eventId / this.chunkSize);
+        const offset = eventId % this.chunkSize;
+        if (chunkId === this.currentChunkId) return this.currentChunk[offset] ?? undefined;
+
+        let chunk = this.chunkCache.get(chunkId);
+        if (!chunk) {
+            const chunkPath = this.chunkPath(chunkId);
+            if (!fs.existsSync(chunkPath)) return undefined;
+            chunk = JSON.parse(fs.readFileSync(chunkPath, "utf8")) as Array<LegendEventTextPair | null>;
+            this.chunkCache.set(chunkId, chunk);
+            this.pruneCache();
+        } else {
+            this.chunkCache.delete(chunkId);
+            this.chunkCache.set(chunkId, chunk);
+        }
+        return chunk[offset] ?? undefined;
+    }
+
+    flush() {
+        if (this.currentChunkId < 0) return;
+        fs.writeFileSync(this.chunkPath(this.currentChunkId), JSON.stringify(this.currentChunk));
+    }
+
+    private pruneCache() {
+        while (this.chunkCache.size > this.cacheLimit) {
+            const oldest = this.chunkCache.keys().next().value;
+            if (oldest === undefined) break;
+            this.chunkCache.delete(oldest);
+        }
+    }
+
+    private chunkPath(chunkId: number): string {
+        return path.join(this.directory, `events-${chunkId.toString().padStart(6, "0")}.json`);
+    }
+}
+
+function spilledLegendEventText(event: LegendEvent): LegendEventTextPair | undefined {
+    return (event as SpillableLegendEvent)[legendEventTextStoreKey]?.readText(event.id);
+}
+
+function legendEventHeadline(event: LegendEvent): string {
+    if (event.headline !== "") return event.headline;
+    const text = spilledLegendEventText(event);
+    if (!text) return event.headline;
+    return text[0];
+}
+
+function legendEventDescription(event: LegendEvent): string {
+    if (event.description !== "") return event.description;
+    const text = spilledLegendEventText(event);
+    if (!text) return event.description;
+    return text[1];
+}
+
+function legendEventHeadlineOr(event: LegendEvent | undefined, fallback: string): string {
+    return event ? legendEventHeadline(event) : fallback;
+}
+
+function spillLegendEventText(simulation: CivilizationSimulation, event: LegendEvent): boolean {
+    const store = simulation.legendEventTextSpillStore;
+    if (!store) return false;
+    const spillable = event as SpillableLegendEvent;
+    if (spillable[legendEventTextStoreKey]) return false;
+
+    const headline = event.headline;
+    const description = event.description;
+    store.writeText(event.id, headline, description);
+    Object.defineProperty(spillable, legendEventTextStoreKey, {value: store, enumerable: false, configurable: false});
+    event.headline = "";
+    event.description = "";
+    return true;
+}
+
+function spillOldLegendEventText(simulation: CivilizationSimulation, retainedYears: number): number {
+    const thresholdYear = simulation.year - retainedYears;
+    let spilledEvents = 0;
+
+    while (simulation.spilledLegendEventTextCursor < simulation.legendEvents.length) {
+        const event = simulation.legendEvents[simulation.spilledLegendEventTextCursor];
+        if (!event || event.year >= thresholdYear) break;
+
+        if (spillLegendEventText(simulation, event)) spilledEvents++;
+        simulation.spilledLegendEventTextCursor++;
+    }
+    simulation.legendEventTextSpillStore?.flush();
+
+    return spilledEvents;
+}
+
 function addPhaseTiming(simulation: CivilizationSimulation, name: string, elapsedMs: number) {
     const rounded = Math.round(elapsedMs * 100) / 100;
     const existing = simulation.lastPhaseTimings.find(timing => timing.name === name);
@@ -27721,33 +32349,62 @@ function timedPhase<T>(simulation: CivilizationSimulation, name: string, run: ()
 
 export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: CivilizationOptions, runOptions: CivilizationRunOptions = {}): CivilizationSimulation {
     const options = defaultOptions(inputOptions);
+    const requestedWorkerCount = Math.floor(runOptions.workerCount ?? defaultCivilizationWorkerCount(options.count));
+    const workerCount = options.count > 0 ? Math.max(1, requestedWorkerCount) : 0;
     const snapshotEvery = Math.max(0, Math.floor(runOptions.snapshotEvery ?? 0));
     const captureEvery = Math.max(0, Math.floor(runOptions.captureEvery ?? 0));
     const progressEvery = Math.max(0, Math.floor(runOptions.progressEvery ?? 0));
     const compactEventRefNamesAfter = Math.max(0, Math.floor(runOptions.compactEventRefNamesAfter ?? defaultEventRefNameRetentionYears));
     const compactEventRefsEvery = Math.max(0, Math.floor(runOptions.compactEventRefsEvery ?? defaultEventRefCompactionIntervalYears));
+    const spillEventTextAfter = Math.max(0, Math.floor(runOptions.spillEventTextAfter ?? 0));
+    const spillEventTextEvery = Math.max(0, Math.floor(runOptions.spillEventTextEvery ?? compactEventRefsEvery));
+    const legendEventTextSpillStore = runOptions.legendEventTextSpillDir
+        ? new LegendEventTextSpillStore(path.resolve(runOptions.legendEventTextSpillDir), runOptions.legendEventTextCacheChunks)
+        : undefined;
     const compactNewLegendEventRefs = runOptions.compactNewLegendEventRefs ?? false;
     const gcAfterCompaction = runOptions.gcAfterCompaction ?? false;
     const profilePhaseTimings = runOptions.profilePhaseTimings ?? false;
     const startMs = Date.now();
-    const suitability_t = computeSuitability(world);
-    const settlementCandidateTriangles = computeSettlementCandidateTriangles(world, suitability_t);
-    const settlementSiteBonus_t = computeSettlementSiteBonus(world);
+    const workerPool = workerCount > 0 ? new CivilizationWorkerPool(workerCount) : undefined;
+    let terrainAnalysis: CivilizationTerrainAnalysis;
+    try {
+        terrainAnalysis = computeCivilizationTerrainAnalysis(world, workerPool);
+    } catch (error) {
+        workerPool?.shutdown();
+        throw error;
+    }
+    const suitability_t = terrainAnalysis.suitability;
+    const settlementCandidateTriangles = terrainAnalysis.settlementCandidateTriangles;
+    const settlementSiteBonus_t = terrainAnalysis.settlementSiteBonus;
     const territory_t = new Int16Array(world.mesh.numTriangles);
     territory_t.fill(-1);
     const territory_r = new Int16Array(world.mesh.numRegions);
     territory_r.fill(-1);
 
-    const homelandTriangles = chooseHomelands(world, suitability_t, options);
+    const creationDomains = Array.from({length: options.count}, (_, id) => civilizationCreationDomain(options.seed, id));
+    const homelandTriangles = chooseHomelands(world, suitability_t, options, creationDomains);
     const civilizations: Civilization[] = homelandTriangles.map((_, id) => ({
         id,
         name: makeName(options.seed, id, "civ"),
         color: CIVILIZATION_COLORS[id % CIVILIZATION_COLORS.length],
+        status: "active",
+        originKind: "founded",
+        foundedYear: 0,
         capitalSettlementId: -1,
+        creationDomain: creationDomains[id] ?? civilizationCreationDomain(options.seed, id),
+        creationSeatPreference: creationSeatPreference(creationDomains[id] ?? civilizationCreationDomain(options.seed, id)),
+        creationSeatScore: Math.round(creationSeatScore(world, suitability_t, homelandTriangles[id], creationDomains[id] ?? civilizationCreationDomain(options.seed, id), options.seed, id) * 1000) / 1000,
+        collapsePressure: 0,
+        collapseStage: 0,
+        collapseFailureKinds: [],
         territoryCount: 0,
         population: 0,
         traditionIds: [],
         beliefIds: [],
+        godIds: [],
+        commandmentIds: [],
+        destinyIds: [],
+        miracleIds: [],
         mythIds: [],
         doctrineIds: [],
         magicRoleIds: [],
@@ -27758,6 +32415,7 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
     const simulation: CivilizationSimulation = {
         year: 0,
         options: {...options, count: civilizations.length},
+        workerCount,
         civilizations,
         settlements: [],
         settlementControls: [],
@@ -27772,11 +32430,16 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
         memberships: [],
         organizationRanks: [],
         socialBonds: [],
+        socialBondPairIndex: new Map(),
         relationshipMilestones: [],
         socialClaims: [],
         unions: [],
         beliefs: [],
         beliefAdherences: [],
+        gods: [],
+        commandments: [],
+        destinies: [],
+        miracles: [],
         myths: [],
         doctrines: [],
         magicRoles: [],
@@ -27791,6 +32454,10 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
         conflicts: [],
         battles: [],
         battleParticipations: [],
+        militaryUnits: [],
+        equipmentCaches: [],
+        spyNetworks: [],
+        spyOperations: [],
         injuries: [],
         illnesses: [],
         woundLegacies: [],
@@ -27844,6 +32511,8 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
         legendRefCache: new Map(),
         lineageIndex: new Map(),
         compactedLegendEventRefCursor: 0,
+        spilledLegendEventTextCursor: 0,
+        legendEventTextSpillStore,
         compactNewLegendEventRefs,
         suppressLegendEventMemories: false,
         profilePhaseTimings,
@@ -27855,86 +32524,100 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
         settlementSiteBonus_t,
     };
 
-    seedNaturalFeatures(world, simulation);
-
-    for (let civ of civilizations) {
-        recordLegendEvent(simulation, {
-            year: 0,
-            type: "civilization-founded",
-            headline: `${civ.name} entered recorded history.`,
-            description: `${civ.name} began as an organized civilization.`,
-            civilizationId: civ.id,
-            entityRefs: [civilizationRef(simulation, civ.id)],
-        });
-    }
-
-    for (let civ of civilizations) {
-        const homeland = homelandTriangles[civ.id];
-        createSettlement(world, simulation, civ.id, homeland, "capital");
-    }
-    refreshTerritoryClaims(world, simulation);
-
     const shouldCaptureYear = (year: number) => captureEvery > 0 && (year % captureEvery === 0 || year === options.years);
 
-    if (snapshotEvery > 0 || shouldCaptureYear(0)) {
-        refreshDerivedCivilizationState(world, simulation);
-        if (snapshotEvery > 0) {
-            simulation.history.push(createYearSnapshot(simulation, {births: 0, deaths: 0, migrations: 0}));
-        }
-        if (shouldCaptureYear(0)) runOptions.onCapture?.(simulation);
-    }
+    try {
+        seedNaturalFeatures(world, simulation);
 
-    let refreshedYear = snapshotEvery > 0 || shouldCaptureYear(0) ? 0 : -1;
-    for (let i = 0; i < options.years; i++) {
-        const stats = advanceOneYear(world, simulation);
-        const shouldCompactEventRefs = compactEventRefNamesAfter > 0
-            && compactEventRefsEvery > 0
-            && (simulation.year % compactEventRefsEvery === 0 || simulation.year === options.years);
-        const compactedEventRefs = shouldCompactEventRefs
-            ? compactOldLegendEventRefs(simulation, compactEventRefNamesAfter)
-            : 0;
-        if (
-            compactedEventRefs > 0
-            && simulation.year % defaultLegendRefCachePruneIntervalYears === 0
-        ) {
-            pruneLegendRefCache(simulation);
-            if (gcAfterCompaction) collectGarbageIfAvailable();
+        for (let civ of civilizations) {
+            recordLegendEvent(simulation, {
+                year: 0,
+                type: "civilization-founded",
+                headline: `${civ.name} entered recorded history.`,
+                description: `${civ.name} began as an organized civilization under a ${beliefDomainLabel(civ.creationDomain)} creation mandate: ${civ.creationSeatPreference}.`,
+                civilizationId: civ.id,
+                entityRefs: [civilizationRef(simulation, civ.id)],
+            });
         }
-        const shouldSnapshot = snapshotEvery > 0 && simulation.year % snapshotEvery === 0;
-        const shouldCapture = shouldCaptureYear(simulation.year);
-        const shouldProgress = progressEvery > 0 && (simulation.year % progressEvery === 0 || simulation.year === options.years);
-        const shouldRefreshForProgress = shouldProgress;
-        if (shouldSnapshot || shouldCapture || shouldRefreshForProgress) {
-            refreshDerivedCivilizationState(world, simulation);
-            if (shouldSnapshot) simulation.history.push(createYearSnapshot(simulation, stats));
-            if (shouldCapture) runOptions.onCapture?.(simulation);
-            refreshedYear = simulation.year;
-        }
-        if (shouldProgress) {
-            runOptions.onProgress?.({
-                year: simulation.year,
-                targetYears: options.years,
-                elapsedMs: Date.now() - startMs,
-                births: stats.births,
-                deaths: stats.deaths,
-                migrations: stats.migrations,
-                totalAgents: simulation.agents.length,
-                aliveAgents: simulation.aliveAgentIds.length,
-                settlements: simulation.settlements.length,
-                roads: simulation.roads.length,
-                events: simulation.events.length,
-                legendEvents: simulation.legendEvents.length,
-                compactedEventRefs,
-                phaseTimings: simulation.profilePhaseTimings
-                    ? simulation.lastPhaseTimings
-                        .slice()
-                        .sort((a, b) => b.elapsedMs - a.elapsedMs || a.name.localeCompare(b.name))
-                    : undefined,
-            }, simulation);
-        }
-    }
 
-    if (refreshedYear !== simulation.year) refreshDerivedCivilizationState(world, simulation);
+        const seedPlans = timedPhase(simulation, "settlement-seed-agent-plan", () => capitalSeedPlans(simulation, homelandTriangles, workerPool));
+        for (let civ of civilizations) {
+            const homeland = homelandTriangles[civ.id];
+            const seedPlan = seedPlans.get(simulation.settlements.length);
+            createSettlement(world, simulation, civ.id, homeland, "capital", seedPlan);
+        }
+        refreshTerritoryClaims(world, simulation, workerPool);
+
+        if (snapshotEvery > 0 || shouldCaptureYear(0)) {
+            refreshDerivedCivilizationState(world, simulation, workerPool);
+            if (snapshotEvery > 0) {
+                simulation.history.push(createYearSnapshot(simulation, {births: 0, deaths: 0, migrations: 0}));
+            }
+            if (shouldCaptureYear(0)) runOptions.onCapture?.(simulation);
+        }
+
+        let refreshedYear = snapshotEvery > 0 || shouldCaptureYear(0) ? 0 : -1;
+        for (let i = 0; i < options.years; i++) {
+            const stats = advanceOneYear(world, simulation, workerPool);
+            const shouldCompactEventRefs = compactEventRefNamesAfter > 0
+                && compactEventRefsEvery > 0
+                && (simulation.year % compactEventRefsEvery === 0 || simulation.year === options.years);
+            const compactedEventRefs = shouldCompactEventRefs
+                ? compactOldLegendEventRefs(simulation, compactEventRefNamesAfter)
+                : 0;
+            const shouldSpillEventText = spillEventTextAfter > 0
+                && spillEventTextEvery > 0
+                && (simulation.year % spillEventTextEvery === 0 || simulation.year === options.years);
+            const spilledEventTexts = shouldSpillEventText
+                ? spillOldLegendEventText(simulation, spillEventTextAfter)
+                : 0;
+            if (
+                (compactedEventRefs > 0 || spilledEventTexts > 0)
+                && simulation.year % defaultLegendRefCachePruneIntervalYears === 0
+            ) {
+                pruneLegendRefCache(simulation);
+                if (gcAfterCompaction) collectGarbageIfAvailable();
+            }
+            const shouldSnapshot = snapshotEvery > 0 && simulation.year % snapshotEvery === 0;
+            const shouldCapture = shouldCaptureYear(simulation.year);
+            const shouldProgress = progressEvery > 0 && (simulation.year % progressEvery === 0 || simulation.year === options.years);
+            const shouldRefreshForProgress = shouldProgress;
+            if (shouldSnapshot || shouldCapture || shouldRefreshForProgress) {
+                refreshDerivedCivilizationState(world, simulation, workerPool);
+                if (shouldSnapshot) simulation.history.push(createYearSnapshot(simulation, stats));
+                if (shouldCapture) runOptions.onCapture?.(simulation);
+                refreshedYear = simulation.year;
+            }
+            if (shouldProgress) {
+                runOptions.onProgress?.({
+                    year: simulation.year,
+                    targetYears: options.years,
+                    workerCount: simulation.workerCount,
+                    elapsedMs: Date.now() - startMs,
+                    births: stats.births,
+                    deaths: stats.deaths,
+                    migrations: stats.migrations,
+                    totalAgents: simulation.agents.length,
+                    aliveAgents: simulation.aliveAgentIds.length,
+                    settlements: simulation.settlements.length,
+                    roads: simulation.roads.length,
+                    events: simulation.events.length,
+                    legendEvents: simulation.legendEvents.length,
+                    compactedEventRefs,
+                    spilledEventTexts,
+                    phaseTimings: simulation.profilePhaseTimings
+                        ? simulation.lastPhaseTimings
+                            .slice()
+                            .sort((a, b) => b.elapsedMs - a.elapsedMs || a.name.localeCompare(b.name))
+                        : undefined,
+                }, simulation);
+            }
+        }
+        if (refreshedYear !== simulation.year) refreshDerivedCivilizationState(world, simulation, workerPool);
+        simulation.legendEventTextSpillStore?.flush();
+    } finally {
+        workerPool?.shutdown();
+    }
 
     return simulation;
 }
@@ -28030,6 +32713,10 @@ export function summarizeCivilizations(simulation: CivilizationSimulation): Civi
         beliefCount: simulation.beliefs.length,
         beliefAdherenceCount: simulation.beliefAdherences.length,
         mythsAndMagicCount: simulation.civilizations.length,
+        godCount: simulation.gods.length,
+        commandmentCount: simulation.commandments.length,
+        destinyCount: simulation.destinies.length,
+        miracleCount: simulation.miracles.length,
         mythCount: simulation.myths.length,
         doctrineCount: simulation.doctrines.length,
         magicRoleCount: simulation.magicRoles.length,
@@ -28044,6 +32731,10 @@ export function summarizeCivilizations(simulation: CivilizationSimulation): Civi
         conflictCount: simulation.conflicts.length,
         battleCount: simulation.battles.length,
         battleParticipationCount: simulation.battleParticipations.length,
+        militaryUnitCount: simulation.militaryUnits.length,
+        equipmentCacheCount: simulation.equipmentCaches.length,
+        spyNetworkCount: simulation.spyNetworks.length,
+        spyOperationCount: simulation.spyOperations.length,
         injuryCount: simulation.injuries.length,
         illnessCount: simulation.illnesses.length,
         careRecordCount: simulation.careRecords.length,
@@ -28069,20 +32760,37 @@ export function summarizeCivilizations(simulation: CivilizationSimulation): Civi
             return {
                 id: civ.id,
                 name: civ.name,
-            color: civ.color,
-            territoryCount: civ.territoryCount,
-            settlementCount: settlements.length,
-            population: civ.population,
-            traditionCount: civ.traditionIds.length,
-            mythsAndMagicCount: 1,
-            mythCount: civ.mythIds.length,
-            doctrineCount: civ.doctrineIds.length,
-            magicRoleCount: civ.magicRoleIds.length,
-            prophecyCount: civ.prophecyIds.length,
-            civilizationGoalCount: civ.civilizationGoalIds.length,
-            sacredSiteCount,
-            capital: capital?.name ?? "",
-        };
+                color: civ.color,
+                status: civ.status,
+                originKind: civ.originKind,
+                foundedYear: civ.foundedYear,
+                fallenYear: civ.fallenYear,
+                parentCivilizationId: civ.parentCivilizationId,
+                restoredCivilizationId: civ.restoredCivilizationId,
+                territoryCount: civ.territoryCount,
+                settlementCount: settlements.length,
+                population: civ.population,
+                creationDomain: civ.creationDomain,
+                creationSeatPreference: civ.creationSeatPreference,
+                creationSeatScore: civ.creationSeatScore,
+                creationGodId: civ.creationGodId,
+                collapsePressure: civ.collapsePressure,
+                collapseStage: civ.collapseStage,
+                collapseFailureKinds: [...civ.collapseFailureKinds],
+                traditionCount: civ.traditionIds.length,
+                mythsAndMagicCount: 1,
+                godCount: civ.godIds.length,
+                commandmentCount: civ.commandmentIds.length,
+                destinyCount: civ.destinyIds.length,
+                miracleCount: civ.miracleIds.length,
+                mythCount: civ.mythIds.length,
+                doctrineCount: civ.doctrineIds.length,
+                magicRoleCount: civ.magicRoleIds.length,
+                prophecyCount: civ.prophecyIds.length,
+                civilizationGoalCount: civ.civilizationGoalIds.length,
+                sacredSiteCount,
+                capital: capital?.name ?? "",
+            };
         }),
         settlements: simulation.settlements.map(settlement => ({
             id: settlement.id,
@@ -28694,6 +33402,7 @@ export function summarizeCivilizations(simulation: CivilizationSimulation): Civi
             casualtyCount: conflict.casualtyAgentIds.length,
             capturedSettlementCount: conflict.capturedSettlementIds.length,
             capturedArtifactCount: conflict.capturedArtifactIds.length,
+            spyOperationCount: conflict.spyOperationIds.length,
             startedEventId: conflict.startedEventId,
             endedEventId: conflict.endedEventId,
             eventCount: conflict.eventIds.length,
@@ -28709,11 +33418,22 @@ export function summarizeCivilizations(simulation: CivilizationSimulation): Civi
             defenderCivilizationId: battle.defenderCivilizationId,
             attackerCommanderId: battle.attackerCommanderId,
             defenderCommanderId: battle.defenderCommanderId,
+            battlefieldName: battle.battlefieldName,
+            battlefieldTriangle: battle.battlefieldTriangle,
+            battlefieldX: battle.battlefieldX,
+            battlefieldY: battle.battlefieldY,
+            battlefieldTerrain: battle.battlefieldTerrain,
             attackerParticipantCount: battle.attackerParticipantIds.length,
             defenderParticipantCount: battle.defenderParticipantIds.length,
+            attackerUnitCount: battle.attackerUnitIds.length,
+            defenderUnitCount: battle.defenderUnitIds.length,
+            spyOperationCount: battle.spyOperationIds.length,
             battleParticipationCount: battle.battleParticipationIds.length,
             casualtyCount: battle.casualtyAgentIds.length,
             capturedArtifactCount: battle.capturedArtifactIds.length,
+            attackerPower: battle.attackerPower,
+            defenderPower: battle.defenderPower,
+            intelligenceAdvantage: battle.intelligenceAdvantage,
             outcome: battle.outcome,
             eventCount: battle.eventIds.length,
         })),
@@ -28735,6 +33455,92 @@ export function summarizeCivilizations(simulation: CivilizationSimulation): Civi
             casualtyEventId: participation.casualtyEventId,
             subjectCount: participation.subjectRefs.length,
             eventCount: participation.eventIds.length,
+        })),
+        militaryUnits: simulation.militaryUnits.map(unit => ({
+            id: unit.id,
+            name: unit.name,
+            kind: unit.kind,
+            status: unit.status,
+            formedYear: unit.formedYear,
+            formedEventId: unit.formedEventId,
+            disbandedYear: unit.disbandedYear,
+            disbandedEventId: unit.disbandedEventId,
+            civilizationId: unit.civilizationId,
+            settlementId: unit.settlementId,
+            commanderAgentId: unit.commanderAgentId,
+            troopCount: unit.troopAgentIds.length,
+            equipmentCacheCount: unit.equipmentCacheIds.length,
+            battleCount: unit.battleIds.length,
+            spyOperationCount: unit.spyOperationIds.length,
+            strength: unit.strength,
+            training: Math.round(unit.training * 1000) / 1000,
+            morale: Math.round(unit.morale * 1000) / 1000,
+            supply: Math.round(unit.supply * 1000) / 1000,
+            weaponClass: unit.weaponClass,
+            armorClass: unit.armorClass,
+            weaponQuality: Math.round(unit.weaponQuality * 1000) / 1000,
+            armorQuality: Math.round(unit.armorQuality * 1000) / 1000,
+            subjectCount: unit.subjectRefs.length,
+            eventCount: unit.eventIds.length,
+        })),
+        equipmentCaches: simulation.equipmentCaches.map(cache => ({
+            id: cache.id,
+            name: cache.name,
+            kind: cache.kind,
+            year: cache.year,
+            civilizationId: cache.civilizationId,
+            settlementId: cache.settlementId,
+            unitId: cache.unitId,
+            weaponClass: cache.weaponClass,
+            armorClass: cache.armorClass,
+            quality: Math.round(cache.quality * 1000) / 1000,
+            quantity: cache.quantity,
+            condition: cache.condition,
+            sourceEventId: cache.sourceEventId,
+            subjectCount: cache.subjectRefs.length,
+            eventCount: cache.eventIds.length,
+        })),
+        spyNetworks: simulation.spyNetworks.map(network => ({
+            id: network.id,
+            name: network.name,
+            status: network.status,
+            cover: network.cover,
+            formedYear: network.formedYear,
+            formedEventId: network.formedEventId,
+            exposedYear: network.exposedYear,
+            exposedEventId: network.exposedEventId,
+            civilizationId: network.civilizationId,
+            settlementId: network.settlementId,
+            targetCivilizationId: network.targetCivilizationId,
+            targetSettlementId: network.targetSettlementId,
+            handlerAgentId: network.handlerAgentId,
+            agentCount: network.agentIds.length,
+            operationCount: network.operationIds.length,
+            secrecy: Math.round(network.secrecy * 1000) / 1000,
+            infiltration: Math.round(network.infiltration * 1000) / 1000,
+            intelligence: Math.round(network.intelligence * 1000) / 1000,
+            subjectCount: network.subjectRefs.length,
+            eventCount: network.eventIds.length,
+        })),
+        spyOperations: simulation.spyOperations.map(operation => ({
+            id: operation.id,
+            name: operation.name,
+            kind: operation.kind,
+            outcome: operation.outcome,
+            year: operation.year,
+            networkId: operation.networkId,
+            civilizationId: operation.civilizationId,
+            targetCivilizationId: operation.targetCivilizationId,
+            targetSettlementId: operation.targetSettlementId,
+            agentCount: operation.agentIds.length,
+            risk: Math.round(operation.risk * 1000) / 1000,
+            success: Math.round(operation.success * 1000) / 1000,
+            detected: operation.detected,
+            sourceEventId: operation.sourceEventId,
+            battleId: operation.battleId,
+            conflictId: operation.conflictId,
+            subjectCount: operation.subjectRefs.length,
+            eventCount: operation.eventIds.length,
         })),
         injuries: simulation.injuries.map(injury => ({
             id: injury.id,
@@ -29595,6 +34401,10 @@ const compactedLegendEventFieldKinds: Array<[keyof LegendEvent, LegendEntityRef[
     ["unionId", "union"],
     ["beliefId", "belief"],
     ["beliefAdherenceId", "belief-adherence"],
+    ["godId", "god"],
+    ["commandmentId", "commandment"],
+    ["destinyId", "destiny"],
+    ["miracleId", "miracle"],
     ["mythId", "myth"],
     ["doctrineId", "doctrine"],
     ["magicRoleId", "magic-role"],
@@ -29608,6 +34418,10 @@ const compactedLegendEventFieldKinds: Array<[keyof LegendEvent, LegendEntityRef[
     ["conflictId", "conflict"],
     ["battleId", "battle"],
     ["battleParticipationId", "battle-participation"],
+    ["militaryUnitId", "military-unit"],
+    ["equipmentCacheId", "equipment-cache"],
+    ["spyNetworkId", "spy-network"],
+    ["spyOperationId", "spy-operation"],
     ["injuryId", "injury"],
     ["illnessId", "illness"],
     ["memorialId", "memorial"],
@@ -31386,6 +36200,13 @@ function conflictChapter(
 function conflictRelatedRecords(simulation: CivilizationSimulation, conflict: Conflict) {
     const battleIdSet = new Set(conflict.battleIds);
     const casualtySet = new Set(conflict.casualtyAgentIds);
+    const conflictBattles = conflict.battleIds.map(id => simulation.battles[id]).filter(Boolean);
+    const militaryUnitIds = uniqueNumberList(conflictBattles.flatMap(battle => [...battle.attackerUnitIds, ...battle.defenderUnitIds]));
+    const spyOperationIds = uniqueNumberList([
+        ...conflict.spyOperationIds,
+        ...conflictBattles.flatMap(battle => battle.spyOperationIds),
+    ]);
+    const militaryUnits = militaryUnitIds.map(id => simulation.militaryUnits[id]).filter(Boolean);
     const contestedSettlementSet = new Set([
         ...conflict.contestedSettlementIds,
         ...conflict.capturedSettlementIds,
@@ -31394,8 +36215,11 @@ function conflictRelatedRecords(simulation: CivilizationSimulation, conflict: Co
     const conflictSubject = (refs: LegendEntityRef[] | undefined) => (refs ?? []).some(ref => ref.kind === "conflict" && ref.id === conflict.id);
     const battleSubject = (refs: LegendEntityRef[] | undefined) => (refs ?? []).some(ref => ref.kind === "battle" && battleIdSet.has(ref.id));
     return {
-        battles: conflict.battleIds.map(id => simulation.battles[id]).filter(Boolean),
+        battles: conflictBattles,
         battleParticipations: simulation.battleParticipations.filter(participation => participation.conflictId === conflict.id || battleIdSet.has(participation.battleId)),
+        militaryUnits,
+        equipmentCaches: uniqueNumberList(militaryUnits.flatMap(unit => unit.equipmentCacheIds)).map(id => simulation.equipmentCaches[id]).filter(Boolean),
+        spyOperations: spyOperationIds.map(id => simulation.spyOperations[id]).filter(Boolean),
         casualties: conflict.casualtyAgentIds.map(id => simulation.agents[id]).filter(Boolean),
         capturedSettlements: conflict.capturedSettlementIds.map(id => simulation.settlements[id]).filter(Boolean),
         capturedArtifacts: conflict.capturedArtifactIds.map(id => simulation.artifacts[id]).filter(Boolean),
@@ -31461,10 +36285,12 @@ function buildConflictChapters(simulation: CivilizationSimulation, conflict: Con
             [
                 ...related.battles.slice(-8).map(battle => battleRef(simulation, battle.id)),
                 ...related.battleParticipations.slice(-8).map(participation => battleParticipationRef(simulation, participation.id)),
+                ...related.militaryUnits.slice(-8).map(unit => militaryUnitRef(simulation, unit.id)),
+                ...related.spyOperations.slice(-6).map(operation => spyOperationRef(simulation, operation.id)),
                 ...(firstBattle?.attackerCommanderId === undefined ? [] : [personRef(simulation, firstBattle.attackerCommanderId)]),
                 ...(firstBattle?.defenderCommanderId === undefined ? [] : [personRef(simulation, firstBattle.defenderCommanderId)]),
             ],
-            `${conflict.name} records ${related.battles.length} battle ${related.battles.length === 1 ? "entry" : "entries"} and ${related.battleParticipations.length} battle role ${related.battleParticipations.length === 1 ? "record" : "records"}, ending most recently at ${latestBattle?.name ?? "no named battle"}.`,
+            `${conflict.name} records ${related.battles.length} battle ${related.battles.length === 1 ? "entry" : "entries"}, ${related.battleParticipations.length} battle role ${related.battleParticipations.length === 1 ? "record" : "records"}, ${related.militaryUnits.length} military unit ${related.militaryUnits.length === 1 ? "record" : "records"}, and ${related.spyOperations.length} spy operation ${related.spyOperations.length === 1 ? "record" : "records"}, ending most recently at ${latestBattle?.battlefieldName ?? latestBattle?.name ?? "no named battlefield"}.`,
         ));
     }
 
@@ -31632,6 +36458,9 @@ function battleChapter(
 function battleRelatedRecords(simulation: CivilizationSimulation, battle: Battle) {
     const participantIds = new Set([...battle.attackerParticipantIds, ...battle.defenderParticipantIds]);
     const casualtyIds = new Set(battle.casualtyAgentIds);
+    const militaryUnits = uniqueNumberList([...battle.attackerUnitIds, ...battle.defenderUnitIds])
+        .map(id => simulation.militaryUnits[id])
+        .filter(Boolean);
     const battleSubject = (refs: LegendEntityRef[] | undefined) => (refs ?? []).some(ref => ref.kind === "battle" && ref.id === battle.id);
     const participantSubject = (refs: LegendEntityRef[] | undefined) => (refs ?? []).some(ref => ref.kind === "battle-participation" && battle.battleParticipationIds.includes(ref.id));
     return {
@@ -31639,6 +36468,9 @@ function battleRelatedRecords(simulation: CivilizationSimulation, battle: Battle
         participants: [...participantIds].map(id => simulation.agents[id]).filter(Boolean),
         casualties: battle.casualtyAgentIds.map(id => simulation.agents[id]).filter(Boolean),
         capturedArtifacts: battle.capturedArtifactIds.map(id => simulation.artifacts[id]).filter(Boolean),
+        militaryUnits,
+        equipmentCaches: uniqueNumberList(militaryUnits.flatMap(unit => unit.equipmentCacheIds)).map(id => simulation.equipmentCaches[id]).filter(Boolean),
+        spyOperations: battle.spyOperationIds.map(id => simulation.spyOperations[id]).filter(Boolean),
         participations: battle.battleParticipationIds.map(id => simulation.battleParticipations[id]).filter(Boolean),
         attackerParticipations: battle.battleParticipationIds
             .map(id => simulation.battleParticipations[id])
@@ -31686,8 +36518,10 @@ function buildBattleChapters(simulation: CivilizationSimulation, battle: Battle)
             settlementRef(simulation, battle.settlementId),
             civilizationRef(simulation, battle.attackerCivilizationId),
             civilizationRef(simulation, battle.defenderCivilizationId),
+            ...related.militaryUnits.slice(0, 6).map(unit => militaryUnitRef(simulation, unit.id)),
+            ...related.spyOperations.slice(0, 4).map(operation => spyOperationRef(simulation, operation.id)),
         ],
-        `${battle.name} took place in year ${battle.year} at ${settlement?.name ?? "an unknown place"} between ${attacker?.name ?? "an unknown attacker"} and ${defender?.name ?? "an unknown defender"}${related.conflict === undefined ? "" : ` as part of ${related.conflict.name}`}.`,
+        `${battle.name} took place in year ${battle.year} at ${battle.battlefieldName} near ${settlement?.name ?? "an unknown place"} (${battlefieldTerrainLabel(battle.battlefieldTerrain)}, map ${battle.battlefieldX}, ${battle.battlefieldY}, triangle ${battle.battlefieldTriangle}) between ${attacker?.name ?? "an unknown attacker"} and ${defender?.name ?? "an unknown defender"}${related.conflict === undefined ? "" : ` as part of ${related.conflict.name}`}.`,
     ));
 
     if (attackerCommander || defenderCommander || related.participations.length) {
@@ -31702,8 +36536,10 @@ function buildBattleChapters(simulation: CivilizationSimulation, battle: Battle)
                 ...(defenderCommander === undefined ? [] : [personRef(simulation, defenderCommander.id)]),
                 ...related.attackerParticipations.slice(0, 6).map(participation => battleParticipationRef(simulation, participation.id)),
                 ...related.defenderParticipations.slice(0, 6).map(participation => battleParticipationRef(simulation, participation.id)),
+                ...related.militaryUnits.slice(0, 8).map(unit => militaryUnitRef(simulation, unit.id)),
+                ...related.equipmentCaches.slice(0, 6).map(cache => equipmentCacheRef(simulation, cache.id)),
             ],
-            `${battle.name} records ${related.attackerParticipations.length} attacker role ${related.attackerParticipations.length === 1 ? "entry" : "entries"} and ${related.defenderParticipations.length} defender role ${related.defenderParticipations.length === 1 ? "entry" : "entries"}${attackerCommander || defenderCommander ? `, led by ${attackerCommander?.name ?? "an unknown attacker commander"} and ${defenderCommander?.name ?? "an unknown defender commander"}` : ""}.`,
+            `${battle.name} records ${related.attackerParticipations.length} attacker role ${related.attackerParticipations.length === 1 ? "entry" : "entries"}, ${related.defenderParticipations.length} defender role ${related.defenderParticipations.length === 1 ? "entry" : "entries"}, ${related.militaryUnits.length} military unit ${related.militaryUnits.length === 1 ? "record" : "records"}, and ${related.equipmentCaches.length} equipment cache ${related.equipmentCaches.length === 1 ? "record" : "records"}${attackerCommander || defenderCommander ? `, led by ${attackerCommander?.name ?? "an unknown attacker commander"} and ${defenderCommander?.name ?? "an unknown defender commander"}` : ""}.`,
         ));
     }
 
@@ -31718,8 +36554,9 @@ function buildBattleChapters(simulation: CivilizationSimulation, battle: Battle)
         ], 24),
         [
             ...related.participations.slice(-10).map(participation => battleParticipationRef(simulation, participation.id)),
+            ...related.spyOperations.slice(-6).map(operation => spyOperationRef(simulation, operation.id)),
         ],
-        `${battle.name} ended with a ${battle.outcome} outcome after involving ${related.participants.length} recorded participant ${related.participants.length === 1 ? "person" : "people"} and ${related.participations.length} battle role ${related.participations.length === 1 ? "record" : "records"}.`,
+        `${battle.name} ended with a ${battle.outcome} outcome after involving ${related.participants.length} recorded participant ${related.participants.length === 1 ? "person" : "people"}, ${related.participations.length} battle role ${related.participations.length === 1 ? "record" : "records"}, attacker power ${battle.attackerPower}, defender power ${battle.defenderPower}, and intelligence advantage ${battle.intelligenceAdvantage.toFixed(2)}.`,
     ));
 
     if (related.casualties.length || related.injuries.length || related.memorials.length) {
@@ -32936,6 +37773,10 @@ function roadTimelineEventIds(index: ExportEventIdIndex, simulation: Civilizatio
 
 function mythicRecordsForCivilization(simulation: CivilizationSimulation, civilization: Civilization): MythsAndMagicRecord {
     const beliefs = simulation.beliefs.filter(belief => belief.civilizationId === civilization.id);
+    const gods = civilization.godIds.map(id => simulation.gods[id]).filter((god): god is God => !!god);
+    const commandments = civilization.commandmentIds.map(id => simulation.commandments[id]).filter((commandment): commandment is Commandment => !!commandment);
+    const destinies = civilization.destinyIds.map(id => simulation.destinies[id]).filter((destiny): destiny is Destiny => !!destiny);
+    const miracles = civilization.miracleIds.map(id => simulation.miracles[id]).filter((miracle): miracle is Miracle => !!miracle);
     const myths = civilization.mythIds.map(id => simulation.myths[id]).filter((myth): myth is Myth => !!myth);
     const doctrines = civilization.doctrineIds.map(id => simulation.doctrines[id]).filter((doctrine): doctrine is Doctrine => !!doctrine);
     const magicRoles = civilization.magicRoleIds.map(id => simulation.magicRoles[id]).filter((role): role is MagicRole => !!role);
@@ -32945,14 +37786,19 @@ function mythicRecordsForCivilization(simulation: CivilizationSimulation, civili
     const capital = simulation.settlements[civilization.capitalSettlementId];
     const openProphecies = prophecies.filter(prophecy => prophecy.status === "open");
     const activeGoals = goals.filter(goal => goal.status === "active");
+    const activeDestinies = destinies.filter(destiny => destiny.status === "active");
     const activeRoles = magicRoles.filter(role => role.status === "active");
     const domains = uniqueNumberList(beliefs.map(belief => BELIEF_DOMAINS.indexOf(belief.domain)).filter(index => index >= 0))
         .map(index => BELIEF_DOMAINS[index]);
-    const eventIds = eventIdsForRecords([...beliefs, ...myths, ...doctrines, ...magicRoles, ...prophecies, ...goals, ...sacredSites], 64);
+    const eventIds = eventIdsForRecords([...beliefs, ...gods, ...commandments, ...destinies, ...miracles, ...myths, ...doctrines, ...magicRoles, ...prophecies, ...goals, ...sacredSites], 64);
     const subjectRefs = uniqueLegendRefs([
         civilizationRef(simulation, civilization.id),
         ...(capital ? [settlementRef(simulation, capital.id)] : []),
         ...beliefs.slice(0, 8).map(belief => beliefRef(simulation, belief.id)),
+        ...gods.slice(0, 8).map(god => godRef(simulation, god.id)),
+        ...commandments.slice(0, 6).map(commandment => commandmentRef(simulation, commandment.id)),
+        ...activeDestinies.slice(0, 6).map(destiny => destinyRef(simulation, destiny.id)),
+        ...miracles.slice(-6).map(miracle => miracleRef(simulation, miracle.id)),
         ...myths.slice(0, 8).map(myth => mythRef(simulation, myth.id)),
         ...doctrines.slice(0, 8).map(doctrine => doctrineRef(simulation, doctrine.id)),
         ...activeRoles.slice(0, 8).map(role => magicRoleRef(simulation, role.id)),
@@ -32969,6 +37815,11 @@ function mythicRecordsForCivilization(simulation: CivilizationSimulation, civili
         civilizationId: civilization.id,
         capitalSettlementId: civilization.capitalSettlementId,
         beliefIds: beliefs.map(belief => belief.id),
+        godIds: gods.map(god => god.id),
+        commandmentIds: commandments.map(commandment => commandment.id),
+        destinyIds: destinies.map(destiny => destiny.id),
+        activeDestinyIds: activeDestinies.map(destiny => destiny.id),
+        miracleIds: miracles.map(miracle => miracle.id),
         mythIds: myths.map(myth => myth.id),
         doctrineIds: doctrines.map(doctrine => doctrine.id),
         magicRoleIds: magicRoles.map(role => role.id),
@@ -32980,7 +37831,7 @@ function mythicRecordsForCivilization(simulation: CivilizationSimulation, civili
         sacredSiteIds: sacredSites.map(site => site.id),
         sourceEventIds: eventIds.slice(0, 36),
         subjectRefs,
-        description: `${civilization.name}'s Myths & Magic layer ties ${beliefs.length} belief ${beliefs.length === 1 ? "root" : "roots"} to ${myths.length} myth ${myths.length === 1 ? "cycle" : "cycles"}, ${magicRoles.length} magic role ${magicRoles.length === 1 ? "appointment" : "appointments"}, ${openProphecies.length} open ${openProphecies.length === 1 ? "prophecy" : "prophecies"}, ${activeGoals.length} active kingdom ${activeGoals.length === 1 ? "goal" : "goals"}, and ${sacredSites.length} sacred ${sacredSites.length === 1 ? "place" : "places"}.${domainText}`,
+        description: `${civilization.name}'s Myths & Magic layer ties ${beliefs.length} belief ${beliefs.length === 1 ? "root" : "roots"} to ${gods.length} god ${gods.length === 1 ? "power" : "powers"}, ${commandments.length} commandment ${commandments.length === 1 ? "rule" : "rules"}, ${activeDestinies.length} active ${activeDestinies.length === 1 ? "destiny" : "destinies"}, ${miracles.length} miracle ${miracles.length === 1 ? "witness" : "witnesses"}, ${myths.length} myth ${myths.length === 1 ? "cycle" : "cycles"}, ${magicRoles.length} magic role ${magicRoles.length === 1 ? "appointment" : "appointments"}, ${openProphecies.length} open ${openProphecies.length === 1 ? "prophecy" : "prophecies"}, ${activeGoals.length} active kingdom ${activeGoals.length === 1 ? "goal" : "goals"}, and ${sacredSites.length} sacred ${sacredSites.length === 1 ? "place" : "places"}.${domainText}`,
         eventIds,
     };
 }
@@ -33042,6 +37893,10 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
         beliefCount: simulation.beliefs.length,
         beliefAdherenceCount: simulation.beliefAdherences.length,
         mythsAndMagicCount: mythsAndMagic.length,
+        godCount: simulation.gods.length,
+        commandmentCount: simulation.commandments.length,
+        destinyCount: simulation.destinies.length,
+        miracleCount: simulation.miracles.length,
         mythCount: simulation.myths.length,
         doctrineCount: simulation.doctrines.length,
         magicRoleCount: simulation.magicRoles.length,
@@ -33056,6 +37911,10 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
         conflictCount: simulation.conflicts.length,
         battleCount: simulation.battles.length,
         battleParticipationCount: simulation.battleParticipations.length,
+        militaryUnitCount: simulation.militaryUnits.length,
+        equipmentCacheCount: simulation.equipmentCaches.length,
+        spyNetworkCount: simulation.spyNetworks.length,
+        spyOperationCount: simulation.spyOperations.length,
         injuryCount: simulation.injuries.length,
         illnessCount: simulation.illnesses.length,
         careRecordCount: simulation.careRecords.length,
@@ -33080,11 +37939,28 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             id: civ.id,
             name: civ.name,
             color: civ.color,
+            status: civ.status,
+            originKind: civ.originKind,
+            foundedYear: civ.foundedYear,
+            fallenYear: civ.fallenYear,
+            parentCivilizationId: civ.parentCivilizationId,
+            restoredCivilizationId: civ.restoredCivilizationId,
             capitalSettlementId: civ.capitalSettlementId,
+            creationDomain: civ.creationDomain,
+            creationSeatPreference: civ.creationSeatPreference,
+            creationSeatScore: civ.creationSeatScore,
+            creationGodId: civ.creationGodId,
+            collapsePressure: civ.collapsePressure,
+            collapseStage: civ.collapseStage,
+            collapseFailureKinds: [...civ.collapseFailureKinds],
             population: civ.population,
             traditionIds: [...civ.traditionIds],
             beliefIds: [...civ.beliefIds],
             mythsMagicId: civ.id,
+            godIds: [...civ.godIds],
+            commandmentIds: [...civ.commandmentIds],
+            destinyIds: [...civ.destinyIds],
+            miracleIds: [...civ.miracleIds],
             mythIds: [...civ.mythIds],
             doctrineIds: [...civ.doctrineIds],
             magicRoleIds: [...civ.magicRoleIds],
@@ -33524,6 +38400,11 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             adherenceIds: [...belief.adherenceIds],
             organizationIds: [...belief.organizationIds],
             structureIds: [...belief.structureIds],
+            godIds: [...belief.godIds],
+            patronGodId: belief.patronGodId,
+            commandmentIds: [...belief.commandmentIds],
+            destinyIds: [...belief.destinyIds],
+            miracleIds: [...belief.miracleIds],
             mythIds: [...belief.mythIds],
             doctrineIds: [...belief.doctrineIds],
             magicRoleIds: [...belief.magicRoleIds],
@@ -33534,6 +38415,11 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
         mythsAndMagic: mythsAndMagic.map(record => ({
             ...record,
             beliefIds: [...record.beliefIds],
+            godIds: [...record.godIds],
+            commandmentIds: [...record.commandmentIds],
+            destinyIds: [...record.destinyIds],
+            activeDestinyIds: [...record.activeDestinyIds],
+            miracleIds: [...record.miracleIds],
             mythIds: [...record.mythIds],
             doctrineIds: [...record.doctrineIds],
             magicRoleIds: [...record.magicRoleIds],
@@ -33547,6 +38433,37 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             subjectRefs: record.subjectRefs.map(ref => ({...ref})),
             eventIds: [...record.eventIds],
         })),
+        gods: simulation.gods.map(god => ({
+            ...god,
+            controlSpheres: [...god.controlSpheres],
+            mythIds: [...god.mythIds],
+            doctrineIds: [...god.doctrineIds],
+            magicRoleIds: [...god.magicRoleIds],
+            prophecyIds: [...god.prophecyIds],
+            civilizationGoalIds: [...god.civilizationGoalIds],
+            sacredSiteIds: [...god.sacredSiteIds],
+            commandmentIds: [...god.commandmentIds],
+            destinyIds: [...god.destinyIds],
+            miracleIds: [...god.miracleIds],
+            subjectRefs: god.subjectRefs.map(ref => ({...ref})),
+            eventIds: exportEventIds(eventIds, "god", god.id, god.eventIds),
+        })),
+        commandments: simulation.commandments.map(commandment => ({
+            ...commandment,
+            civilizationGoalIds: [...commandment.civilizationGoalIds],
+            subjectRefs: commandment.subjectRefs.map(ref => ({...ref})),
+            eventIds: exportEventIds(eventIds, "commandment", commandment.id, commandment.eventIds),
+        })),
+        destinies: simulation.destinies.map(destiny => ({
+            ...destiny,
+            subjectRefs: destiny.subjectRefs.map(ref => ({...ref})),
+            eventIds: exportEventIds(eventIds, "destiny", destiny.id, destiny.eventIds),
+        })),
+        miracles: simulation.miracles.map(miracle => ({
+            ...miracle,
+            subjectRefs: miracle.subjectRefs.map(ref => ({...ref})),
+            eventIds: exportEventIds(eventIds, "miracle", miracle.id, miracle.eventIds),
+        })),
         myths: simulation.myths.map(myth => ({
             id: myth.id,
             name: myth.name,
@@ -33556,6 +38473,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             beliefId: myth.beliefId,
             originSettlementId: myth.originSettlementId,
             year: myth.year,
+            godId: myth.godId,
             centralAgentId: myth.centralAgentId,
             subjectRefs: myth.subjectRefs.map(ref => ({...ref})),
             description: myth.description,
@@ -33569,6 +38487,8 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             civilizationId: doctrine.civilizationId,
             beliefId: doctrine.beliefId,
             mythId: doctrine.mythId,
+            godId: doctrine.godId,
+            commandmentId: doctrine.commandmentId,
             originSettlementId: doctrine.originSettlementId,
             foundedYear: doctrine.foundedYear,
             principle: doctrine.principle,
@@ -33592,6 +38512,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             beliefId: role.beliefId,
             organizationId: role.organizationId,
             mythId: role.mythId,
+            godId: role.godId,
             prophecyIds: [...role.prophecyIds],
             civilizationGoalIds: [...role.civilizationGoalIds],
             subjectRefs: role.subjectRefs.map(ref => ({...ref})),
@@ -33609,6 +38530,8 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             settlementId: prophecy.settlementId,
             beliefId: prophecy.beliefId,
             mythId: prophecy.mythId,
+            godId: prophecy.godId,
+            destinyId: prophecy.destinyId,
             speakerAgentId: prophecy.speakerAgentId,
             magicRoleId: prophecy.magicRoleId,
             targetSettlementId: prophecy.targetSettlementId,
@@ -33637,6 +38560,9 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             doctrineId: goal.doctrineId,
             magicRoleId: goal.magicRoleId,
             prophecyId: goal.prophecyId,
+            godId: goal.godId,
+            commandmentId: goal.commandmentId,
+            destinyId: goal.destinyId,
             targetSettlementId: goal.targetSettlementId,
             targetArtifactId: goal.targetArtifactId,
             targetCivilizationId: goal.targetCivilizationId,
@@ -33663,6 +38589,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             magicRoleId: site.magicRoleId,
             prophecyId: site.prophecyId,
             civilizationGoalId: site.civilizationGoalId,
+            godId: site.godId,
             renown: site.renown,
             subjectRefs: site.subjectRefs.map(ref => ({...ref})),
             description: site.description,
@@ -33790,6 +38717,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             casualtyAgentIds: [...conflict.casualtyAgentIds],
             capturedSettlementIds: [...conflict.capturedSettlementIds],
             capturedArtifactIds: [...conflict.capturedArtifactIds],
+            spyOperationIds: [...conflict.spyOperationIds],
             startedEventId: conflict.startedEventId,
             endedEventId: conflict.endedEventId,
             conflictChapters: buildConflictChapters(simulation, conflict),
@@ -33806,11 +38734,22 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             defenderCivilizationId: battle.defenderCivilizationId,
             attackerCommanderId: battle.attackerCommanderId,
             defenderCommanderId: battle.defenderCommanderId,
+            battlefieldName: battle.battlefieldName,
+            battlefieldTriangle: battle.battlefieldTriangle,
+            battlefieldX: battle.battlefieldX,
+            battlefieldY: battle.battlefieldY,
+            battlefieldTerrain: battle.battlefieldTerrain,
             attackerParticipantIds: [...battle.attackerParticipantIds],
             defenderParticipantIds: [...battle.defenderParticipantIds],
+            attackerUnitIds: [...battle.attackerUnitIds],
+            defenderUnitIds: [...battle.defenderUnitIds],
+            spyOperationIds: [...battle.spyOperationIds],
             battleParticipationIds: [...battle.battleParticipationIds],
             casualtyAgentIds: [...battle.casualtyAgentIds],
             capturedArtifactIds: [...battle.capturedArtifactIds],
+            attackerPower: battle.attackerPower,
+            defenderPower: battle.defenderPower,
+            intelligenceAdvantage: battle.intelligenceAdvantage,
             outcome: battle.outcome,
             battleChapters: buildBattleChapters(simulation, battle),
             eventIds: exportEventIds(eventIds, "battle", battle.id, battle.eventIds),
@@ -33834,6 +38773,96 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             subjectRefs: participation.subjectRefs.map(ref => ({...ref})),
             description: participation.description,
             eventIds: exportEventIds(eventIds, "battle-participation", participation.id, participation.eventIds),
+        })),
+        militaryUnits: simulation.militaryUnits.map(unit => ({
+            id: unit.id,
+            name: unit.name,
+            kind: unit.kind,
+            status: unit.status,
+            formedYear: unit.formedYear,
+            formedEventId: unit.formedEventId,
+            disbandedYear: unit.disbandedYear,
+            disbandedEventId: unit.disbandedEventId,
+            civilizationId: unit.civilizationId,
+            settlementId: unit.settlementId,
+            commanderAgentId: unit.commanderAgentId,
+            troopAgentIds: [...unit.troopAgentIds],
+            equipmentCacheIds: [...unit.equipmentCacheIds],
+            battleIds: [...unit.battleIds],
+            spyOperationIds: [...unit.spyOperationIds],
+            strength: unit.strength,
+            training: unit.training,
+            morale: unit.morale,
+            supply: unit.supply,
+            weaponClass: unit.weaponClass,
+            armorClass: unit.armorClass,
+            weaponQuality: unit.weaponQuality,
+            armorQuality: unit.armorQuality,
+            subjectRefs: unit.subjectRefs.map(ref => ({...ref})),
+            description: unit.description,
+            eventIds: exportEventIds(eventIds, "military-unit", unit.id, unit.eventIds),
+        })),
+        equipmentCaches: simulation.equipmentCaches.map(cache => ({
+            id: cache.id,
+            name: cache.name,
+            kind: cache.kind,
+            year: cache.year,
+            civilizationId: cache.civilizationId,
+            settlementId: cache.settlementId,
+            unitId: cache.unitId,
+            weaponClass: cache.weaponClass,
+            armorClass: cache.armorClass,
+            quality: cache.quality,
+            quantity: cache.quantity,
+            condition: cache.condition,
+            sourceEventId: cache.sourceEventId,
+            subjectRefs: cache.subjectRefs.map(ref => ({...ref})),
+            description: cache.description,
+            eventIds: exportEventIds(eventIds, "equipment-cache", cache.id, cache.eventIds),
+        })),
+        spyNetworks: simulation.spyNetworks.map(network => ({
+            id: network.id,
+            name: network.name,
+            status: network.status,
+            cover: network.cover,
+            formedYear: network.formedYear,
+            formedEventId: network.formedEventId,
+            exposedYear: network.exposedYear,
+            exposedEventId: network.exposedEventId,
+            civilizationId: network.civilizationId,
+            settlementId: network.settlementId,
+            targetCivilizationId: network.targetCivilizationId,
+            targetSettlementId: network.targetSettlementId,
+            handlerAgentId: network.handlerAgentId,
+            agentIds: [...network.agentIds],
+            operationIds: [...network.operationIds],
+            secrecy: network.secrecy,
+            infiltration: network.infiltration,
+            intelligence: network.intelligence,
+            subjectRefs: network.subjectRefs.map(ref => ({...ref})),
+            description: network.description,
+            eventIds: exportEventIds(eventIds, "spy-network", network.id, network.eventIds),
+        })),
+        spyOperations: simulation.spyOperations.map(operation => ({
+            id: operation.id,
+            name: operation.name,
+            kind: operation.kind,
+            outcome: operation.outcome,
+            year: operation.year,
+            networkId: operation.networkId,
+            civilizationId: operation.civilizationId,
+            targetCivilizationId: operation.targetCivilizationId,
+            targetSettlementId: operation.targetSettlementId,
+            agentIds: [...operation.agentIds],
+            risk: operation.risk,
+            success: operation.success,
+            detected: operation.detected,
+            sourceEventId: operation.sourceEventId,
+            battleId: operation.battleId,
+            conflictId: operation.conflictId,
+            subjectRefs: operation.subjectRefs.map(ref => ({...ref})),
+            description: operation.description,
+            eventIds: exportEventIds(eventIds, "spy-operation", operation.id, operation.eventIds),
         })),
         injuries: simulation.injuries.map(injury => ({
             id: injury.id,
@@ -34764,6 +39793,8 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
         })),
         events: simulation.legendEvents.map(event => ({
             ...event,
+            headline: legendEventHeadline(event),
+            description: legendEventDescription(event),
             entityRefs: eventEntityRefsForExport(simulation, event),
         })),
     };

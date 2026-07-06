@@ -13,6 +13,7 @@ import {
 import {generateWorldMap} from "./node-mapgen.ts";
 import {renderWorldMapPng} from "./cpu-renderer.ts";
 import {
+    defaultCivilizationWorkerCount,
     exportLegends,
     simulateCivilizations,
     summarizeCivilizations,
@@ -33,8 +34,11 @@ type CliOptions = {
     controls: ControlOverrides;
     summary: boolean;
     civilizations: number;
+    civilizationWorkers?: number;
     civilizationYears: number;
     civilizationSeed: number;
+    expansionRate?: number;
+    settlementInterval?: number;
     settlementClaimRadius?: number;
     capitalClaimRadius?: number;
     civilizationJson?: string;
@@ -50,6 +54,10 @@ type CliOptions = {
     progressEvery: number;
     compactEventRefNamesAfter: number;
     compactEventRefsEvery: number;
+    spillEventTextDir?: string;
+    spillEventTextAfter: number;
+    spillEventTextEvery: number;
+    spillEventTextCacheChunks: number;
     compactNewEventRefs: boolean;
     gcAfterCompaction: boolean;
     profileCivilizationPhases: boolean;
@@ -71,8 +79,13 @@ Options:
   --set <phase.name=value>    Override one control value; can be repeated
                               Allowed: ${unlockedControlKeys.join(", ")}
   --civilizations <count>     Add civilization simulation overlay
+  --civ-workers <count>       Civilization worker threads.
+                              Defaults to civilization count; use 1 for debug
   --years <years>             Advance civilization simulation by years
   --civ-seed <seed>           Civilization simulation seed. Defaults to 1
+  --expansion-rate <rate>     Expected town-founding attempts per civ per 100 years
+  --settlement-interval <years>
+                              Years between town-founding opportunities
   --claim-radius <distance>   Settlement territory claim distance
   --capital-claim-radius <distance>
                               Capital territory claim distance
@@ -95,6 +108,18 @@ Options:
   --compact-event-refs-every <years>
                               Run old-event ref compaction every N simulated years.
                               Defaults to ${defaultEventRefCompactionIntervalYears}; use 0 to disable periodic compaction
+  --spill-event-text-dir <dir>
+                              Write old event headline/description text to chunk files and lazy-load it.
+                              Intended for long stress/profile runs, not full Legends exports
+  --spill-event-text-after <years>
+                              Spill old event headline/description text after the retention window.
+                              Off by default; intended for long stress/profile runs, not full Legends exports
+  --spill-event-text-every <years>
+                              Run old-event text spilling every N simulated years.
+                              Defaults to --compact-event-refs-every when spilling is enabled
+  --spill-event-text-cache-chunks <count>
+                              LRU cache size for spilled event text chunks.
+                              Defaults to 128 when spilling is enabled
   --compact-new-event-refs    Compact high-volume event refs as they are created.
                               Faster in some runs, but can raise peak heap; off by default
   --gc-after-compaction       Request a garbage collection after ref compaction checkpoints.
@@ -175,14 +200,20 @@ function parseArgs(argv: string[]): CliOptions {
         controls: {},
         summary: false,
         civilizations: 0,
+        civilizationWorkers: undefined,
         civilizationYears: 0,
         civilizationSeed: 1,
+        expansionRate: undefined,
+        settlementInterval: undefined,
         snapshotEvery: 0,
         snapshotRenderEvery: 25,
         snapshotGifFps: 8,
         progressEvery: 0,
         compactEventRefNamesAfter: defaultEventRefNameRetentionYears,
         compactEventRefsEvery: defaultEventRefCompactionIntervalYears,
+        spillEventTextAfter: 0,
+        spillEventTextEvery: 0,
+        spillEventTextCacheChunks: 0,
         compactNewEventRefs: false,
         gcAfterCompaction: false,
         profileCivilizationPhases: false,
@@ -235,6 +266,19 @@ function parseArgs(argv: string[]): CliOptions {
             const optionName = arg.startsWith("--civilization-seed") ? "--civilization-seed" : "--civ-seed";
             const result = readValue(argv, i, optionName);
             options.civilizationSeed = parsePositiveInteger(result.value, optionName);
+            i = result.nextIndex;
+        } else if (arg === "--civ-workers" || arg === "--civilization-workers" || arg.startsWith("--civ-workers=") || arg.startsWith("--civilization-workers=")) {
+            const optionName = arg.startsWith("--civilization-workers") ? "--civilization-workers" : "--civ-workers";
+            const result = readValue(argv, i, optionName);
+            options.civilizationWorkers = parsePositiveInteger(result.value, optionName);
+            i = result.nextIndex;
+        } else if (arg === "--expansion-rate" || arg.startsWith("--expansion-rate=")) {
+            const result = readValue(argv, i, "--expansion-rate");
+            options.expansionRate = parsePositiveNumber(result.value, "--expansion-rate");
+            i = result.nextIndex;
+        } else if (arg === "--settlement-interval" || arg.startsWith("--settlement-interval=")) {
+            const result = readValue(argv, i, "--settlement-interval");
+            options.settlementInterval = parsePositiveInteger(result.value, "--settlement-interval");
             i = result.nextIndex;
         } else if (arg === "--claim-radius" || arg === "--settlement-claim-radius" || arg.startsWith("--claim-radius=") || arg.startsWith("--settlement-claim-radius=")) {
             const optionName = arg.startsWith("--settlement-claim-radius") ? "--settlement-claim-radius" : "--claim-radius";
@@ -300,6 +344,22 @@ function parseArgs(argv: string[]): CliOptions {
             const result = readValue(argv, i, "--compact-event-refs-every");
             options.compactEventRefsEvery = parseNonNegativeInteger(result.value, "--compact-event-refs-every");
             i = result.nextIndex;
+        } else if (arg === "--spill-event-text-dir" || arg.startsWith("--spill-event-text-dir=")) {
+            const result = readValue(argv, i, "--spill-event-text-dir");
+            options.spillEventTextDir = result.value;
+            i = result.nextIndex;
+        } else if (arg === "--spill-event-text-after" || arg.startsWith("--spill-event-text-after=")) {
+            const result = readValue(argv, i, "--spill-event-text-after");
+            options.spillEventTextAfter = parseNonNegativeInteger(result.value, "--spill-event-text-after");
+            i = result.nextIndex;
+        } else if (arg === "--spill-event-text-every" || arg.startsWith("--spill-event-text-every=")) {
+            const result = readValue(argv, i, "--spill-event-text-every");
+            options.spillEventTextEvery = parseNonNegativeInteger(result.value, "--spill-event-text-every");
+            i = result.nextIndex;
+        } else if (arg === "--spill-event-text-cache-chunks" || arg.startsWith("--spill-event-text-cache-chunks=")) {
+            const result = readValue(argv, i, "--spill-event-text-cache-chunks");
+            options.spillEventTextCacheChunks = parsePositiveInteger(result.value, "--spill-event-text-cache-chunks");
+            i = result.nextIndex;
         } else if (arg === "--compact-new-event-refs") {
             options.compactNewEventRefs = true;
         } else if (arg === "--gc-after-compaction") {
@@ -351,6 +411,18 @@ function parseArgs(argv: string[]): CliOptions {
     }
     if (options.civilizationProfileDir && options.progressEvery === 0) {
         throw new Error("--civ-profile-dir requires --progress-every so checkpoint years are defined");
+    }
+    if (options.spillEventTextDir && options.spillEventTextAfter === 0) {
+        options.spillEventTextAfter = defaultEventRefNameRetentionYears;
+    }
+    if (options.spillEventTextAfter > 0 && !options.spillEventTextDir) {
+        throw new Error("--spill-event-text-after requires --spill-event-text-dir so text can be lazy-loaded later");
+    }
+    if (options.spillEventTextAfter > 0 && options.spillEventTextEvery === 0) {
+        options.spillEventTextEvery = options.compactEventRefsEvery;
+    }
+    if (options.spillEventTextAfter > 0 && options.spillEventTextCacheChunks === 0) {
+        options.spillEventTextCacheChunks = 128;
     }
     if (process.env.npm_config_summary === "true") {
         options.summary = true;
@@ -406,9 +478,15 @@ function civilizationOptions(options: CliOptions, years = options.civilizationYe
         seed: options.civilizationSeed,
         years,
     };
+    if (options.expansionRate !== undefined) result.expansionRate = options.expansionRate;
+    if (options.settlementInterval !== undefined) result.settlementInterval = options.settlementInterval;
     if (options.settlementClaimRadius !== undefined) result.settlementClaimRadius = options.settlementClaimRadius;
     if (options.capitalClaimRadius !== undefined) result.capitalClaimRadius = options.capitalClaimRadius;
     return result;
+}
+
+function resolvedCivilizationWorkerCount(options: CliOptions): number {
+    return options.civilizationWorkers ?? defaultCivilizationWorkerCount(options.civilizations);
 }
 
 function commandExists(command: string): boolean {
@@ -710,6 +788,14 @@ data.beliefAdherenceCount = data.beliefAdherenceCount || data.beliefAdherences.l
 data.mythsAndMagic = data.mythsAndMagic || [];
 data["myths-magic"] = data.mythsAndMagic;
 data.mythsAndMagicCount = data.mythsAndMagicCount || data.mythsAndMagic.length;
+data.gods = data.gods || [];
+data.godCount = data.godCount || data.gods.length;
+data.commandments = data.commandments || [];
+data.commandmentCount = data.commandmentCount || data.commandments.length;
+data.destinies = data.destinies || [];
+data.destinyCount = data.destinyCount || data.destinies.length;
+data.miracles = data.miracles || [];
+data.miracleCount = data.miracleCount || data.miracles.length;
 data.myths = data.myths || [];
 data.mythCount = data.mythCount || data.myths.length;
 data.doctrines = data.doctrines || [];
@@ -743,6 +829,18 @@ data.battleCount = data.battleCount || data.battles.length;
 data.battleParticipations = data.battleParticipations || [];
 data["battle-participations"] = data.battleParticipations;
 data.battleParticipationCount = data.battleParticipationCount || data.battleParticipations.length;
+data.militaryUnits = data.militaryUnits || [];
+data["military-units"] = data.militaryUnits;
+data.militaryUnitCount = data.militaryUnitCount || data.militaryUnits.length;
+data.equipmentCaches = data.equipmentCaches || [];
+data["equipment-caches"] = data.equipmentCaches;
+data.equipmentCacheCount = data.equipmentCacheCount || data.equipmentCaches.length;
+data.spyNetworks = data.spyNetworks || [];
+data["spy-networks"] = data.spyNetworks;
+data.spyNetworkCount = data.spyNetworkCount || data.spyNetworks.length;
+data.spyOperations = data.spyOperations || [];
+data["spy-operations"] = data.spyOperations;
+data.spyOperationCount = data.spyOperationCount || data.spyOperations.length;
 data.injuries = data.injuries || [];
 data.injuryCount = data.injuryCount || data.injuries.length;
 data.illnesses = data.illnesses || [];
@@ -876,6 +974,10 @@ const kinds = [
   ["beliefs", "Beliefs"],
   ["belief-adherences", "Adherences"],
   ["myths-magic", "Myths & Magic"],
+  ["gods", "Gods"],
+  ["commandments", "Commandments"],
+  ["destinies", "Destinies"],
+  ["miracles", "Miracles"],
   ["myths", "Myths"],
   ["doctrines", "Doctrines"],
   ["magic-roles", "Magic Roles"],
@@ -890,6 +992,10 @@ const kinds = [
   ["conflicts", "Conflicts"],
   ["battles", "Battles"],
   ["battle-participations", "Battle Roles"],
+  ["military-units", "Military Units"],
+  ["equipment-caches", "Equipment"],
+  ["spy-networks", "Spy Networks"],
+  ["spy-operations", "Spy Ops"],
   ["injuries", "Injuries"],
   ["illnesses", "Illnesses"],
   ["care-records", "Care"],
@@ -963,6 +1069,10 @@ const dataKeys = {
   beliefs: "beliefs",
   "belief-adherences": "beliefAdherences",
   "myths-magic": "mythsAndMagic",
+  gods: "gods",
+  commandments: "commandments",
+  destinies: "destinies",
+  miracles: "miracles",
   myths: "myths",
   doctrines: "doctrines",
   "magic-roles": "magicRoles",
@@ -977,6 +1087,10 @@ const dataKeys = {
   conflicts: "conflicts",
   battles: "battles",
   "battle-participations": "battleParticipations",
+  "military-units": "militaryUnits",
+  "equipment-caches": "equipmentCaches",
+  "spy-networks": "spyNetworks",
+  "spy-operations": "spyOperations",
   injuries: "injuries",
   illnesses: "illnesses",
   "care-records": "careRecords",
@@ -1043,6 +1157,10 @@ const maps = {
   beliefs: new Map(data.beliefs.map(x => [x.id, x])),
   "belief-adherences": new Map(data.beliefAdherences.map(x => [x.id, x])),
   "myths-magic": new Map(data.mythsAndMagic.map(x => [x.id, x])),
+  gods: new Map(data.gods.map(x => [x.id, x])),
+  commandments: new Map(data.commandments.map(x => [x.id, x])),
+  destinies: new Map(data.destinies.map(x => [x.id, x])),
+  miracles: new Map(data.miracles.map(x => [x.id, x])),
   myths: new Map(data.myths.map(x => [x.id, x])),
   doctrines: new Map(data.doctrines.map(x => [x.id, x])),
   "magic-roles": new Map(data.magicRoles.map(x => [x.id, x])),
@@ -1057,6 +1175,10 @@ const maps = {
   conflicts: new Map(data.conflicts.map(x => [x.id, x])),
   battles: new Map(data.battles.map(x => [x.id, x])),
   "battle-participations": new Map(data.battleParticipations.map(x => [x.id, x])),
+  "military-units": new Map(data.militaryUnits.map(x => [x.id, x])),
+  "equipment-caches": new Map(data.equipmentCaches.map(x => [x.id, x])),
+  "spy-networks": new Map(data.spyNetworks.map(x => [x.id, x])),
+  "spy-operations": new Map(data.spyOperations.map(x => [x.id, x])),
   injuries: new Map(data.injuries.map(x => [x.id, x])),
   illnesses: new Map(data.illnesses.map(x => [x.id, x])),
   "care-records": new Map(data.careRecords.map(x => [x.id, x])),
@@ -1113,10 +1235,36 @@ const indexMaps = Object.fromEntries(kinds.map(([kind]) => [kind, new Map((viewe
 const indexConfig = data.viewerIndexes || {};
 const loadedIndexes = new Set(Object.keys(viewerIndex));
 const chunkConfig = data.viewerChunks || {};
-const loadedChunks = new Set();
+const loadedChunks = new Map();
+const textConfig = data.viewerTexts || {};
+const loadedTextChunks = new Map();
 const mentionConfig = data.viewerMentions || {};
 const loadedMentionChunks = new Map();
-const refKinds = {person: "people", "person-allegiance": "person-allegiances", preference: "preferences", tradition: "traditions", epithet: "epithets", "reputation-milestone": "reputation-milestones", settlement: "settlements", "settlement-control": "settlement-controls", "natural-feature": "natural-features", structure: "structures", household: "households", lineage: "lineages", chapter: "chapters", organization: "organizations", membership: "memberships", "organization-rank": "organization-ranks", belief: "beliefs", "belief-adherence": "belief-adherences", "myths-magic": "myths-magic", myth: "myths", doctrine: "doctrines", "magic-role": "magic-roles", prophecy: "prophecies", "civilization-goal": "civilization-goals", "sacred-site": "sacred-sites", office: "offices", "office-term": "office-terms", law: "laws", case: "cases", testimony: "testimonies", conflict: "conflicts", battle: "battles", "battle-participation": "battle-participations", injury: "injuries", illness: "illnesses", "care-record": "care-records", "wound-legacy": "wound-legacies", memorial: "memorials", burial: "burials", "death-record": "death-records", birth: "births", "age-milestone": "age-milestones", "appearance-feature": "appearance-features", ambition: "ambitions", apprenticeship: "apprenticeships", skill: "skills", residence: "residences", career: "careers", journey: "journeys", road: "roads", relationship: "relationships", "relationship-milestone": "relationship-milestones", union: "unions", artifact: "artifacts", "artifact-condition": "artifact-conditions", chronicle: "chronicles", "written-work": "written-works", memory: "memories", thought: "thoughts", "personality-shift": "personality-shifts", "need-episode": "need-episodes", opinion: "opinions", "social-claim": "social-claims", conversation: "conversations", rumor: "rumors", secret: "secrets", scheme: "schemes", feud: "feuds", oath: "oaths", ceremony: "ceremonies", "ceremony-participation": "ceremony-participations", activity: "activities", teaching: "teachings", project: "projects", "project-participation": "project-participations", obligation: "obligations", holding: "holdings", belonging: "belongings", "possession-attachment": "possession-attachments", estate: "estates", civilization: "civilizations", event: "events"};
+function cacheLimit(value, fallback) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : fallback;
+}
+const recordChunkCacheLimit = cacheLimit(chunkConfig.cacheChunks, 32);
+const textChunkCacheLimit = cacheLimit(textConfig.cacheChunks, 32);
+const mentionChunkCacheLimit = cacheLimit(mentionConfig.cacheChunks, 64);
+function readCache(cache, key) {
+  if (!cache.has(key)) return undefined;
+  const value = cache.get(key);
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+function writeCache(cache, key, value, limit) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > limit) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+  return value;
+}
+const refKinds = {person: "people", "person-allegiance": "person-allegiances", preference: "preferences", tradition: "traditions", epithet: "epithets", "reputation-milestone": "reputation-milestones", settlement: "settlements", "settlement-control": "settlement-controls", "natural-feature": "natural-features", structure: "structures", household: "households", lineage: "lineages", chapter: "chapters", organization: "organizations", membership: "memberships", "organization-rank": "organization-ranks", belief: "beliefs", "belief-adherence": "belief-adherences", "myths-magic": "myths-magic", god: "gods", commandment: "commandments", destiny: "destinies", miracle: "miracles", myth: "myths", doctrine: "doctrines", "magic-role": "magic-roles", prophecy: "prophecies", "civilization-goal": "civilization-goals", "sacred-site": "sacred-sites", office: "offices", "office-term": "office-terms", law: "laws", case: "cases", testimony: "testimonies", conflict: "conflicts", battle: "battles", "battle-participation": "battle-participations", "military-unit": "military-units", "equipment-cache": "equipment-caches", "spy-network": "spy-networks", "spy-operation": "spy-operations", injury: "injuries", illness: "illnesses", "care-record": "care-records", "wound-legacy": "wound-legacies", memorial: "memorials", burial: "burials", "death-record": "death-records", birth: "births", "age-milestone": "age-milestones", "appearance-feature": "appearance-features", ambition: "ambitions", apprenticeship: "apprenticeships", skill: "skills", residence: "residences", career: "careers", journey: "journeys", road: "roads", relationship: "relationships", "relationship-milestone": "relationship-milestones", union: "unions", artifact: "artifacts", "artifact-condition": "artifact-conditions", chronicle: "chronicles", "written-work": "written-works", memory: "memories", thought: "thoughts", "personality-shift": "personality-shifts", "need-episode": "need-episodes", opinion: "opinions", "social-claim": "social-claims", conversation: "conversations", rumor: "rumors", secret: "secrets", scheme: "schemes", feud: "feuds", oath: "oaths", ceremony: "ceremonies", "ceremony-participation": "ceremony-participations", activity: "activities", teaching: "teachings", project: "projects", "project-participation": "project-participations", obligation: "obligations", holding: "holdings", belonging: "belongings", "possession-attachment": "possession-attachments", estate: "estates", civilization: "civilizations", event: "events"};
 function esc(value) {
   return String(value == null ? "" : value).replace(/[&<>"']/g, ch => {
     if (ch === "&") return "&amp;";
@@ -1156,6 +1304,10 @@ function organizationRankName(id) { return maps["organization-ranks"].get(id)?.n
 function beliefName(id) { return maps.beliefs.get(id)?.name || indexLabel("beliefs", id, "Belief"); }
 function beliefAdherenceName(id) { return maps["belief-adherences"].get(id)?.name || indexLabel("belief-adherences", id, "Belief Adherence"); }
 function mythsMagicName(id) { return maps["myths-magic"].get(id)?.name || indexLabel("myths-magic", id, "Myths & Magic"); }
+function godName(id) { return maps.gods.get(id)?.name || indexLabel("gods", id, "God"); }
+function commandmentName(id) { return maps.commandments.get(id)?.name || indexLabel("commandments", id, "Commandment"); }
+function destinyName(id) { return maps.destinies.get(id)?.name || indexLabel("destinies", id, "Destiny"); }
+function miracleName(id) { return maps.miracles.get(id)?.name || indexLabel("miracles", id, "Miracle"); }
 function mythName(id) { return maps.myths.get(id)?.name || indexLabel("myths", id, "Myth"); }
 function doctrineName(id) { return maps.doctrines.get(id)?.name || indexLabel("doctrines", id, "Doctrine"); }
 function magicRoleName(id) { return maps["magic-roles"].get(id)?.name || indexLabel("magic-roles", id, "Magic Role"); }
@@ -1170,6 +1322,10 @@ function testimonyName(id) { return maps.testimonies.get(id)?.name || indexLabel
 function conflictName(id) { return maps.conflicts.get(id)?.name || indexLabel("conflicts", id, "Conflict"); }
 function battleName(id) { return maps.battles.get(id)?.name || indexLabel("battles", id, "Battle"); }
 function battleParticipationName(id) { return maps["battle-participations"].get(id)?.name || indexLabel("battle-participations", id, "Battle Participation"); }
+function militaryUnitName(id) { return maps["military-units"].get(id)?.name || indexLabel("military-units", id, "Military Unit"); }
+function equipmentCacheName(id) { return maps["equipment-caches"].get(id)?.name || indexLabel("equipment-caches", id, "Equipment Cache"); }
+function spyNetworkName(id) { return maps["spy-networks"].get(id)?.name || indexLabel("spy-networks", id, "Spy Network"); }
+function spyOperationName(id) { return maps["spy-operations"].get(id)?.name || indexLabel("spy-operations", id, "Spy Operation"); }
 function injuryName(id) { return maps.injuries.get(id)?.name || indexLabel("injuries", id, "Injury"); }
 function illnessName(id) { return maps.illnesses.get(id)?.name || indexLabel("illnesses", id, "Illness"); }
 function careRecordName(id) { return maps["care-records"].get(id)?.name || indexLabel("care-records", id, "Care Record"); }
@@ -1335,6 +1491,10 @@ function organizationRankLink(id) { return link("organization-ranks", id, organi
 function beliefLink(id) { return link("beliefs", id, beliefName(id)); }
 function beliefAdherenceLink(id) { return link("belief-adherences", id, beliefAdherenceName(id)); }
 function mythsMagicLink(id) { return link("myths-magic", id, mythsMagicName(id)); }
+function godLink(id) { return link("gods", id, godName(id)); }
+function commandmentLink(id) { return link("commandments", id, commandmentName(id)); }
+function destinyLink(id) { return link("destinies", id, destinyName(id)); }
+function miracleLink(id) { return link("miracles", id, miracleName(id)); }
 function mythLink(id) { return link("myths", id, mythName(id)); }
 function doctrineLink(id) { return link("doctrines", id, doctrineName(id)); }
 function magicRoleLink(id) { return link("magic-roles", id, magicRoleName(id)); }
@@ -1349,6 +1509,10 @@ function testimonyLink(id) { return link("testimonies", id, testimonyName(id)); 
 function conflictLink(id) { return link("conflicts", id, conflictName(id)); }
 function battleLink(id) { return link("battles", id, battleName(id)); }
 function battleParticipationLink(id) { return link("battle-participations", id, battleParticipationName(id)); }
+function militaryUnitLink(id) { return link("military-units", id, militaryUnitName(id)); }
+function equipmentCacheLink(id) { return link("equipment-caches", id, equipmentCacheName(id)); }
+function spyNetworkLink(id) { return link("spy-networks", id, spyNetworkName(id)); }
+function spyOperationLink(id) { return link("spy-operations", id, spyOperationName(id)); }
 function injuryLink(id) { return link("injuries", id, injuryName(id)); }
 function illnessLink(id) { return link("illnesses", id, illnessName(id)); }
 function careRecordLink(id) { return link("care-records", id, careRecordName(id)); }
@@ -1425,6 +1589,10 @@ function renderSummary() {
     metric("beliefs", data.beliefCount) +
     metric("adherences", data.beliefAdherenceCount) +
     metric("myths & magic", data.mythsAndMagicCount) +
+    metric("gods", data.godCount) +
+    metric("commandments", data.commandmentCount) +
+    metric("destinies", data.destinyCount) +
+    metric("miracles", data.miracleCount) +
     metric("myths", data.mythCount) +
     metric("doctrines", data.doctrineCount) +
     metric("magic roles", data.magicRoleCount) +
@@ -1439,6 +1607,10 @@ function renderSummary() {
     metric("conflicts", data.conflictCount) +
     metric("battles", data.battleCount) +
     metric("battle roles", data.battleParticipationCount) +
+    metric("military units", data.militaryUnitCount) +
+    metric("equipment", data.equipmentCacheCount) +
+    metric("spy networks", data.spyNetworkCount) +
+    metric("spy ops", data.spyOperationCount) +
     metric("injuries", data.injuryCount) +
     metric("illnesses", data.illnessCount) +
     metric("care records", data.careRecordCount) +
@@ -1513,6 +1685,10 @@ function labelFor(kind, item) {
   if (kind === "beliefs") return item.name;
   if (kind === "belief-adherences") return item.name;
   if (kind === "myths-magic") return item.name;
+  if (kind === "gods") return item.name;
+  if (kind === "commandments") return item.name;
+  if (kind === "destinies") return item.name;
+  if (kind === "miracles") return item.name;
   if (kind === "myths") return item.name;
   if (kind === "doctrines") return item.name;
   if (kind === "magic-roles") return item.name;
@@ -1527,6 +1703,10 @@ function labelFor(kind, item) {
   if (kind === "conflicts") return item.name;
   if (kind === "battles") return item.name;
   if (kind === "battle-participations") return item.name;
+  if (kind === "military-units") return item.name;
+  if (kind === "equipment-caches") return item.name;
+  if (kind === "spy-networks") return item.name;
+  if (kind === "spy-operations") return item.name;
   if (kind === "injuries") return item.name;
   if (kind === "illnesses") return item.name;
   if (kind === "care-records") return item.name;
@@ -1624,7 +1804,11 @@ function sublabelFor(kind, item) {
   if (kind === "organization-ranks") return personName(item.agentId) + " in " + organizationName(item.organizationId) + ", " + item.kind + ", " + item.duty + ", prestige " + item.prestige + ", " + years(item.startedYear) + (item.endedYear == null ? "" : " to " + years(item.endedYear));
   if (kind === "beliefs") return item.domain + " belief of " + civName(item.civilizationId) + ", adherents " + item.adherentIds.length;
   if (kind === "belief-adherences") return personName(item.agentId) + " to " + beliefName(item.beliefId) + ", " + item.status + ", " + years(item.startedYear) + (item.endedYear == null ? "" : " to " + years(item.endedYear));
-  if (kind === "myths-magic") return civName(item.civilizationId) + ", beliefs " + (item.beliefIds || []).length + ", roles " + (item.magicRoleIds || []).length + ", open prophecies " + (item.openProphecyIds || []).length + ", active goals " + (item.activeCivilizationGoalIds || []).length;
+  if (kind === "myths-magic") return civName(item.civilizationId) + ", beliefs " + (item.beliefIds || []).length + ", gods " + (item.godIds || []).length + ", destinies " + (item.activeDestinyIds || []).length + ", roles " + (item.magicRoleIds || []).length + ", open prophecies " + (item.openProphecyIds || []).length + ", active goals " + (item.activeCivilizationGoalIds || []).length;
+  if (kind === "gods") return item.kind + " of " + beliefName(item.beliefId) + ", controls " + (item.controlSpheres || []).join(", ") + (item.miracleBias ? ", miracle " + item.miracleBias : "") + (item.commandmentStyle ? ", commandments " + item.commandmentStyle : "");
+  if (kind === "commandments") return item.kind + " of " + beliefName(item.beliefId) + (item.godId == null ? "" : ", " + godName(item.godId)) + ", severity " + item.severity;
+  if (kind === "destinies") return item.kind + " destiny, " + item.status + ", pressure " + item.pressure + ", " + years(item.year) + (item.resolvedYear == null ? "" : " to " + years(item.resolvedYear));
+  if (kind === "miracles") return item.kind + " miracle of " + beliefName(item.beliefId) + ", strength " + item.strength + ", " + years(item.year);
   if (kind === "myths") return item.kind + " myth of " + beliefName(item.beliefId) + ", " + years(item.year);
   if (kind === "doctrines") return item.kind + " doctrine of " + beliefName(item.beliefId) + ", virtue " + item.virtue + ", " + years(item.foundedYear);
   if (kind === "magic-roles") return item.kind + " held by " + personName(item.agentId) + ", " + item.status + ", " + years(item.startedYear) + (item.endedYear == null ? "" : " to " + years(item.endedYear));
@@ -1637,8 +1821,12 @@ function sublabelFor(kind, item) {
   if (kind === "cases") return item.kind + " opened " + years(item.openedYear) + ", verdict " + item.verdict;
   if (kind === "testimonies") return item.kind + " testimony by " + personName(item.witnessAgentId) + " " + item.stance + " in " + caseName(item.caseId) + ", credibility " + item.credibility;
   if (kind === "conflicts") return item.kind + ", " + item.status + ", " + civName(item.attackerCivilizationId) + " and " + civName(item.defenderCivilizationId) + ", battles " + (item.battleIds || []).length + ", casualties " + (item.casualtyAgentIds || []).length;
-  if (kind === "battles") return item.kind + " fought " + years(item.year) + ", casualties " + item.casualtyAgentIds.length;
+  if (kind === "battles") return item.kind + " fought " + years(item.year) + " at " + (item.battlefieldName || settlementName(item.settlementId)) + ", casualties " + item.casualtyAgentIds.length;
   if (kind === "battle-participations") return personName(item.agentId) + " served as " + item.side + " " + item.role + " in " + battleName(item.battleId) + ", " + item.outcome;
+  if (kind === "military-units") return item.kind + ", " + item.status + ", strength " + item.strength + ", " + settlementName(item.settlementId);
+  if (kind === "equipment-caches") return item.kind + ", " + item.condition + ", quantity " + item.quantity + ", " + settlementName(item.settlementId);
+  if (kind === "spy-networks") return item.status + " " + item.cover + " cover, " + settlementName(item.settlementId) + " to " + (item.targetSettlementId == null ? "no target" : settlementName(item.targetSettlementId));
+  if (kind === "spy-operations") return item.kind + ", " + item.outcome + ", " + years(item.year) + ", target " + settlementName(item.targetSettlementId);
   if (kind === "injuries") return item.severity + " " + item.kind + " of " + personName(item.personId) + ", " + item.status;
   if (kind === "illnesses") return item.severity + " " + item.kind + " of " + personName(item.personId) + ", " + item.status + ", " + years(item.onsetYear) + (item.resolvedYear == null ? "" : " to " + years(item.resolvedYear));
   if (kind === "care-records") return item.kind + " for " + personName(item.patientAgentId) + ", " + item.outcome + ", " + years(item.year) + (item.healerAgentId == null ? "" : ", healer " + personName(item.healerAgentId));
@@ -1683,7 +1871,7 @@ function sublabelFor(kind, item) {
   if (kind === "belongings") return item.material + " " + item.kind + ", " + item.status + ", owner " + (item.ownerAgentId == null ? "none" : personName(item.ownerAgentId)) + ", sentiment " + item.sentiment;
   if (kind === "possession-attachments") return item.kind + " of " + personName(item.agentId) + " toward " + (item.artifactId == null ? belongingName(item.belongingId) : artifactName(item.artifactId)) + ", intensity " + item.intensity + ", " + years(item.year);
   if (kind === "estates") return "estate of " + personName(item.decedentAgentId) + ", heirs " + (item.heirAgentIds || []).length + ", assets " + ((item.artifactIds || []).length + (item.holdingIds || []).length + (item.belongingIds || []).length) + ", " + years(item.year);
-  if (kind === "civilizations") return "population " + item.population + ", events " + item.eventIds.length;
+  if (kind === "civilizations") return (item.status ? item.status + ", " : "") + "population " + item.population + (item.originKind ? ", " + item.originKind : "") + (item.creationDomain ? ", creation " + item.creationDomain : "") + ", events " + item.eventIds.length;
   return years(item.year) + " - " + item.type;
 }
 function itemEvents(item) {
@@ -3298,13 +3486,18 @@ function civilizationWikiSection(kind, item) {
   const structures = data.structures.filter(structure => structure.civilizationId === item.id);
   const organizations = data.organizations.filter(organization => organization.civilizationId === item.id);
   const overview = [
+    item.status ? '<span class="ref">' + esc(item.status) + '</span>' : "",
+    item.originKind ? '<span class="ref">' + esc(item.originKind) + '</span>' : "",
     '<span class="ref">' + esc("population " + item.population) + '</span>',
     "capital " + settlementLink(item.capitalSettlementId),
+    item.creationDomain ? '<span class="ref">' + esc("creation " + item.creationDomain) + '</span>' : "",
+    item.creationGodId == null ? "" : "creator " + godLink(item.creationGodId),
+    item.creationSeatScore == null ? "" : '<span class="ref">' + esc("seat score " + item.creationSeatScore) + '</span>',
     '<span class="ref">' + esc("settlements " + settlements.length) + '</span>',
     '<span class="ref">' + esc("roads " + data.roads.filter(road => road.civilizationId === item.id).length) + '</span>',
     '<span class="ref">' + esc("organizations " + organizations.length) + '</span>',
     '<span class="ref">' + esc("traditions " + (item.traditionIds || []).length) + '</span>'
-  ];
+  ].filter(Boolean);
   const politics = [
     ...settlementControlsAbout("civilization", item.id, 6),
     ...data.offices.filter(office => office.civilizationId === item.id).slice(0, 6).map(office => officeLink(office.id)),
@@ -3321,11 +3514,12 @@ function civilizationWikiSection(kind, item) {
     ...data.roads.filter(road => road.civilizationId === item.id).slice(0, 8).map(road => roadLink(road.id))
   ];
   const culture = [
+    item.creationGodId == null ? "" : godLink(item.creationGodId),
     ...(item.traditionIds || []).slice(0, 8).map(traditionLink),
     ...data.beliefs.filter(belief => belief.civilizationId === item.id).slice(0, 6).map(belief => beliefLink(belief.id)),
     ...data.sacredSites.filter(site => site.civilizationId === item.id).slice(0, 6).map(site => sacredSiteLink(site.id)),
     ...organizations.slice(0, 8).map(organization => organizationLink(organization.id))
-  ];
+  ].filter(Boolean);
   const records = [
     ...data.chronicles.filter(chronicle => chronicle.civilizationId === item.id || (chronicle.subjectRefs || []).some(ref => ref.kind === "civilization" && ref.id === item.id)).slice(0, 8).map(chronicle => chronicleLink(chronicle.id)),
     ...writtenWorksAbout("civilization", item.id, 8),
@@ -3334,6 +3528,15 @@ function civilizationWikiSection(kind, item) {
   ];
   const inner = [
     relationGroup("Overview", overview),
+    relationGroup("Lifecycle", [
+      item.parentCivilizationId == null ? "" : "parent " + civLink(item.parentCivilizationId),
+      item.restoredCivilizationId == null ? "" : "restored " + civLink(item.restoredCivilizationId),
+      item.foundedYear == null ? "" : '<span class="ref">' + esc("founded " + years(item.foundedYear)) + '</span>',
+      item.fallenYear == null ? "" : '<span class="ref">' + esc("fallen " + years(item.fallenYear)) + '</span>',
+      item.collapsePressure == null ? "" : '<span class="ref">' + esc("collapse pressure " + item.collapsePressure) + '</span>',
+      item.collapseStage == null ? "" : '<span class="ref">' + esc("collapse stage " + item.collapseStage) + '</span>',
+      ...((item.collapseFailureKinds || []).slice(0, 8).map(kind => '<span class="ref">' + esc(kind) + '</span>'))
+    ].filter(Boolean)),
     relationGroup("Notable People", notablePeopleLinks(people, 12)),
     relationGroup("Places and Roads", places),
     relationGroup("Politics and War", politics),
@@ -3544,7 +3747,7 @@ function naturalFeatureWikiSection(kind, item) {
 }
 
 function mythicWikiSection(kind, item) {
-  if (!["myths-magic", "beliefs", "myths", "doctrines", "magic-roles", "prophecies", "civilization-goals", "sacred-sites"].includes(kind)) return "";
+  if (!["myths-magic", "beliefs", "gods", "commandments", "destinies", "miracles", "myths", "doctrines", "magic-roles", "prophecies", "civilization-goals", "sacred-sites"].includes(kind)) return "";
   let groups = [];
 
   if (kind === "myths-magic") {
@@ -3553,6 +3756,10 @@ function mythicWikiSection(kind, item) {
         civLink(item.civilizationId),
         "capital " + settlementLink(item.capitalSettlementId),
         factPill("belief roots " + (item.beliefIds || []).length),
+        factPill("gods " + (item.godIds || []).length),
+        factPill("commandments " + (item.commandmentIds || []).length),
+        factPill("active destinies " + (item.activeDestinyIds || []).length),
+        factPill("miracles " + (item.miracleIds || []).length),
         factPill("myths " + (item.mythIds || []).length),
         factPill("magic roles " + (item.magicRoleIds || []).length),
         factPill("open prophecies " + (item.openProphecyIds || []).length),
@@ -3563,6 +3770,12 @@ function mythicWikiSection(kind, item) {
         ...(item.beliefIds || []).slice(0, 12).map(beliefLink),
         ...(item.mythIds || []).slice(0, 12).map(mythLink),
         ...(item.doctrineIds || []).slice(0, 12).map(doctrineLink)
+      ]),
+      relationGroup("Gods and Divine Controls", [
+        ...(item.godIds || []).slice(0, 12).map(godLink),
+        ...(item.commandmentIds || []).slice(0, 12).map(commandmentLink),
+        ...(item.activeDestinyIds || []).slice(0, 12).map(destinyLink),
+        ...(item.miracleIds || []).slice(-12).map(miracleLink)
       ]),
       relationGroup("Magic Roles and Holders", [
         ...(item.magicRoleIds || []).slice(0, 12).map(magicRoleLink),
@@ -3592,10 +3805,15 @@ function mythicWikiSection(kind, item) {
         civLink(item.civilizationId),
         "origin " + settlementLink(item.originSettlementId),
         item.founderAgentId == null ? "" : "founder " + personLink(item.founderAgentId),
+        item.patronGodId == null ? "" : "patron " + godLink(item.patronGodId),
         factPill("founded " + years(item.foundedYear)),
         factPill("adherents " + (item.adherentIds || []).length)
       ].filter(Boolean)),
       relationGroup("Myths, Magic, and Goals", [
+        ...(item.godIds || []).slice(0, 8).map(godLink),
+        ...(item.commandmentIds || []).slice(0, 8).map(commandmentLink),
+        ...(item.destinyIds || []).slice(0, 8).map(destinyLink),
+        ...(item.miracleIds || []).slice(-8).map(miracleLink),
         ...(item.mythIds || []).slice(0, 8).map(mythLink),
         ...(item.doctrineIds || []).slice(0, 8).map(doctrineLink),
         ...(item.magicRoleIds || []).slice(0, 8).map(magicRoleLink),
@@ -3615,12 +3833,137 @@ function mythicWikiSection(kind, item) {
       relationGroup("Social Echoes", mythicEchoLinksFor("belief", item.id, 6)),
       relationGroup("Recent Events", recentEventLinksFor(item, 10))
     ];
+  } else if (kind === "gods") {
+    groups = [
+      relationGroup("Overview", [
+        factPill(item.kind),
+        factPill(item.temperament),
+        factPill(item.domain),
+        factPill("influence " + item.influence),
+        factPill("favor " + item.favor),
+        beliefLink(item.beliefId),
+        civLink(item.civilizationId),
+        "origin " + settlementLink(item.originSettlementId),
+        factPill("named " + years(item.foundedYear))
+      ]),
+      relationGroup("Controls", [
+        ...(item.controlSpheres || []).map(factPill),
+        item.symbol ? factPill("symbol: " + item.symbol) : "",
+        item.demand ? factPill("demand: " + item.demand) : "",
+        item.omen ? factPill("omen: " + item.omen) : "",
+        item.miracleBias ? factPill("miracle bias: " + item.miracleBias) : "",
+        item.commandmentStyle ? factPill("commandments: " + item.commandmentStyle) : ""
+      ].filter(Boolean)),
+      relationGroup("Divine Control Notes", [
+        item.creationClaim ? factPill("creation: " + item.creationClaim) : "",
+        item.religiousMandate ? factPill("religion: " + item.religiousMandate) : "",
+        item.prophecyMethod ? factPill("prophecy: " + item.prophecyMethod) : "",
+        item.destinyPressure ? factPill("destiny: " + item.destinyPressure) : ""
+      ].filter(Boolean)),
+      relationGroup("Founding Seat", [
+        item.originSettlementId == null ? "" : settlementLink(item.originSettlementId),
+        ...mythsAbout("god", item.id, 8)
+      ]),
+      relationGroup("Religion and Law", [
+        ...(item.commandmentIds || []).slice(0, 12).map(commandmentLink),
+        ...(item.mythIds || []).slice(0, 12).map(mythLink),
+        ...(item.doctrineIds || []).slice(0, 12).map(doctrineLink),
+        ...(item.magicRoleIds || []).slice(0, 12).map(magicRoleLink)
+      ]),
+      relationGroup("Destiny, Prophecy, and Miracles", [
+        ...(item.destinyIds || []).slice(0, 12).map(destinyLink),
+        ...(item.prophecyIds || []).slice(0, 12).map(prophecyLink),
+        ...(item.miracleIds || []).slice(-12).map(miracleLink),
+        ...(item.civilizationGoalIds || []).slice(0, 12).map(civilizationGoalLink),
+        ...(item.sacredSiteIds || []).slice(0, 12).map(sacredSiteLink)
+      ]),
+      relationGroup("Subjects", (item.subjectRefs || []).slice(0, 18).map(refLink)),
+      relationGroup("Records", recordLinksFor("god", item.id, 8)),
+      relationGroup("Social Echoes", mythicEchoLinksFor("god", item.id, 8)),
+      relationGroup("Recent Events", recentEventLinksFor(item, 12))
+    ];
+  } else if (kind === "commandments") {
+    groups = [
+      relationGroup("Overview", [
+        factPill(item.kind + " commandment"),
+        factPill(item.domain),
+        factPill("severity " + item.severity),
+        beliefLink(item.beliefId),
+        item.godId == null ? "" : godLink(item.godId),
+        item.doctrineId == null ? "" : doctrineLink(item.doctrineId),
+        civLink(item.civilizationId),
+        settlementLink(item.settlementId),
+        factPill("given " + years(item.givenYear))
+      ].filter(Boolean)),
+      relationGroup("Teaching", [
+        factPill("demand: " + item.demand),
+        factPill("virtue: " + item.virtue),
+        factPill("taboo: " + item.taboo)
+      ]),
+      relationGroup("Kingdom Goals", (item.civilizationGoalIds || []).slice(0, 12).map(civilizationGoalLink)),
+      relationGroup("Subjects", (item.subjectRefs || []).slice(0, 18).map(refLink)),
+      relationGroup("Records", recordLinksFor("commandment", item.id, 8)),
+      relationGroup("Social Echoes", mythicEchoLinksFor("commandment", item.id, 8)),
+      relationGroup("Recent Events", recentEventLinksFor(item, 12))
+    ];
+  } else if (kind === "destinies") {
+    groups = [
+      relationGroup("Overview", [
+        factPill(item.kind + " destiny"),
+        factPill(item.status),
+        factPill("pressure " + item.pressure),
+        item.beliefId == null ? "" : beliefLink(item.beliefId),
+        item.godId == null ? "" : godLink(item.godId),
+        item.prophecyId == null ? "" : prophecyLink(item.prophecyId),
+        item.civilizationGoalId == null ? "" : civilizationGoalLink(item.civilizationGoalId),
+        civLink(item.civilizationId),
+        settlementLink(item.settlementId),
+        factPill(years(item.year) + (item.resolvedYear == null ? "" : " to " + years(item.resolvedYear)))
+      ].filter(Boolean)),
+      relationGroup("Targets", [
+        item.targetAgentId == null ? "" : personLink(item.targetAgentId),
+        item.targetSettlementId == null ? "" : settlementLink(item.targetSettlementId),
+        item.targetArtifactId == null ? "" : artifactLink(item.targetArtifactId)
+      ].filter(Boolean)),
+      relationGroup("Events", [
+        item.sourceEventId == null ? "" : eventLink(item.sourceEventId),
+        item.resolvedEventId == null ? "" : eventLink(item.resolvedEventId)
+      ].filter(Boolean)),
+      relationGroup("Subjects", (item.subjectRefs || []).slice(0, 18).map(refLink)),
+      relationGroup("Records", recordLinksFor("destiny", item.id, 8)),
+      relationGroup("Social Echoes", mythicEchoLinksFor("destiny", item.id, 8)),
+      relationGroup("Recent Events", recentEventLinksFor(item, 12))
+    ];
+  } else if (kind === "miracles") {
+    groups = [
+      relationGroup("Overview", [
+        factPill(item.kind + " miracle"),
+        factPill("strength " + item.strength),
+        item.beliefId == null ? "" : beliefLink(item.beliefId),
+        item.godId == null ? "" : godLink(item.godId),
+        item.prophecyId == null ? "" : prophecyLink(item.prophecyId),
+        item.civilizationGoalId == null ? "" : civilizationGoalLink(item.civilizationGoalId),
+        item.sacredSiteId == null ? "" : sacredSiteLink(item.sacredSiteId),
+        civLink(item.civilizationId),
+        settlementLink(item.settlementId),
+        factPill(years(item.year))
+      ].filter(Boolean)),
+      relationGroup("Effect", [
+        factPill(item.effect),
+        item.targetAgentId == null ? "" : "target " + personLink(item.targetAgentId)
+      ].filter(Boolean)),
+      relationGroup("Subjects", (item.subjectRefs || []).slice(0, 18).map(refLink)),
+      relationGroup("Records", recordLinksFor("miracle", item.id, 8)),
+      relationGroup("Social Echoes", mythicEchoLinksFor("miracle", item.id, 8)),
+      relationGroup("Recent Events", recentEventLinksFor(item, 12))
+    ];
   } else if (kind === "myths") {
     groups = [
       relationGroup("Overview", [
         factPill(item.kind + " myth"),
         factPill(item.domain),
         beliefLink(item.beliefId),
+        item.godId == null ? "" : godLink(item.godId),
         civLink(item.civilizationId),
         "origin " + settlementLink(item.originSettlementId),
         item.centralAgentId == null ? "" : "central figure " + personLink(item.centralAgentId),
@@ -3645,6 +3988,8 @@ function mythicWikiSection(kind, item) {
         factPill(item.domain),
         beliefLink(item.beliefId),
         item.mythId == null ? "" : mythLink(item.mythId),
+        item.godId == null ? "" : godLink(item.godId),
+        item.commandmentId == null ? "" : commandmentLink(item.commandmentId),
         civLink(item.civilizationId),
         "origin " + settlementLink(item.originSettlementId),
         factPill("founded " + years(item.foundedYear))
@@ -3674,6 +4019,7 @@ function mythicWikiSection(kind, item) {
         civLink(item.civilizationId),
         settlementLink(item.settlementId),
         item.beliefId == null ? "" : beliefLink(item.beliefId),
+        item.godId == null ? "" : godLink(item.godId),
         item.organizationId == null ? "" : organizationLink(item.organizationId),
         item.mythId == null ? "" : mythLink(item.mythId),
         factPill(years(item.startedYear) + (item.endedYear == null ? "" : " to " + years(item.endedYear)))
@@ -3698,6 +4044,8 @@ function mythicWikiSection(kind, item) {
         civLink(item.civilizationId),
         settlementLink(item.settlementId),
         item.beliefId == null ? "" : beliefLink(item.beliefId),
+        item.godId == null ? "" : godLink(item.godId),
+        item.destinyId == null ? "" : destinyLink(item.destinyId),
         item.mythId == null ? "" : mythLink(item.mythId),
         item.magicRoleId == null ? "" : magicRoleLink(item.magicRoleId),
         factPill(years(item.year) + (item.resolvedYear == null ? "" : " to " + years(item.resolvedYear)))
@@ -3711,8 +4059,10 @@ function mythicWikiSection(kind, item) {
       ].filter(Boolean)),
       relationGroup("Kingdom Links", [
         ...(item.civilizationGoalIds || []).slice(0, 12).map(civilizationGoalLink),
+        item.destinyId == null ? "" : destinyLink(item.destinyId),
+        ...miraclesAbout("prophecy", item.id, 8),
         ...sacredSitesAbout("prophecy", item.id, 8)
-      ]),
+      ].filter(Boolean)),
       relationGroup("Events", [
         item.sourceEventId == null ? "" : eventLink(item.sourceEventId),
         item.resolvedEventId == null ? "" : eventLink(item.resolvedEventId)
@@ -3731,6 +4081,9 @@ function mythicWikiSection(kind, item) {
         civLink(item.civilizationId),
         item.settlementId == null ? "" : settlementLink(item.settlementId),
         item.beliefId == null ? "" : beliefLink(item.beliefId),
+        item.godId == null ? "" : godLink(item.godId),
+        item.commandmentId == null ? "" : commandmentLink(item.commandmentId),
+        item.destinyId == null ? "" : destinyLink(item.destinyId),
         item.mythId == null ? "" : mythLink(item.mythId),
         item.doctrineId == null ? "" : doctrineLink(item.doctrineId),
         item.magicRoleId == null ? "" : magicRoleLink(item.magicRoleId),
@@ -3744,6 +4097,7 @@ function mythicWikiSection(kind, item) {
       ].filter(Boolean)),
       relationGroup("Action and Ritual", [
         ...data.ambitions.filter(ambition => ambition.civilizationGoalId === item.id).slice(0, 10).map(ambitionLink),
+        ...miraclesAbout("civilization-goal", item.id, 8),
         ...sacredSitesAbout("civilization-goal", item.id, 8),
         ...projectsAbout("civilization-goal", item.id, 8),
         ...ceremoniesAbout("civilization-goal", item.id, 8),
@@ -3767,6 +4121,7 @@ function mythicWikiSection(kind, item) {
         settlementLink(item.settlementId),
         item.founderAgentId == null ? "" : "founder " + personLink(item.founderAgentId),
         item.beliefId == null ? "" : beliefLink(item.beliefId),
+        item.godId == null ? "" : godLink(item.godId),
         item.mythId == null ? "" : mythLink(item.mythId),
         item.doctrineId == null ? "" : doctrineLink(item.doctrineId),
         item.magicRoleId == null ? "" : magicRoleLink(item.magicRoleId),
@@ -3777,6 +4132,7 @@ function mythicWikiSection(kind, item) {
       relationGroup("Pilgrimage and Relics", [
         ...journeysAbout("sacred-site", item.id, 10),
         ...artifactsAbout("sacred-site", item.id, 10),
+        ...miraclesAbout("sacred-site", item.id, 10),
         ...ceremoniesAbout("sacred-site", item.id, 8),
         ...projectsAbout("sacred-site", item.id, 8)
       ]),
@@ -5924,6 +6280,7 @@ function linkedMeta(kind, item) {
     esc(item.domain),
     civLink(item.civilizationId),
     settlementLink(item.originSettlementId),
+    item.patronGodId == null ? "" : "patron " + godLink(item.patronGodId),
     item.founderAgentId == null ? "" : "founder " + personLink(item.founderAgentId),
     (item.structureIds || []).length ? structureLink(item.structureIds[0]) : "",
     esc("founded " + years(item.foundedYear)),
@@ -5947,6 +6304,10 @@ function linkedMeta(kind, item) {
     civLink(item.civilizationId),
     settlementLink(item.capitalSettlementId),
     esc("beliefs " + (item.beliefIds || []).length),
+    esc("gods " + (item.godIds || []).length),
+    esc("commandments " + (item.commandmentIds || []).length),
+    esc("active destinies " + (item.activeDestinyIds || []).length),
+    esc("miracles " + (item.miracleIds || []).length),
     esc("myths " + (item.mythIds || []).length),
     esc("doctrines " + (item.doctrineIds || []).length),
     esc("magic roles " + (item.magicRoleIds || []).length),
@@ -5954,10 +6315,69 @@ function linkedMeta(kind, item) {
     esc("active goals " + (item.activeCivilizationGoalIds || []).length),
     esc("sacred sites " + (item.sacredSiteIds || []).length)
   ].filter(Boolean);
+  if (kind === "gods") return [
+    esc(item.kind),
+    esc(item.temperament),
+    esc(item.domain),
+    beliefLink(item.beliefId),
+    civLink(item.civilizationId),
+    settlementLink(item.originSettlementId),
+    esc("controls " + (item.controlSpheres || []).join(", ")),
+    esc("symbol " + item.symbol),
+    item.miracleBias ? esc("miracle bias " + item.miracleBias) : "",
+    item.commandmentStyle ? esc("commandments " + item.commandmentStyle) : "",
+    item.creationClaim ? esc("creation " + item.creationClaim) : "",
+    item.prophecyMethod ? esc("prophecy " + item.prophecyMethod) : "",
+    esc("influence " + item.influence),
+    esc("favor " + item.favor),
+    esc("named " + years(item.foundedYear))
+  ].filter(Boolean);
+  if (kind === "commandments") return [
+    esc(item.kind),
+    esc(item.domain),
+    beliefLink(item.beliefId),
+    item.godId == null ? "" : godLink(item.godId),
+    item.doctrineId == null ? "" : doctrineLink(item.doctrineId),
+    civLink(item.civilizationId),
+    settlementLink(item.settlementId),
+    esc("severity " + item.severity),
+    esc("given " + years(item.givenYear))
+  ].filter(Boolean);
+  if (kind === "destinies") return [
+    esc(item.kind),
+    esc(item.status),
+    item.beliefId == null ? "" : beliefLink(item.beliefId),
+    item.godId == null ? "" : godLink(item.godId),
+    item.prophecyId == null ? "" : prophecyLink(item.prophecyId),
+    item.civilizationGoalId == null ? "" : civilizationGoalLink(item.civilizationGoalId),
+    civLink(item.civilizationId),
+    settlementLink(item.settlementId),
+    item.targetAgentId == null ? "" : "target " + personLink(item.targetAgentId),
+    item.targetSettlementId == null ? "" : "target " + settlementLink(item.targetSettlementId),
+    item.targetArtifactId == null ? "" : "target " + artifactLink(item.targetArtifactId),
+    esc("pressure " + item.pressure),
+    esc("declared " + years(item.year)),
+    item.resolvedYear == null ? "" : esc("resolved " + years(item.resolvedYear))
+  ].filter(Boolean);
+  if (kind === "miracles") return [
+    esc(item.kind),
+    item.beliefId == null ? "" : beliefLink(item.beliefId),
+    item.godId == null ? "" : godLink(item.godId),
+    item.prophecyId == null ? "" : prophecyLink(item.prophecyId),
+    item.civilizationGoalId == null ? "" : civilizationGoalLink(item.civilizationGoalId),
+    item.sacredSiteId == null ? "" : sacredSiteLink(item.sacredSiteId),
+    civLink(item.civilizationId),
+    settlementLink(item.settlementId),
+    item.targetAgentId == null ? "" : "target " + personLink(item.targetAgentId),
+    esc("strength " + item.strength),
+    esc(item.effect),
+    esc("witnessed " + years(item.year))
+  ].filter(Boolean);
   if (kind === "myths") return [
     esc(item.kind),
     esc(item.domain),
     beliefLink(item.beliefId),
+    item.godId == null ? "" : godLink(item.godId),
     civLink(item.civilizationId),
     settlementLink(item.originSettlementId),
     item.centralAgentId == null ? "" : "central figure " + personLink(item.centralAgentId),
@@ -5968,6 +6388,8 @@ function linkedMeta(kind, item) {
     esc(item.domain),
     beliefLink(item.beliefId),
     item.mythId == null ? "" : mythLink(item.mythId),
+    item.godId == null ? "" : godLink(item.godId),
+    item.commandmentId == null ? "" : commandmentLink(item.commandmentId),
     civLink(item.civilizationId),
     settlementLink(item.originSettlementId),
     esc("virtue " + item.virtue),
@@ -5982,6 +6404,7 @@ function linkedMeta(kind, item) {
     civLink(item.civilizationId),
     settlementLink(item.settlementId),
     item.beliefId == null ? "" : beliefLink(item.beliefId),
+    item.godId == null ? "" : godLink(item.godId),
     item.organizationId == null ? "" : organizationLink(item.organizationId),
     item.mythId == null ? "" : mythLink(item.mythId),
     esc("started " + years(item.startedYear)),
@@ -5995,6 +6418,8 @@ function linkedMeta(kind, item) {
     civLink(item.civilizationId),
     settlementLink(item.settlementId),
     item.beliefId == null ? "" : beliefLink(item.beliefId),
+    item.godId == null ? "" : godLink(item.godId),
+    item.destinyId == null ? "" : destinyLink(item.destinyId),
     item.mythId == null ? "" : mythLink(item.mythId),
     item.magicRoleId == null ? "" : magicRoleLink(item.magicRoleId),
     item.speakerAgentId == null ? "" : "speaker " + personLink(item.speakerAgentId),
@@ -6015,6 +6440,9 @@ function linkedMeta(kind, item) {
     civLink(item.civilizationId),
     item.settlementId == null ? "" : settlementLink(item.settlementId),
     item.beliefId == null ? "" : beliefLink(item.beliefId),
+    item.godId == null ? "" : godLink(item.godId),
+    item.commandmentId == null ? "" : commandmentLink(item.commandmentId),
+    item.destinyId == null ? "" : destinyLink(item.destinyId),
     item.mythId == null ? "" : mythLink(item.mythId),
     item.doctrineId == null ? "" : doctrineLink(item.doctrineId),
     item.magicRoleId == null ? "" : magicRoleLink(item.magicRoleId),
@@ -6034,6 +6462,7 @@ function linkedMeta(kind, item) {
     settlementLink(item.settlementId),
     item.founderAgentId == null ? "" : "founder " + personLink(item.founderAgentId),
     item.beliefId == null ? "" : beliefLink(item.beliefId),
+    item.godId == null ? "" : godLink(item.godId),
     item.mythId == null ? "" : mythLink(item.mythId),
     item.doctrineId == null ? "" : doctrineLink(item.doctrineId),
     item.magicRoleId == null ? "" : magicRoleLink(item.magicRoleId),
@@ -6116,17 +6545,28 @@ function linkedMeta(kind, item) {
     esc("battles " + (item.battleIds || []).length),
     esc("casualties " + (item.casualtyAgentIds || []).length),
     esc("captured places " + (item.capturedSettlementIds || []).length),
-    esc("captured artifacts " + (item.capturedArtifactIds || []).length)
+    esc("captured artifacts " + (item.capturedArtifactIds || []).length),
+    esc("spy ops " + (item.spyOperationIds || []).length)
   ].filter(Boolean);
   if (kind === "battles") return [
     esc(item.kind),
     esc(item.outcome),
     item.conflictId == null ? "" : conflictLink(item.conflictId),
     settlementLink(item.settlementId),
+    esc(item.battlefieldName || ""),
+    esc(item.battlefieldTerrain || ""),
+    item.battlefieldX == null || item.battlefieldY == null ? "" : esc("field " + item.battlefieldX + ", " + item.battlefieldY),
+    item.battlefieldTriangle == null ? "" : esc("triangle " + item.battlefieldTriangle),
     "attacker " + civLink(item.attackerCivilizationId),
     "defender " + civLink(item.defenderCivilizationId),
     item.attackerCommanderId == null ? "" : "attacker commander " + personLink(item.attackerCommanderId),
     item.defenderCommanderId == null ? "" : "defender commander " + personLink(item.defenderCommanderId),
+    esc("attacker power " + (item.attackerPower ?? 0)),
+    esc("defender power " + (item.defenderPower ?? 0)),
+    esc("intelligence " + (item.intelligenceAdvantage ?? 0)),
+    esc("attacker units " + (item.attackerUnitIds || []).length),
+    esc("defender units " + (item.defenderUnitIds || []).length),
+    esc("spy ops " + (item.spyOperationIds || []).length),
     esc("fought " + years(item.year)),
     esc("casualties " + item.casualtyAgentIds.length)
   ].filter(Boolean);
@@ -6144,6 +6584,66 @@ function linkedMeta(kind, item) {
     item.casualtyEventId == null ? "" : "casualty event " + eventLink(item.casualtyEventId),
     esc("wounds " + (item.injuryIds || []).length),
     esc("fought " + years(item.year))
+  ].filter(Boolean);
+  if (kind === "military-units") return [
+    esc(item.kind),
+    esc(item.status),
+    civLink(item.civilizationId),
+    settlementLink(item.settlementId),
+    item.commanderAgentId == null ? "" : "commander " + personLink(item.commanderAgentId),
+    esc("troops " + (item.troopAgentIds || []).length),
+    esc("strength " + item.strength),
+    esc("training " + item.training),
+    esc("morale " + item.morale),
+    esc("supply " + item.supply),
+    esc("weapons " + item.weaponClass + " q" + item.weaponQuality),
+    esc("armor " + item.armorClass + " q" + item.armorQuality),
+    esc("formed " + years(item.formedYear)),
+    item.disbandedYear == null ? "" : esc("disbanded " + years(item.disbandedYear))
+  ].filter(Boolean);
+  if (kind === "equipment-caches") return [
+    esc(item.kind),
+    esc(item.condition),
+    civLink(item.civilizationId),
+    settlementLink(item.settlementId),
+    item.unitId == null ? "" : militaryUnitLink(item.unitId),
+    item.weaponClass == null ? "" : esc("weapon " + item.weaponClass),
+    item.armorClass == null ? "" : esc("armor " + item.armorClass),
+    esc("quality " + item.quality),
+    esc("quantity " + item.quantity),
+    item.sourceEventId == null ? "" : eventLink(item.sourceEventId),
+    esc("stocked " + years(item.year))
+  ].filter(Boolean);
+  if (kind === "spy-networks") return [
+    esc(item.status),
+    esc(item.cover),
+    civLink(item.civilizationId),
+    settlementLink(item.settlementId),
+    item.targetCivilizationId == null ? "" : "target civ " + civLink(item.targetCivilizationId),
+    item.targetSettlementId == null ? "" : "target " + settlementLink(item.targetSettlementId),
+    item.handlerAgentId == null ? "" : "handler " + personLink(item.handlerAgentId),
+    esc("agents " + (item.agentIds || []).length),
+    esc("operations " + (item.operationIds || []).length),
+    esc("secrecy " + item.secrecy),
+    esc("infiltration " + item.infiltration),
+    esc("intelligence " + item.intelligence),
+    esc("formed " + years(item.formedYear)),
+    item.exposedYear == null ? "" : esc("exposed " + years(item.exposedYear))
+  ].filter(Boolean);
+  if (kind === "spy-operations") return [
+    esc(item.kind),
+    esc(item.outcome),
+    spyNetworkLink(item.networkId),
+    civLink(item.civilizationId),
+    "target civ " + civLink(item.targetCivilizationId),
+    "target " + settlementLink(item.targetSettlementId),
+    item.battleId == null ? "" : battleLink(item.battleId),
+    item.conflictId == null ? "" : conflictLink(item.conflictId),
+    esc("agents " + (item.agentIds || []).length),
+    esc("risk " + item.risk),
+    esc("success " + item.success),
+    esc(item.detected ? "detected" : "not detected"),
+    esc(years(item.year))
   ].filter(Boolean);
   if (kind === "injuries") return [
     esc(item.severity + " " + item.kind),
@@ -6798,8 +7298,18 @@ function linkedMeta(kind, item) {
     esc("settled " + years(item.year))
   ].filter(Boolean);
   if (kind === "civilizations") return [
+    item.status == null ? "" : esc(item.status),
+    item.originKind == null ? "" : esc(item.originKind),
     esc("population " + item.population),
-    "capital " + settlementLink(item.capitalSettlementId)
+    "capital " + settlementLink(item.capitalSettlementId),
+    item.parentCivilizationId == null ? "" : "parent " + civLink(item.parentCivilizationId),
+    item.restoredCivilizationId == null ? "" : "restored " + civLink(item.restoredCivilizationId),
+    item.foundedYear == null ? "" : esc("founded " + years(item.foundedYear)),
+    item.fallenYear == null ? "" : esc("fallen " + years(item.fallenYear)),
+    item.collapsePressure == null ? "" : esc("collapse pressure " + item.collapsePressure),
+    item.creationDomain == null ? "" : esc("creation " + item.creationDomain),
+    item.creationGodId == null ? "" : "creator " + godLink(item.creationGodId),
+    item.creationSeatScore == null ? "" : esc("seat score " + item.creationSeatScore)
   ];
   return [esc(item.type), esc(years(item.year))];
 }
@@ -7513,11 +8023,82 @@ function possessionAttachmentsAbout(refKind, id, limit) {
     .slice(0, limit || 80)
     .map(attachment => possessionAttachmentLink(attachment.id));
 }
+function godsAbout(refKind, id, limit) {
+  return data.gods
+    .filter(god =>
+      (god.subjectRefs || []).some(ref => ref.kind === refKind && ref.id === id) ||
+      (refKind === "belief" && god.beliefId === id) ||
+      (refKind === "settlement" && god.originSettlementId === id) ||
+      (refKind === "myth" && (god.mythIds || []).includes(id)) ||
+      (refKind === "doctrine" && (god.doctrineIds || []).includes(id)) ||
+      (refKind === "magic-role" && (god.magicRoleIds || []).includes(id)) ||
+      (refKind === "prophecy" && (god.prophecyIds || []).includes(id)) ||
+      (refKind === "civilization-goal" && (god.civilizationGoalIds || []).includes(id)) ||
+      (refKind === "sacred-site" && (god.sacredSiteIds || []).includes(id)) ||
+      (refKind === "commandment" && (god.commandmentIds || []).includes(id)) ||
+      (refKind === "destiny" && (god.destinyIds || []).includes(id)) ||
+      (refKind === "miracle" && (god.miracleIds || []).includes(id)) ||
+      (refKind === "event" && (god.eventIds || []).includes(id)) ||
+      (refKind === "civilization" && god.civilizationId === id)
+    )
+    .slice(0, limit || 80)
+    .map(god => godLink(god.id));
+}
+function commandmentsAbout(refKind, id, limit) {
+  return data.commandments
+    .filter(commandment =>
+      (commandment.subjectRefs || []).some(ref => ref.kind === refKind && ref.id === id) ||
+      (refKind === "belief" && commandment.beliefId === id) ||
+      (refKind === "god" && commandment.godId === id) ||
+      (refKind === "doctrine" && commandment.doctrineId === id) ||
+      (refKind === "civilization-goal" && (commandment.civilizationGoalIds || []).includes(id)) ||
+      (refKind === "settlement" && commandment.settlementId === id) ||
+      (refKind === "event" && (commandment.eventIds || []).includes(id)) ||
+      (refKind === "civilization" && commandment.civilizationId === id)
+    )
+    .slice(0, limit || 80)
+    .map(commandment => commandmentLink(commandment.id));
+}
+function destiniesAbout(refKind, id, limit) {
+  return data.destinies
+    .filter(destiny =>
+      (destiny.subjectRefs || []).some(ref => ref.kind === refKind && ref.id === id) ||
+      (refKind === "belief" && destiny.beliefId === id) ||
+      (refKind === "god" && destiny.godId === id) ||
+      (refKind === "prophecy" && destiny.prophecyId === id) ||
+      (refKind === "civilization-goal" && destiny.civilizationGoalId === id) ||
+      (refKind === "person" && destiny.targetAgentId === id) ||
+      (refKind === "settlement" && (destiny.settlementId === id || destiny.targetSettlementId === id)) ||
+      (refKind === "artifact" && destiny.targetArtifactId === id) ||
+      (refKind === "event" && (destiny.sourceEventId === id || destiny.resolvedEventId === id || (destiny.eventIds || []).includes(id))) ||
+      (refKind === "civilization" && destiny.civilizationId === id)
+    )
+    .slice(0, limit || 80)
+    .map(destiny => destinyLink(destiny.id));
+}
+function miraclesAbout(refKind, id, limit) {
+  return data.miracles
+    .filter(miracle =>
+      (miracle.subjectRefs || []).some(ref => ref.kind === refKind && ref.id === id) ||
+      (refKind === "belief" && miracle.beliefId === id) ||
+      (refKind === "god" && miracle.godId === id) ||
+      (refKind === "prophecy" && miracle.prophecyId === id) ||
+      (refKind === "civilization-goal" && miracle.civilizationGoalId === id) ||
+      (refKind === "sacred-site" && miracle.sacredSiteId === id) ||
+      (refKind === "person" && miracle.targetAgentId === id) ||
+      (refKind === "settlement" && miracle.settlementId === id) ||
+      (refKind === "event" && (miracle.eventIds || []).includes(id)) ||
+      (refKind === "civilization" && miracle.civilizationId === id)
+    )
+    .slice(0, limit || 80)
+    .map(miracle => miracleLink(miracle.id));
+}
 function mythsAbout(refKind, id, limit) {
   return data.myths
     .filter(myth =>
       (myth.subjectRefs || []).some(ref => ref.kind === refKind && ref.id === id) ||
       (refKind === "belief" && myth.beliefId === id) ||
+      (refKind === "god" && myth.godId === id) ||
       (refKind === "person" && myth.centralAgentId === id) ||
       (refKind === "settlement" && myth.originSettlementId === id) ||
       (refKind === "civilization" && myth.civilizationId === id)
@@ -7531,6 +8112,8 @@ function doctrinesAbout(refKind, id, limit) {
       (doctrine.subjectRefs || []).some(ref => ref.kind === refKind && ref.id === id) ||
       (refKind === "belief" && doctrine.beliefId === id) ||
       (refKind === "myth" && doctrine.mythId === id) ||
+      (refKind === "god" && doctrine.godId === id) ||
+      (refKind === "commandment" && doctrine.commandmentId === id) ||
       (refKind === "settlement" && doctrine.originSettlementId === id) ||
       (refKind === "event" && (doctrine.eventIds || []).includes(id)) ||
       (refKind === "civilization" && doctrine.civilizationId === id)
@@ -7545,6 +8128,7 @@ function magicRolesAbout(refKind, id, limit) {
       (refKind === "person" && role.agentId === id) ||
       (refKind === "belief" && role.beliefId === id) ||
       (refKind === "myth" && role.mythId === id) ||
+      (refKind === "god" && role.godId === id) ||
       (refKind === "organization" && role.organizationId === id) ||
       (refKind === "settlement" && role.settlementId === id) ||
       (refKind === "civilization" && role.civilizationId === id)
@@ -7559,6 +8143,8 @@ function propheciesAbout(refKind, id, limit) {
       (refKind === "person" && (prophecy.speakerAgentId === id || prophecy.targetAgentId === id)) ||
       (refKind === "belief" && prophecy.beliefId === id) ||
       (refKind === "myth" && prophecy.mythId === id) ||
+      (refKind === "god" && prophecy.godId === id) ||
+      (refKind === "destiny" && prophecy.destinyId === id) ||
       (refKind === "magic-role" && prophecy.magicRoleId === id) ||
       (refKind === "settlement" && (prophecy.settlementId === id || prophecy.targetSettlementId === id)) ||
       (refKind === "artifact" && prophecy.targetArtifactId === id) ||
@@ -7580,6 +8166,9 @@ function civilizationGoalsAbout(refKind, id, limit) {
       (refKind === "doctrine" && goal.doctrineId === id) ||
       (refKind === "magic-role" && goal.magicRoleId === id) ||
       (refKind === "prophecy" && goal.prophecyId === id) ||
+      (refKind === "god" && goal.godId === id) ||
+      (refKind === "commandment" && goal.commandmentId === id) ||
+      (refKind === "destiny" && goal.destinyId === id) ||
       (refKind === "artifact" && goal.targetArtifactId === id) ||
       (refKind === "event" && (goal.sourceEventId === id || goal.resolvedEventId === id))
     )
@@ -7600,6 +8189,7 @@ function sacredSitesAbout(refKind, id, limit) {
       (refKind === "magic-role" && site.magicRoleId === id) ||
       (refKind === "prophecy" && site.prophecyId === id) ||
       (refKind === "civilization-goal" && site.civilizationGoalId === id) ||
+      (refKind === "god" && site.godId === id) ||
       (refKind === "event" && (site.eventIds || []).includes(id))
     )
     .slice(0, limit || 80)
@@ -7777,6 +8367,10 @@ function relationsSection(kind, item) {
     groups.push(relationGroup("Belief Adherence History", (item.beliefAdherenceIds || []).slice(0, 80).map(beliefAdherenceLink)));
     groups.push(relationGroup("Magic Roles", (item.magicRoleIds || []).slice(0, 40).map(magicRoleLink)));
     groups.push(relationGroup("Sacred Sites Founded", sacredSitesAbout("person", item.id, 20)));
+    groups.push(relationGroup("Divine Links", [
+      ...destiniesAbout("person", item.id, 20),
+      ...miraclesAbout("person", item.id, 20)
+    ]));
     groups.push(relationGroup("Myths About", mythsAbout("person", item.id, 40)));
     groups.push(relationGroup("Prophecies", propheciesAbout("person", item.id, 60)));
     groups.push(relationGroup("Offices", (item.officeIds || []).map(officeLink)));
@@ -7786,6 +8380,9 @@ function relationsSection(kind, item) {
     groups.push(relationGroup("Battles", (item.battleIds || []).slice(0, 40).map(battleLink)));
     groups.push(relationGroup("Battle Roles", (item.battleParticipationIds || []).slice(0, 80).map(battleParticipationLink)));
     groups.push(relationGroup("Conflicts", conflictsAbout("person", item.id, 40)));
+    groups.push(relationGroup("Military Units", data.militaryUnits.filter(unit => unit.commanderAgentId === item.id || (unit.troopAgentIds || []).includes(item.id)).slice(0, 60).map(unit => militaryUnitLink(unit.id))));
+    groups.push(relationGroup("Spy Networks", data.spyNetworks.filter(network => network.handlerAgentId === item.id || (network.agentIds || []).includes(item.id)).slice(0, 40).map(network => spyNetworkLink(network.id))));
+    groups.push(relationGroup("Spy Operations", data.spyOperations.filter(operation => (operation.agentIds || []).includes(item.id)).slice(0, 60).map(operation => spyOperationLink(operation.id))));
     groups.push(relationGroup("Injuries", (item.injuryIds || []).slice(0, 40).map(injuryLink)));
     groups.push(relationGroup("Illnesses", (item.illnessIds || []).slice(0, 40).map(illnessLink)));
     groups.push(relationGroup("Care Records", careRecordsAbout("person", item.id, 80)));
@@ -8035,6 +8632,12 @@ function relationsSection(kind, item) {
     const localBeliefs = data.beliefs.filter(belief => belief.originSettlementId === item.id).slice(0, 20).map(belief => beliefLink(belief.id));
     groups.push(relationGroup("Founded Beliefs", localBeliefs));
     groups.push(relationGroup("Belief Adherences", beliefAdherencesAbout("settlement", item.id, 120)));
+    groups.push(relationGroup("Gods and Divine Acts", [
+      ...godsAbout("settlement", item.id, 80),
+      ...commandmentsAbout("settlement", item.id, 80),
+      ...destiniesAbout("settlement", item.id, 80),
+      ...miraclesAbout("settlement", item.id, 80)
+    ]));
     groups.push(relationGroup("Myths", mythsAbout("settlement", item.id, 80)));
     groups.push(relationGroup("Doctrines", doctrinesAbout("settlement", item.id, 80)));
     groups.push(relationGroup("Magic Roles", magicRolesAbout("settlement", item.id, 80)));
@@ -8053,6 +8656,10 @@ function relationsSection(kind, item) {
     groups.push(relationGroup("Battles", localBattles));
     groups.push(relationGroup("Battle Roles", battleParticipationsAbout("settlement", item.id, 120)));
     groups.push(relationGroup("Conflicts", conflictsAbout("settlement", item.id, 80)));
+    groups.push(relationGroup("Military Units", data.militaryUnits.filter(unit => unit.settlementId === item.id).slice(0, 80).map(unit => militaryUnitLink(unit.id))));
+    groups.push(relationGroup("Equipment", data.equipmentCaches.filter(cache => cache.settlementId === item.id).slice(0, 80).map(cache => equipmentCacheLink(cache.id))));
+    groups.push(relationGroup("Spy Networks", data.spyNetworks.filter(network => network.settlementId === item.id || network.targetSettlementId === item.id).slice(0, 80).map(network => spyNetworkLink(network.id))));
+    groups.push(relationGroup("Spy Operations", data.spyOperations.filter(operation => operation.targetSettlementId === item.id).slice(0, 80).map(operation => spyOperationLink(operation.id))));
     const localInjuries = data.injuries.filter(injury => injury.settlementId === item.id).slice(0, 80).map(injury => injuryLink(injury.id));
     groups.push(relationGroup("Injuries", localInjuries));
     groups.push(relationGroup("Illnesses", illnessesAbout("settlement", item.id, 80)));
@@ -8292,6 +8899,16 @@ function relationsSection(kind, item) {
     groups.push(relationGroup("Epithets", epithetsAbout("lineage", item.id, 100)));
     groups.push(relationGroup("Reputation Milestones", reputationMilestonesAbout("lineage", item.id, 100)));
   } else if (kind === "civilizations") {
+    groups.push(relationGroup("Lifecycle", [
+      item.status == null ? "" : '<span class="ref">' + esc(item.status) + '</span>',
+      item.originKind == null ? "" : '<span class="ref">' + esc(item.originKind) + '</span>',
+      item.parentCivilizationId == null ? "" : "parent " + civLink(item.parentCivilizationId),
+      item.restoredCivilizationId == null ? "" : "restored " + civLink(item.restoredCivilizationId),
+      item.foundedYear == null ? "" : '<span class="ref">' + esc("founded " + years(item.foundedYear)) + '</span>',
+      item.fallenYear == null ? "" : '<span class="ref">' + esc("fallen " + years(item.fallenYear)) + '</span>',
+      item.collapsePressure == null ? "" : '<span class="ref">' + esc("collapse pressure " + item.collapsePressure) + '</span>',
+      ...((item.collapseFailureKinds || []).slice(0, 10).map(kind => '<span class="ref">' + esc(kind) + '</span>'))
+    ].filter(Boolean)));
     groups.push(relationGroup("Settlement Control", settlementControlsAbout("civilization", item.id, 160)));
     groups.push(relationGroup("Person Allegiances", personAllegiancesAbout("civilization", item.id, 160)));
     groups.push(relationGroup("Preferences", preferencesAbout("civilization", item.id, 180)));
@@ -8308,8 +8925,21 @@ function relationsSection(kind, item) {
       ? data.mythsAndMagic.filter(record => record.civilizationId === item.id).map(record => mythsMagicLink(record.id))
       : [mythsMagicLink(item.mythsMagicId)];
     groups.push(relationGroup("Myths & Magic", mythsMagicLinks));
+    groups.push(relationGroup("Creation Seat", [
+      item.creationDomain == null ? "" : '<span class="ref">' + esc(item.creationDomain) + '</span>',
+      item.creationSeatPreference == null ? "" : '<span class="ref">' + esc(item.creationSeatPreference) + '</span>',
+      item.creationSeatScore == null ? "" : '<span class="ref">' + esc("score " + item.creationSeatScore) + '</span>',
+      item.creationGodId == null ? "" : godLink(item.creationGodId),
+      item.capitalSettlementId == null ? "" : settlementLink(item.capitalSettlementId)
+    ].filter(Boolean)));
     groups.push(relationGroup("Beliefs", civBeliefs));
     groups.push(relationGroup("Belief Adherences", beliefAdherencesAbout("civilization", item.id, 140)));
+    groups.push(relationGroup("Gods and Divine Acts", [
+      ...godsAbout("civilization", item.id, 100),
+      ...commandmentsAbout("civilization", item.id, 100),
+      ...destiniesAbout("civilization", item.id, 100),
+      ...miraclesAbout("civilization", item.id, 100)
+    ]));
     groups.push(relationGroup("Myths", mythsAbout("civilization", item.id, 100)));
     groups.push(relationGroup("Doctrines", doctrinesAbout("civilization", item.id, 100)));
     groups.push(relationGroup("Magic Roles", magicRolesAbout("civilization", item.id, 100)));
@@ -8327,6 +8957,10 @@ function relationsSection(kind, item) {
     groups.push(relationGroup("Battles", civBattles));
     groups.push(relationGroup("Battle Roles", battleParticipationsAbout("civilization", item.id, 160)));
     groups.push(relationGroup("Conflicts", conflictsAbout("civilization", item.id, 80)));
+    groups.push(relationGroup("Military Units", data.militaryUnits.filter(unit => unit.civilizationId === item.id).slice(0, 120).map(unit => militaryUnitLink(unit.id))));
+    groups.push(relationGroup("Equipment", data.equipmentCaches.filter(cache => cache.civilizationId === item.id).slice(0, 120).map(cache => equipmentCacheLink(cache.id))));
+    groups.push(relationGroup("Spy Networks", data.spyNetworks.filter(network => network.civilizationId === item.id || network.targetCivilizationId === item.id).slice(0, 120).map(network => spyNetworkLink(network.id))));
+    groups.push(relationGroup("Spy Operations", data.spyOperations.filter(operation => operation.civilizationId === item.id || operation.targetCivilizationId === item.id).slice(0, 120).map(operation => spyOperationLink(operation.id))));
     const civInjuries = data.injuries.filter(injury => injury.civilizationId === item.id).slice(0, 80).map(injury => injuryLink(injury.id));
     groups.push(relationGroup("Injuries", civInjuries));
     groups.push(relationGroup("Illnesses", illnessesAbout("civilization", item.id, 100)));
@@ -8743,6 +9377,10 @@ function relationsSection(kind, item) {
     if (item.targetSettlementId != null) groups.push(relationGroup("Initial Target", [settlementLink(item.targetSettlementId)]));
     groups.push(relationGroup("Contested Places", (item.contestedSettlementIds || []).slice(0, 120).map(settlementLink)));
     groups.push(relationGroup("Battles", (item.battleIds || []).slice(0, 120).map(battleLink)));
+    const conflictBattles = (item.battleIds || []).map(id => maps.battles.get(id)).filter(Boolean);
+    const conflictUnitLinks = uniqueLinkList(conflictBattles.flatMap(battle => [...(battle.attackerUnitIds || []), ...(battle.defenderUnitIds || [])].map(militaryUnitLink)), 120);
+    groups.push(relationGroup("Military Units", conflictUnitLinks));
+    groups.push(relationGroup("Spy Operations", (item.spyOperationIds || []).slice(0, 120).map(spyOperationLink)));
     groups.push(relationGroup("Battle Roles", battleParticipationsAbout("conflict", item.id, 120)));
     groups.push(relationGroup("Casualties", (item.casualtyAgentIds || []).slice(0, 120).map(personLink)));
     groups.push(relationGroup("Captured Places", (item.capturedSettlementIds || []).slice(0, 80).map(settlementLink)));
@@ -8762,9 +9400,18 @@ function relationsSection(kind, item) {
   } else if (kind === "battles") {
     if (item.conflictId != null) groups.push(relationGroup("Conflict", [conflictLink(item.conflictId)]));
     groups.push(relationGroup("Place", [settlementLink(item.settlementId)]));
+    groups.push(relationGroup("Battlefield", [
+      '<span class="ref">' + esc(item.battlefieldName || settlementName(item.settlementId)) + '</span>',
+      '<span class="ref">' + esc((item.battlefieldTerrain || "unknown").replace(/-/g, " ")) + '</span>',
+      item.battlefieldX == null || item.battlefieldY == null ? "" : '<span class="ref">' + esc("map " + item.battlefieldX + ", " + item.battlefieldY) + '</span>',
+      item.battlefieldTriangle == null ? "" : '<span class="ref">' + esc("triangle " + item.battlefieldTriangle) + '</span>'
+    ].filter(Boolean)));
     groups.push(relationGroup("Civilizations", [civLink(item.attackerCivilizationId), civLink(item.defenderCivilizationId)]));
     const commanders = [item.attackerCommanderId, item.defenderCommanderId].filter(id => id != null).map(personLink);
     groups.push(relationGroup("Commanders", commanders));
+    groups.push(relationGroup("Attacker Units", (item.attackerUnitIds || []).slice(0, 80).map(militaryUnitLink)));
+    groups.push(relationGroup("Defender Units", (item.defenderUnitIds || []).slice(0, 80).map(militaryUnitLink)));
+    groups.push(relationGroup("Spy Operations", (item.spyOperationIds || []).slice(0, 80).map(spyOperationLink)));
     groups.push(relationGroup("Participant Records", (item.battleParticipationIds || []).slice(0, 160).map(battleParticipationLink)));
     groups.push(relationGroup("Attackers", (item.attackerParticipantIds || []).slice(0, 80).map(personLink)));
     groups.push(relationGroup("Defenders", (item.defenderParticipantIds || []).slice(0, 80).map(personLink)));
@@ -8803,6 +9450,48 @@ function relationsSection(kind, item) {
     groups.push(relationGroup("Feuds", feudsAbout("battle-participation", item.id, 40)));
     groups.push(relationGroup("Oaths", oathsAbout("battle-participation", item.id, 40)));
     groups.push(relationGroup("Obligations", obligationsAbout("battle-participation", item.id, 40)));
+  } else if (kind === "military-units") {
+    groups.push(relationGroup("Civilization", [civLink(item.civilizationId)]));
+    groups.push(relationGroup("Settlement", [settlementLink(item.settlementId)]));
+    if (item.commanderAgentId != null) groups.push(relationGroup("Commander", [personLink(item.commanderAgentId)]));
+    groups.push(relationGroup("Troops", (item.troopAgentIds || []).slice(0, 120).map(personLink)));
+    groups.push(relationGroup("Equipment", (item.equipmentCacheIds || []).slice(0, 80).map(equipmentCacheLink)));
+    groups.push(relationGroup("Battles", (item.battleIds || []).slice(0, 80).map(battleLink)));
+    groups.push(relationGroup("Spy Operations", (item.spyOperationIds || []).slice(0, 80).map(spyOperationLink)));
+    if (item.formedEventId != null) groups.push(relationGroup("Formation Event", [eventLink(item.formedEventId)]));
+    if (item.disbandedEventId != null) groups.push(relationGroup("Disbanded Event", [eventLink(item.disbandedEventId)]));
+    groups.push(relationGroup("Subjects", (item.subjectRefs || []).map(refLink)));
+    groups.push(relationGroup("Records and Echoes", recordEchoLinks("military-unit", item.id, 40)));
+  } else if (kind === "equipment-caches") {
+    groups.push(relationGroup("Civilization", [civLink(item.civilizationId)]));
+    groups.push(relationGroup("Settlement", [settlementLink(item.settlementId)]));
+    if (item.unitId != null) groups.push(relationGroup("Military Unit", [militaryUnitLink(item.unitId)]));
+    if (item.sourceEventId != null) groups.push(relationGroup("Source Event", [eventLink(item.sourceEventId)]));
+    groups.push(relationGroup("Subjects", (item.subjectRefs || []).map(refLink)));
+    groups.push(relationGroup("Records and Echoes", recordEchoLinks("equipment-cache", item.id, 40)));
+  } else if (kind === "spy-networks") {
+    groups.push(relationGroup("Civilization", [civLink(item.civilizationId)]));
+    groups.push(relationGroup("Origin", [settlementLink(item.settlementId)]));
+    if (item.targetSettlementId != null) groups.push(relationGroup("Target Settlement", [settlementLink(item.targetSettlementId)]));
+    if (item.targetCivilizationId != null) groups.push(relationGroup("Target Civilization", [civLink(item.targetCivilizationId)]));
+    if (item.handlerAgentId != null) groups.push(relationGroup("Handler", [personLink(item.handlerAgentId)]));
+    groups.push(relationGroup("Agents", (item.agentIds || []).slice(0, 80).map(personLink)));
+    groups.push(relationGroup("Operations", (item.operationIds || []).slice(0, 120).map(spyOperationLink)));
+    if (item.formedEventId != null) groups.push(relationGroup("Formation Event", [eventLink(item.formedEventId)]));
+    if (item.exposedEventId != null) groups.push(relationGroup("Exposed Event", [eventLink(item.exposedEventId)]));
+    groups.push(relationGroup("Subjects", (item.subjectRefs || []).map(refLink)));
+    groups.push(relationGroup("Records and Echoes", recordEchoLinks("spy-network", item.id, 40)));
+  } else if (kind === "spy-operations") {
+    groups.push(relationGroup("Network", [spyNetworkLink(item.networkId)]));
+    groups.push(relationGroup("Civilization", [civLink(item.civilizationId)]));
+    if (item.targetSettlementId != null) groups.push(relationGroup("Target Settlement", [settlementLink(item.targetSettlementId)]));
+    if (item.targetCivilizationId != null) groups.push(relationGroup("Target Civilization", [civLink(item.targetCivilizationId)]));
+    if (item.battleId != null) groups.push(relationGroup("Battle", [battleLink(item.battleId)]));
+    if (item.conflictId != null) groups.push(relationGroup("Conflict", [conflictLink(item.conflictId)]));
+    groups.push(relationGroup("Agents", (item.agentIds || []).slice(0, 80).map(personLink)));
+    if (item.sourceEventId != null) groups.push(relationGroup("Source Event", [eventLink(item.sourceEventId)]));
+    groups.push(relationGroup("Subjects", (item.subjectRefs || []).map(refLink)));
+    groups.push(relationGroup("Records and Echoes", recordEchoLinks("spy-operation", item.id, 40)));
   } else if (kind === "injuries") {
     groups.push(relationGroup("Person", [personLink(item.personId)]));
     groups.push(relationGroup("Place", [settlementLink(item.settlementId)]));
@@ -9720,6 +10409,10 @@ function relationsSection(kind, item) {
     groups.push(relationGroup("Preferences", preferencesAbout("event", item.id, 80)));
     groups.push(relationGroup("Battle Roles", battleParticipationsAbout("event", item.id, 80)));
     groups.push(relationGroup("Conflicts", conflictsAbout("event", item.id, 80)));
+    groups.push(relationGroup("Military Units", data.militaryUnits.filter(unit => unit.formedEventId === item.id || unit.disbandedEventId === item.id || (unit.eventIds || []).includes(item.id) || (unit.subjectRefs || []).some(ref => ref.kind === "event" && ref.id === item.id)).slice(0, 80).map(unit => militaryUnitLink(unit.id))));
+    groups.push(relationGroup("Equipment", data.equipmentCaches.filter(cache => cache.sourceEventId === item.id || (cache.eventIds || []).includes(item.id) || (cache.subjectRefs || []).some(ref => ref.kind === "event" && ref.id === item.id)).slice(0, 80).map(cache => equipmentCacheLink(cache.id))));
+    groups.push(relationGroup("Spy Networks", data.spyNetworks.filter(network => network.formedEventId === item.id || network.exposedEventId === item.id || (network.eventIds || []).includes(item.id) || (network.subjectRefs || []).some(ref => ref.kind === "event" && ref.id === item.id)).slice(0, 80).map(network => spyNetworkLink(network.id))));
+    groups.push(relationGroup("Spy Operations", data.spyOperations.filter(operation => operation.sourceEventId === item.id || (operation.eventIds || []).includes(item.id) || (operation.subjectRefs || []).some(ref => ref.kind === "event" && ref.id === item.id)).slice(0, 80).map(operation => spyOperationLink(operation.id))));
     groups.push(relationGroup("Illnesses", illnessesAbout("event", item.id, 80)));
     groups.push(relationGroup("Wound Legacies", woundLegaciesAbout("event", item.id, 80)));
     groups.push(relationGroup("Burials", burialsAbout("event", item.id, 80)));
@@ -9761,6 +10454,12 @@ function relationsSection(kind, item) {
 function chunkUrl(kind, id) {
   const basePath = chunkConfig.basePath || "records";
   const chunkSize = Number(chunkConfig.chunkSize || 500);
+  const chunkId = Math.floor(Number(id) / chunkSize);
+  return basePath.replace(/\\/$/, "") + "/" + encodeURIComponent(kind) + "/" + chunkId + ".json";
+}
+function textUrl(kind, id) {
+  const basePath = textConfig.basePath || "texts";
+  const chunkSize = Number(textConfig.chunkSize || chunkConfig.chunkSize || 500);
   const chunkId = Math.floor(Number(id) / chunkSize);
   return basePath.replace(/\\/$/, "") + "/" + encodeURIComponent(kind) + "/" + chunkId + ".json";
 }
@@ -9807,14 +10506,42 @@ async function loadRecord(kind, id) {
   const chunkSize = Number(chunkConfig.chunkSize || 500);
   const chunkId = Math.floor(numericId / chunkSize);
   const cacheKey = kind + ":" + chunkId;
-  if (!loadedChunks.has(cacheKey)) {
+  let records = readCache(loadedChunks, cacheKey);
+  if (!records) {
     const response = await fetch(chunkUrl(kind, numericId));
     if (!response.ok) throw new Error("Failed to load " + kind + " chunk " + chunkId + " (" + response.status + " " + response.statusText + ")");
-    const records = await response.json();
-    for (const record of records) mergeLoadedRecord(kind, record);
-    loadedChunks.add(cacheKey);
+    const payload = await response.json();
+    records = Array.isArray(payload) ? payload : [];
+    writeCache(loadedChunks, cacheKey, records, recordChunkCacheLimit);
   }
-  return maps[kind].get(numericId) || null;
+  const record = records.find(candidate => Number(candidate?.id) === numericId) || null;
+  if (!record) return null;
+  mergeLoadedRecord(kind, record);
+  return await hydrateRecordText(kind, maps[kind].get(numericId) || record);
+}
+async function loadTextChunk(kind, id) {
+  const numericId = Number(id);
+  if (!Number.isFinite(numericId) || !textConfig.kinds?.[kind]) return {};
+  const chunkSize = Number(textConfig.chunkSize || chunkConfig.chunkSize || 500);
+  const chunkId = Math.floor(numericId / chunkSize);
+  const cacheKey = kind + ":" + chunkId;
+  const cached = readCache(loadedTextChunks, cacheKey);
+  if (cached) return cached;
+  const response = await fetch(textUrl(kind, numericId));
+  if (response.status === 404) {
+    return writeCache(loadedTextChunks, cacheKey, {}, textChunkCacheLimit);
+  }
+  if (!response.ok) throw new Error("Failed to load " + kind + " text chunk " + chunkId + " (" + response.status + " " + response.statusText + ")");
+  return writeCache(loadedTextChunks, cacheKey, await response.json(), textChunkCacheLimit);
+}
+async function hydrateRecordText(kind, record) {
+  if (!record || !record.viewerText) return record;
+  const chunk = await loadTextChunk(kind, record.id);
+  const text = chunk[String(record.id)] || {};
+  if (typeof text.headline === "string") record.headline = text.headline;
+  if (typeof text.description === "string") record.description = text.description;
+  delete record.viewerText;
+  return record;
 }
 async function loadMentionChunk(kind, id) {
   const numericId = Number(id);
@@ -9822,16 +10549,14 @@ async function loadMentionChunk(kind, id) {
   const chunkSize = Number(mentionConfig.chunkSize || 500);
   const chunkId = Math.floor(numericId / chunkSize);
   const cacheKey = kind + ":" + chunkId;
-  if (!loadedMentionChunks.has(cacheKey)) {
-    const response = await fetch(mentionUrl(kind, numericId));
-    if (response.status === 404) {
-      loadedMentionChunks.set(cacheKey, {});
-      return {};
-    }
-    if (!response.ok) throw new Error("Failed to load " + kind + " mentions " + chunkId + " (" + response.status + " " + response.statusText + ")");
-    loadedMentionChunks.set(cacheKey, await response.json());
+  const cached = readCache(loadedMentionChunks, cacheKey);
+  if (cached) return cached;
+  const response = await fetch(mentionUrl(kind, numericId));
+  if (response.status === 404) {
+    return writeCache(loadedMentionChunks, cacheKey, {}, mentionChunkCacheLimit);
   }
-  return loadedMentionChunks.get(cacheKey) || {};
+  if (!response.ok) throw new Error("Failed to load " + kind + " mentions " + chunkId + " (" + response.status + " " + response.statusText + ")");
+  return writeCache(loadedMentionChunks, cacheKey, await response.json(), mentionChunkCacheLimit);
 }
 async function loadWorldMentions(kind, id) {
   const chunk = await loadMentionChunk(kind, id);
@@ -9862,12 +10587,30 @@ const relationFieldKinds = {
   attackerCivilizationId: "civilizations",
   attackerCommanderId: "people",
   attackerParticipantIds: "people",
+  attackerUnitIds: "military-units",
   authorAgentId: "people",
   battleEventId: "events",
   battleId: "battles",
   battleIds: "battles",
   battleParticipationId: "battle-participations",
   battleParticipationIds: "battle-participations",
+  commanderAgentId: "people",
+  militaryUnitId: "military-units",
+  militaryUnitIds: "military-units",
+  troopAgentIds: "people",
+  unitId: "military-units",
+  unitIds: "military-units",
+  equipmentCacheId: "equipment-caches",
+  equipmentCacheIds: "equipment-caches",
+  handlerAgentId: "people",
+  spyNetworkId: "spy-networks",
+  spyNetworkIds: "spy-networks",
+  networkId: "spy-networks",
+  networkIds: "spy-networks",
+  spyOperationId: "spy-operations",
+  spyOperationIds: "spy-operations",
+  operationId: "spy-operations",
+  operationIds: "spy-operations",
   birthId: "births",
   birthIds: "births",
   birthEventId: "events",
@@ -9885,6 +10628,17 @@ const relationFieldKinds = {
   beliefIds: "beliefs",
   mythsMagicId: "myths-magic",
   mythsMagicIds: "myths-magic",
+  godId: "gods",
+  godIds: "gods",
+  creationGodId: "gods",
+  patronGodId: "gods",
+  commandmentId: "commandments",
+  commandmentIds: "commandments",
+  destinyId: "destinies",
+  destinyIds: "destinies",
+  activeDestinyIds: "destinies",
+  miracleId: "miracles",
+  miracleIds: "miracles",
   mythId: "myths",
   mythIds: "myths",
   doctrineId: "doctrines",
@@ -9933,11 +10687,13 @@ const relationFieldKinds = {
   defenderCivilizationId: "civilizations",
   defenderCommanderId: "people",
   defenderParticipantIds: "people",
+  defenderUnitIds: "military-units",
   descendantIds: "people",
   destinationStructureId: "structures",
   deathEventId: "events",
   deathRecordId: "death-records",
   deathRecordIds: "death-records",
+  disbandedEventId: "events",
   disputeCaseIds: "cases",
   disputeFeudIds: "feuds",
   disputeOathIds: "oaths",
@@ -9946,6 +10702,7 @@ const relationFieldKinds = {
   endedEventId: "events",
   eventId: "events",
   eventIds: "events",
+  exposedEventId: "events",
   estateId: "estates",
   estateIds: "estates",
   feudId: "feuds",
@@ -9954,6 +10711,7 @@ const relationFieldKinds = {
   graveGoodBelongingIds: "belongings",
   founderAgentId: "people",
   founderAgentIds: "people",
+  formedEventId: "events",
   fromSettlementId: "settlements",
   healerAgentId: "people",
   heirAgentIds: "people",
@@ -10005,6 +10763,7 @@ const relationFieldKinds = {
   oathId: "oaths",
   oathIds: "oaths",
   ownerAgentId: "people",
+  parentCivilizationId: "civilizations",
   patientAgentId: "people",
   parentAgentIds: "people",
   parentIds: "people",
@@ -10036,6 +10795,7 @@ const relationFieldKinds = {
   residenceId: "residences",
   residenceIds: "residences",
   residenceStructureId: "structures",
+  restoredCivilizationId: "civilizations",
   revealedEventId: "events",
   resolvedEventId: "events",
   rumorId: "rumors",
@@ -10129,6 +10889,10 @@ const relatedRecordHydrationCaps = {
   "reputation-milestones": 30,
   "relationship-milestones": 30,
   "battle-participations": 30,
+  "military-units": 30,
+  "equipment-caches": 30,
+  "spy-networks": 30,
+  "spy-operations": 30,
   "wound-legacies": 30,
   burials: 30,
   "death-records": 30,
@@ -10143,6 +10907,10 @@ const relatedRecordHydrationCaps = {
   lineages: 20,
   beliefs: 20,
   "myths-magic": 10,
+  gods: 20,
+  commandments: 20,
+  destinies: 20,
+  miracles: 20,
   myths: 20,
   doctrines: 20,
   "magic-roles": 20,
@@ -10162,6 +10930,10 @@ const routeContextIndexKinds = {
     "offices",
     "beliefs",
     "battles",
+    "military-units",
+    "equipment-caches",
+    "spy-networks",
+    "spy-operations",
     "births",
     "age-milestones",
     "appearance-features",
@@ -10214,8 +10986,12 @@ const routeContextIndexKinds = {
     "rumors"
   ],
   roads: ["settlements", "civilizations", "journeys"],
-  civilizations: ["settlements", "people", "births", "age-milestones", "appearance-features", "death-records", "structures", "organizations", "roads", "offices", "laws", "cases", "schemes", "conflicts", "battles", "injuries", "illnesses", "care-records", "wound-legacies", "need-episodes", "traditions", "myths-magic", "beliefs", "myths", "doctrines", "magic-roles", "prophecies", "civilization-goals", "sacred-sites", "relationship-milestones", "reputation-milestones", "artifacts", "artifact-conditions"],
-  "myths-magic": ["civilizations", "settlements", "beliefs", "myths", "doctrines", "magic-roles", "prophecies", "civilization-goals", "sacred-sites", "people", "events"]
+  civilizations: ["settlements", "people", "births", "age-milestones", "appearance-features", "death-records", "structures", "organizations", "roads", "offices", "laws", "cases", "schemes", "conflicts", "battles", "military-units", "equipment-caches", "spy-networks", "spy-operations", "injuries", "illnesses", "care-records", "wound-legacies", "need-episodes", "traditions", "myths-magic", "beliefs", "gods", "commandments", "destinies", "miracles", "myths", "doctrines", "magic-roles", "prophecies", "civilization-goals", "sacred-sites", "relationship-milestones", "reputation-milestones", "artifacts", "artifact-conditions"],
+  "myths-magic": ["civilizations", "settlements", "beliefs", "gods", "commandments", "destinies", "miracles", "myths", "doctrines", "magic-roles", "prophecies", "civilization-goals", "sacred-sites", "people", "events"],
+  gods: ["civilizations", "settlements", "beliefs", "commandments", "destinies", "miracles", "myths", "doctrines", "magic-roles", "prophecies", "civilization-goals", "sacred-sites", "events"],
+  commandments: ["civilizations", "settlements", "beliefs", "gods", "doctrines", "civilization-goals", "events"],
+  destinies: ["civilizations", "settlements", "people", "beliefs", "gods", "prophecies", "civilization-goals", "artifacts", "events"],
+  miracles: ["civilizations", "settlements", "people", "beliefs", "gods", "prophecies", "civilization-goals", "sacred-sites", "events"]
 };
 function addHydrationTarget(targets, kind, id) {
   const numericId = Number(id);
@@ -10246,6 +11022,7 @@ function collectHydrationTargets(item) {
 }
 async function hydrateRelatedRecords(kind, item) {
   if (!item) return;
+  await hydrateRecordText(kind, item).catch(() => item);
   const targets = collectHydrationTargets(item);
   for (const indexKind of routeContextIndexKinds[kind] || []) {
     await loadIndex(indexKind).catch(() => null);
@@ -10453,6 +11230,10 @@ const legendsViewerTopLevelArrayLimits: Record<string, number> = {
     appearanceFeatures: 100,
     artifacts: 100,
     artifactConditions: 100,
+    militaryUnits: 100,
+    equipmentCaches: 100,
+    spyNetworks: 100,
+    spyOperations: 100,
     mythsAndMagic: 100,
     burials: 100,
     deathRecords: 100,
@@ -10474,6 +11255,12 @@ const legendsViewerNestedArrayLimits: Record<string, number> = {
     conditionRecordIds: 80,
     battleIds: 60,
     battleParticipationIds: 80,
+    militaryUnitIds: 80,
+    attackerUnitIds: 40,
+    defenderUnitIds: 40,
+    equipmentCacheIds: 80,
+    spyOperationIds: 80,
+    operationIds: 80,
     birthIds: 80,
     ageMilestoneIds: 80,
     appearanceFeatureIds: 80,
@@ -10552,6 +11339,7 @@ type LegendIndexLookups = {
     civilizations: Map<number, LegendRecord>;
     settlements: Map<number, LegendRecord>;
     people: Map<number, LegendRecord>;
+    gods: Map<number, LegendRecord>;
 };
 const legendsViewerRecordSourceCache = new WeakMap<object, Record<string, LegendRecord[]>>();
 
@@ -10578,6 +11366,10 @@ const legendsViewerKindSpecs = [
     {kind: "beliefs", key: "beliefs"},
     {kind: "belief-adherences", key: "beliefAdherences"},
     {kind: "myths-magic", key: "mythsAndMagic"},
+    {kind: "gods", key: "gods"},
+    {kind: "commandments", key: "commandments"},
+    {kind: "destinies", key: "destinies"},
+    {kind: "miracles", key: "miracles"},
     {kind: "myths", key: "myths"},
     {kind: "doctrines", key: "doctrines"},
     {kind: "magic-roles", key: "magicRoles"},
@@ -10592,6 +11384,10 @@ const legendsViewerKindSpecs = [
     {kind: "conflicts", key: "conflicts"},
     {kind: "battles", key: "battles"},
     {kind: "battle-participations", key: "battleParticipations"},
+    {kind: "military-units", key: "militaryUnits"},
+    {kind: "equipment-caches", key: "equipmentCaches"},
+    {kind: "spy-networks", key: "spyNetworks"},
+    {kind: "spy-operations", key: "spyOperations"},
     {kind: "injuries", key: "injuries"},
     {kind: "illnesses", key: "illnesses"},
     {kind: "care-records", key: "careRecords"},
@@ -10673,6 +11469,31 @@ function sanitizeLegendsViewerValue(value: unknown, key: string, stats: LegendsV
     return value;
 }
 
+const legendsViewerExternalTextFields = ["headline", "description"] as const;
+
+type LegendsViewerExternalText = Partial<Record<(typeof legendsViewerExternalTextFields)[number], string>>;
+
+function recordHasLegendsViewerExternalText(record: LegendRecord): boolean {
+    return legendsViewerExternalTextFields.some(field => typeof record[field] === "string" && record[field] !== "");
+}
+
+function extractLegendsViewerExternalText(record: LegendRecord): {record: LegendRecord; text?: LegendsViewerExternalText} {
+    let compactRecord: LegendRecord | undefined;
+    const text: LegendsViewerExternalText = {};
+
+    for (let field of legendsViewerExternalTextFields) {
+        const value = record[field];
+        if (typeof value !== "string" || value === "") continue;
+        text[field] = value;
+        compactRecord ??= {...record};
+        delete compactRecord[field];
+    }
+
+    if (!compactRecord) return {record};
+    compactRecord.viewerText = true;
+    return {record: compactRecord, text};
+}
+
 function makeLegendRecordMap(items: readonly LegendRecord[] | undefined) {
     return new Map<number, LegendRecord>((items ?? []).map(item => [Number(item.id), item]));
 }
@@ -10708,6 +11529,7 @@ function createLegendIndexLookups(legends: LegendsExport): LegendIndexLookups {
         civilizations: makeLegendRecordMap(legends.civilizations as LegendRecord[]),
         settlements: makeLegendRecordMap(legends.settlements as LegendRecord[]),
         people: makeLegendRecordMap(legends.people as LegendRecord[]),
+        gods: makeLegendRecordMap(legends.gods as LegendRecord[]),
     };
 }
 
@@ -10879,6 +11701,18 @@ function legendIndexSublabelFor(kind: string, item: LegendRecord, lookups: Legen
     if (kind === "events") {
         return compactLegendIndexText(`${item.type ?? "event"}, ${legendIndexYears(item.year)}`, 90);
     }
+    if (kind === "civilizations") {
+        const parts = [
+            item.status == null ? "" : String(item.status),
+            item.originKind == null ? "" : String(item.originKind),
+            `population ${item.population ?? "unknown"}`,
+            item.creationDomain == null ? "" : `creation ${item.creationDomain}`,
+            item.creationSeatScore == null ? "" : `seat score ${item.creationSeatScore}`,
+            item.creationGodId == null ? "" : `creator ${legendIndexNamed(lookups, "gods", item.creationGodId, "God")}`,
+            item.fallenYear == null ? "" : `fallen ${legendIndexYears(item.fallenYear)}`,
+        ].filter(Boolean);
+        return compactLegendIndexText(parts.join(", "), 170);
+    }
     if (kind === "artifact-conditions") {
         return compactLegendIndexText(`${item.kind ?? "condition"}, ${item.condition ?? "unknown"}, ${legendIndexNamed(lookups, "settlements", item.settlementId, "Settlement")}, severity ${item.severity ?? "unknown"}, ${legendIndexYears(item.year)}`, 170);
     }
@@ -10911,20 +11745,36 @@ const legendIndexFacetFields = [
     "birthEventId",
     "birthId",
     "careRecordId",
+    "commandmentId",
+    "commandmentStyle",
+    "destinyId",
     "woundLegacyId",
     "deathRecordId",
+    "domain",
     "chapterKind",
     "chapterType",
     "civilizationId",
     "conflictId",
     "createdYear",
+    "creationDomain",
+    "creationGodId",
+    "creationSeatScore",
+    "collapsePressure",
+    "collapseStage",
     "defenderCivilizationId",
     "endYear",
+    "fallenYear",
+    "favor",
     "foundedYear",
     "fromSettlementId",
+    "givenYear",
+    "godId",
     "householdId",
+    "influence",
     "kind",
     "lineageId",
+    "miracleBias",
+    "miracleId",
     "openedYear",
     "organizationId",
     "originSettlementId",
@@ -10932,6 +11782,8 @@ const legendIndexFacetFields = [
     "ownerId",
     "ownerKind",
     "ownerSettlementId",
+    "originKind",
+    "parentCivilizationId",
     "parentAgentIds",
     "patientAgentId",
     "personId",
@@ -10939,9 +11791,12 @@ const legendIndexFacetFields = [
     "profession",
     "quality",
     "renown",
+    "resolvedYear",
     "roadId",
     "reputation",
+    "restoredCivilizationId",
     "settlementId",
+    "severity",
     "startYear",
     "startedYear",
     "status",
@@ -11104,6 +11959,10 @@ const legendMentionRefKindByKind: Record<string, string> = {
     beliefs: "belief",
     "belief-adherences": "belief-adherence",
     "myths-magic": "myths-magic",
+    gods: "god",
+    commandments: "commandment",
+    destinies: "destiny",
+    miracles: "miracle",
     myths: "myth",
     doctrines: "doctrine",
     "magic-roles": "magic-role",
@@ -11118,6 +11977,10 @@ const legendMentionRefKindByKind: Record<string, string> = {
     conflicts: "conflict",
     battles: "battle",
     "battle-participations": "battle-participation",
+    "military-units": "military-unit",
+    "equipment-caches": "equipment-cache",
+    "spy-networks": "spy-network",
+    "spy-operations": "spy-operation",
     injuries: "injury",
     illnesses: "illness",
     "care-records": "care-record",
@@ -11193,6 +12056,25 @@ const legendMentionFieldKinds: Record<string, string> = {
     battleEventId: "events",
     battleParticipationId: "battle-participations",
     battleParticipationIds: "battle-participations",
+    attackerUnitIds: "military-units",
+    defenderUnitIds: "military-units",
+    militaryUnitId: "military-units",
+    militaryUnitIds: "military-units",
+    commanderAgentId: "people",
+    troopAgentIds: "people",
+    unitId: "military-units",
+    unitIds: "military-units",
+    equipmentCacheId: "equipment-caches",
+    equipmentCacheIds: "equipment-caches",
+    handlerAgentId: "people",
+    spyNetworkId: "spy-networks",
+    spyNetworkIds: "spy-networks",
+    networkId: "spy-networks",
+    networkIds: "spy-networks",
+    spyOperationId: "spy-operations",
+    spyOperationIds: "spy-operations",
+    operationId: "spy-operations",
+    operationIds: "spy-operations",
     birthId: "births",
     birthIds: "births",
     birthEventId: "events",
@@ -11212,6 +12094,17 @@ const legendMentionFieldKinds: Record<string, string> = {
     beliefIds: "beliefs",
     mythsMagicId: "myths-magic",
     mythsMagicIds: "myths-magic",
+    godId: "gods",
+    godIds: "gods",
+    creationGodId: "gods",
+    patronGodId: "gods",
+    commandmentId: "commandments",
+    commandmentIds: "commandments",
+    destinyId: "destinies",
+    destinyIds: "destinies",
+    activeDestinyIds: "destinies",
+    miracleId: "miracles",
+    miracleIds: "miracles",
     mythId: "myths",
     mythIds: "myths",
     doctrineId: "doctrines",
@@ -11263,6 +12156,7 @@ const legendMentionFieldKinds: Record<string, string> = {
     deathEventId: "events",
     deathRecordId: "death-records",
     deathRecordIds: "death-records",
+    disbandedEventId: "events",
     disputeCaseIds: "cases",
     disputeFeudIds: "feuds",
     disputeOathIds: "oaths",
@@ -11270,10 +12164,12 @@ const legendMentionFieldKinds: Record<string, string> = {
     endEventId: "events",
     endedEventId: "events",
     eventId: "events",
+    exposedEventId: "events",
     estateId: "estates",
     estateIds: "estates",
     feudId: "feuds",
     feudIds: "feuds",
+    formedEventId: "events",
     graveGoodBelongingIds: "belongings",
     holdingId: "holdings",
     holdingIds: "holdings",
@@ -11307,20 +12203,22 @@ const legendMentionFieldKinds: Record<string, string> = {
     opinionIds: "opinions",
     socialClaimId: "social-claims",
     socialClaimIds: "social-claims",
-    opposingCivilizationId: "civilizations",
-    organizationId: "organizations",
-    organizationIds: "organizations",
-    originStructureId: "structures",
-    obligationId: "obligations",
+  opposingCivilizationId: "civilizations",
+  organizationId: "organizations",
+  organizationIds: "organizations",
+  originStructureId: "structures",
+  obligationId: "obligations",
     obligationIds: "obligations",
     oathId: "oaths",
     oathIds: "oaths",
-    personAllegianceId: "person-allegiances",
-    personAllegianceIds: "person-allegiances",
-    preferenceId: "preferences",
+  personAllegianceId: "person-allegiances",
+  personAllegianceIds: "person-allegiances",
+  parentCivilizationId: "civilizations",
+  preferenceId: "preferences",
     preferenceIds: "preferences",
-    previousCivilizationId: "civilizations",
-    previousStructureId: "structures",
+  previousCivilizationId: "civilizations",
+  previousStructureId: "structures",
+  restoredCivilizationId: "civilizations",
     projectId: "projects",
     projectIds: "projects",
     projectEventId: "events",
@@ -11589,9 +12487,25 @@ function createLegendsViewerChunkMetadata(legends: LegendsExport) {
     return {
         basePath: "records",
         chunkSize: legendsViewerChunkSize,
+        cacheChunks: 32,
         kinds: Object.fromEntries(
             legendsViewerKindSpecs
                 .filter(spec => (legendRecord[spec.key] ?? []).length > 0)
+                .map(spec => [spec.kind, true]),
+        ),
+    };
+}
+
+function createLegendsViewerTextMetadata(legends: LegendsExport) {
+    const legendRecord = createLegendsViewerRecordSource(legends);
+    return {
+        basePath: "texts",
+        chunkSize: legendsViewerChunkSize,
+        cacheChunks: 32,
+        fields: legendsViewerExternalTextFields,
+        kinds: Object.fromEntries(
+            legendsViewerKindSpecs
+                .filter(spec => (legendRecord[spec.key] ?? []).some(recordHasLegendsViewerExternalText))
                 .map(spec => [spec.kind, true]),
         ),
     };
@@ -11602,6 +12516,7 @@ function createLegendsViewerMentionMetadata(legends: LegendsExport) {
     return {
         basePath: "mentions",
         chunkSize: legendsViewerMentionChunkSize,
+        cacheChunks: 64,
         groupLimit: legendsViewerPersonMentionGroupLimit,
         kinds: Object.fromEntries(
             legendMentionTargets
@@ -11654,6 +12569,7 @@ function createLegendsViewerArchive(legends: LegendsExport, mapImagePath?: strin
     viewer.viewerIndex = {};
     viewer.viewerIndexes = createLegendsViewerIndexMetadata(legends);
     viewer.viewerChunks = createLegendsViewerChunkMetadata(legends);
+    viewer.viewerTexts = createLegendsViewerTextMetadata(legends);
     viewer.viewerMentions = createLegendsViewerMentionMetadata(legends);
     if (mapImagePath) {
         viewer.viewerMap = {imagePath: mapImagePath};
@@ -11678,26 +12594,39 @@ function writeLegendsViewerIndexes(legends: LegendsExport, htmlPath: string) {
 function writeLegendsViewerChunks(legends: LegendsExport, htmlPath: string) {
     const outputPath = path.resolve(htmlPath);
     const recordsDir = path.join(path.dirname(outputPath), "records");
+    const textsDir = path.join(path.dirname(outputPath), "texts");
     const legendRecord = createLegendsViewerRecordSource(legends);
     const chapterIds = createLegendsViewerChapterIdMap(legends);
     fs.rmSync(recordsDir, {recursive: true, force: true});
+    fs.rmSync(textsDir, {recursive: true, force: true});
 
     for (let spec of legendsViewerKindSpecs) {
         const records = legendRecord[spec.key] ?? [];
         if (!records.length) continue;
 
         const kindDir = path.join(recordsDir, spec.kind);
+        const textKindDir = path.join(textsDir, spec.kind);
         for (let start = 0; start < records.length; start += legendsViewerChunkSize) {
             const chunkId = Math.floor(start / legendsViewerChunkSize);
             const stats: LegendsViewerTrimStats = new Map();
+            const textChunk: Record<string, LegendsViewerExternalText> = {};
             const chunk = records
                 .slice(start, start + legendsViewerChunkSize)
-                .map(record => sanitizeLegendsViewerValue(decorateLegendsViewerOwnerChapters(record, spec.kind, chapterIds), spec.key, stats));
+                .map(record => {
+                    const sanitized = sanitizeLegendsViewerValue(decorateLegendsViewerOwnerChapters(record, spec.kind, chapterIds), spec.key, stats) as LegendRecord;
+                    const extracted = extractLegendsViewerExternalText(sanitized);
+                    if (extracted.text) textChunk[String(extracted.record.id)] = extracted.text;
+                    return extracted.record;
+                });
             writeJsonPayload(path.join(kindDir, `${chunkId}.json`), chunk);
+            if (Object.keys(textChunk).length > 0) {
+                writeJsonPayload(path.join(textKindDir, `${chunkId}.json`), textChunk);
+            }
         }
     }
 
     console.log(`Wrote Legends record chunks to ${recordsDir}`);
+    console.log(`Wrote Legends text chunks to ${textsDir}`);
 }
 
 function writeLegendsViewerMentionIndexes(legends: LegendsExport, htmlPath: string) {
@@ -11789,8 +12718,9 @@ function countNestedEventIdLinks(simulation: CivilizationSimulation): number {
     return total;
 }
 
-function nestedEventIdLinkCounts(simulation: CivilizationSimulation): Record<string, number> {
+function nestedEventIdLinkStats(simulation: CivilizationSimulation): {total: number; counts: Record<string, number>} {
     const counts: Record<string, number> = {};
+    let overallTotal = 0;
     for (let [key, value] of Object.entries(simulation as unknown as Record<string, unknown>)) {
         if (!Array.isArray(value)) continue;
         let total = 0;
@@ -11799,9 +12729,12 @@ function nestedEventIdLinkCounts(simulation: CivilizationSimulation): Record<str
                 total += (item as {eventIds: unknown[]}).eventIds.length;
             }
         }
-        if (total > 0) counts[key] = total;
+        if (total > 0) {
+            counts[key] = total;
+            overallTotal += total;
+        }
     }
-    return counts;
+    return {total: overallTotal, counts};
 }
 
 function topRecordCounts(counts: Record<string, number>, limit = 16) {
@@ -11809,6 +12742,65 @@ function topRecordCounts(counts: Record<string, number>, limit = 16) {
         .map(([key, count]) => ({key, count}))
         .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
         .slice(0, limit);
+}
+
+function civilizationLifecycleProfile(simulation: CivilizationSimulation) {
+    const statusCounts: Record<string, number> = {};
+    const originKindCounts: Record<string, number> = {};
+    const collapseStageCounts: Record<string, number> = {};
+    const collapseFailureKindCounts: Record<string, number> = {};
+    const eventTypeCounts: Record<string, number> = {};
+    const successors = [];
+    const fallen = [];
+
+    for (let civilization of simulation.civilizations) {
+        statusCounts[civilization.status] = (statusCounts[civilization.status] ?? 0) + 1;
+        originKindCounts[civilization.originKind] = (originKindCounts[civilization.originKind] ?? 0) + 1;
+        const stageKey = String(civilization.collapseStage);
+        collapseStageCounts[stageKey] = (collapseStageCounts[stageKey] ?? 0) + 1;
+        for (let kind of civilization.collapseFailureKinds) {
+            collapseFailureKindCounts[kind] = (collapseFailureKindCounts[kind] ?? 0) + 1;
+        }
+        if (civilization.parentCivilizationId !== undefined || civilization.restoredCivilizationId !== undefined) {
+            successors.push({
+                id: civilization.id,
+                name: civilization.name,
+                status: civilization.status,
+                originKind: civilization.originKind,
+                foundedYear: civilization.foundedYear,
+                parentCivilizationId: civilization.parentCivilizationId,
+                restoredCivilizationId: civilization.restoredCivilizationId,
+                capitalSettlementId: civilization.capitalSettlementId,
+            });
+        }
+        if (civilization.status === "fallen") {
+            fallen.push({
+                id: civilization.id,
+                name: civilization.name,
+                originKind: civilization.originKind,
+                foundedYear: civilization.foundedYear,
+                fallenYear: civilization.fallenYear,
+                collapsePressure: civilization.collapsePressure,
+                collapseFailureKinds: civilization.collapseFailureKinds,
+            });
+        }
+    }
+    for (let event of simulation.legendEvents) {
+        if (!event.type.startsWith("civilization-")) continue;
+        eventTypeCounts[event.type] = (eventTypeCounts[event.type] ?? 0) + 1;
+    }
+
+    return {
+        statusCounts,
+        originKindCounts,
+        collapseStageCounts,
+        collapseFailureKindCounts,
+        eventTypeCounts,
+        successorCount: successors.length,
+        fallenCount: fallen.length,
+        successors: successors.sort((a, b) => a.foundedYear - b.foundedYear || a.id - b.id).slice(-24),
+        fallen: fallen.sort((a, b) => (a.fallenYear ?? 0) - (b.fallenYear ?? 0) || a.id - b.id).slice(-24),
+    };
 }
 
 function legendEventTypeCounts(simulation: CivilizationSimulation): Record<string, number> {
@@ -11843,56 +12835,57 @@ function namedLegendRefCacheEntries(simulation: CivilizationSimulation): number 
     return named;
 }
 
-function legendEventRefKindCounts(simulation: CivilizationSimulation): Record<string, number> {
-    const counts: Record<string, number> = {};
-    for (let event of simulation.legendEvents) {
-        for (let ref of event.entityRefs) {
-            counts[ref.kind] = (counts[ref.kind] ?? 0) + 1;
-        }
-    }
-    return counts;
-}
+function legendEventStats(simulation: CivilizationSimulation): {
+    entityRefs: number;
+    namedEntityRefs: number;
+    refLengthBuckets: Record<string, number>;
+    refKindCounts: Record<string, number>;
+    namedRefKindCounts: Record<string, number>;
+    eventTypeCounts: Record<string, number>;
+} {
+    const refLengthBuckets: Record<string, number> = {"0": 0, "1-2": 0, "3-4": 0, "5-8": 0, "9-16": 0, "17+": 0};
+    const refKindCounts: Record<string, number> = {};
+    const namedRefKindCounts: Record<string, number> = {};
+    const eventTypeCounts: Record<string, number> = {};
+    let entityRefs = 0;
+    let namedEntityRefs = 0;
 
-function legendEventNamedRefKindCounts(simulation: CivilizationSimulation): Record<string, number> {
-    const counts: Record<string, number> = {};
     for (let event of simulation.legendEvents) {
-        for (let ref of event.entityRefs) {
-            if (ref.name === undefined) continue;
-            counts[ref.kind] = (counts[ref.kind] ?? 0) + 1;
-        }
-    }
-    return counts;
-}
-
-function legendEventRefLengthBuckets(simulation: CivilizationSimulation): Record<string, number> {
-    const buckets: Record<string, number> = {"0": 0, "1-2": 0, "3-4": 0, "5-8": 0, "9-16": 0, "17+": 0};
-    for (let event of simulation.legendEvents) {
+        eventTypeCounts[event.type] = (eventTypeCounts[event.type] ?? 0) + 1;
         const count = event.entityRefs.length;
-        if (count === 0) buckets["0"]++;
-        else if (count <= 2) buckets["1-2"]++;
-        else if (count <= 4) buckets["3-4"]++;
-        else if (count <= 8) buckets["5-8"]++;
-        else if (count <= 16) buckets["9-16"]++;
-        else buckets["17+"]++;
+        entityRefs += count;
+        if (count === 0) refLengthBuckets["0"]++;
+        else if (count <= 2) refLengthBuckets["1-2"]++;
+        else if (count <= 4) refLengthBuckets["3-4"]++;
+        else if (count <= 8) refLengthBuckets["5-8"]++;
+        else if (count <= 16) refLengthBuckets["9-16"]++;
+        else refLengthBuckets["17+"]++;
+
+        for (let ref of event.entityRefs) {
+            refKindCounts[ref.kind] = (refKindCounts[ref.kind] ?? 0) + 1;
+            if (ref.name === undefined) continue;
+            namedEntityRefs++;
+            namedRefKindCounts[ref.kind] = (namedRefKindCounts[ref.kind] ?? 0) + 1;
+        }
     }
-    return buckets;
+
+    return {entityRefs, namedEntityRefs, refLengthBuckets, refKindCounts, namedRefKindCounts, eventTypeCounts};
 }
 
 function civilizationProfile(simulation: CivilizationSimulation) {
     const counts = civilizationArrayCounts(simulation);
-    const eventIdLinkCounts = nestedEventIdLinkCounts(simulation);
-    const eventTypeCounts = legendEventTypeCounts(simulation);
+    const eventIdLinkStats = nestedEventIdLinkStats(simulation);
+    const eventIdLinkCounts = eventIdLinkStats.counts;
+    const eventStats = legendEventStats(simulation);
     const memoryEventTypeCounts = memorySourceEventTypeCounts(simulation);
-    const refKindCounts = legendEventRefKindCounts(simulation);
-    const namedRefKindCounts = legendEventNamedRefKindCounts(simulation);
     const memory = process.memoryUsage();
     const aliveAgents = simulation.aliveAgentIds.length;
     const aliveAgentScanCount = simulation.agents.reduce((sum, agent) => sum + (agent.alive ? 1 : 0), 0);
-    const legendEventEntityRefs = simulation.legendEvents.reduce((sum, event) => sum + event.entityRefs.length, 0);
-    const legendEventNamedEntityRefs = simulation.legendEvents.reduce((sum, event) => sum + event.entityRefs.reduce((refSum, ref) => refSum + (ref.name === undefined ? 0 : 1), 0), 0);
+    const lifecycle = civilizationLifecycleProfile(simulation);
     return {
         year: simulation.year,
         civilizations: simulation.civilizations.length,
+        workerCount: simulation.workerCount,
         settlements: simulation.settlements.length,
         aliveAgents,
         aliveAgentScanCount,
@@ -11900,19 +12893,21 @@ function civilizationProfile(simulation: CivilizationSimulation) {
         totalAgents: simulation.agents.length,
         deadAgents: simulation.agents.length - aliveAgents,
         legendEvents: simulation.legendEvents.length,
-        legendEventEntityRefs,
-        legendEventNamedEntityRefs,
-        legendEventRefLengthBuckets: legendEventRefLengthBuckets(simulation),
-        topLegendEventRefKinds: topRecordCounts(refKindCounts, 24),
-        topLegendEventNamedRefKinds: topRecordCounts(namedRefKindCounts, 24),
+        legendEventEntityRefs: eventStats.entityRefs,
+        legendEventNamedEntityRefs: eventStats.namedEntityRefs,
+        legendEventRefLengthBuckets: eventStats.refLengthBuckets,
+        topLegendEventRefKinds: topRecordCounts(eventStats.refKindCounts, 24),
+        topLegendEventNamedRefKinds: topRecordCounts(eventStats.namedRefKindCounts, 24),
         legendRefCacheSize: simulation.legendRefCache.size,
         legendRefCacheNamedEntries: namedLegendRefCacheEntries(simulation),
         compactedLegendEvents: simulation.compactedLegendEventRefCursor,
-        nestedEventIdLinks: countNestedEventIdLinks(simulation),
+        spilledLegendEventTexts: simulation.spilledLegendEventTextCursor,
+        nestedEventIdLinks: eventIdLinkStats.total,
         eventIdLinkCounts,
         topEventIdLinkCounts: topRecordCounts(eventIdLinkCounts),
-        topLegendEventTypes: topRecordCounts(eventTypeCounts),
+        topLegendEventTypes: topRecordCounts(eventStats.eventTypeCounts),
         topMemorySourceEventTypes: topRecordCounts(memoryEventTypeCounts),
+        lifecycle,
         topPhaseTimings: topPhaseTimings(simulation),
         counts,
         topArrays: topCivilizationArrayCounts(counts),
@@ -11962,11 +12957,13 @@ function logCivilizationProgress(progress: CivilizationProgress, simulation: Civ
     console.log(
         `[year ${progress.year}/${progress.targetYears}] `
         + `elapsed ${formatDuration(progress.elapsedMs)}; `
+        + `workers ${progress.workerCount}; `
         + `agents ${progress.aliveAgents}/${progress.totalAgents} alive/total; `
         + `settlements ${progress.settlements}; roads ${progress.roads}; `
         + `events ${progress.events}; legendEvents ${progress.legendEvents}; `
         + `births ${progress.births}; deaths ${progress.deaths}; migrations ${progress.migrations}; `
         + (progress.compactedEventRefs > 0 ? `compactedEventRefs ${progress.compactedEventRefs}; ` : "")
+        + (progress.spilledEventTexts > 0 ? `spilledEventTexts ${progress.spilledEventTexts}; ` : "")
         + `records ${compactProgressRecordSummary(simulation)}; `
         + (compactPhaseTimingSummary(progress) ? `phases ${compactPhaseTimingSummary(progress)}; ` : "")
         + `heap ${formatMegabytes(memory.heapUsed)}/${formatMegabytes(memory.heapTotal)}; rss ${formatMegabytes(memory.rss)}`,
@@ -11993,6 +12990,7 @@ function writeCivilizationSnapshots(
         terrainSeed: defaultControlValues(world.controls).elevation.seed,
         civilizationSeed: options.civilizationSeed,
         years: options.civilizationYears,
+        civilizationWorkers: resolvedCivilizationWorkerCount(options),
         settlementClaimRadius: options.settlementClaimRadius ?? null,
         capitalClaimRadius: options.capitalClaimRadius ?? null,
         snapshotEvery: options.snapshotEvery,
@@ -12022,7 +13020,9 @@ function writeCivilizationSnapshots(
         const framePath = path.join(mapsDir, `year-${paddedYear(year)}.png`);
         if (capturedFrameYears.has(year) && fs.existsSync(framePath)) continue;
 
-        const frameSimulation = simulateCivilizations(world, civilizationOptions(options, year));
+        const frameSimulation = simulateCivilizations(world, civilizationOptions(options, year), {
+            workerCount: resolvedCivilizationWorkerCount(options),
+        });
         renderSnapshotFrame(world, options, frameSimulation, mapsDir);
     }
 
@@ -12045,11 +13045,17 @@ function main() {
     if (options.civilizations > 0) {
         const checkpointProfileDir = options.civilizationProfileDir ? path.resolve(options.civilizationProfileDir) : undefined;
         if (checkpointProfileDir) fs.mkdirSync(checkpointProfileDir, {recursive: true});
+        const workerCount = resolvedCivilizationWorkerCount(options);
         const runOptions: CivilizationRunOptions = {
+            workerCount,
             snapshotEvery: options.snapshotEvery,
             progressEvery: options.progressEvery,
             compactEventRefNamesAfter: options.compactEventRefNamesAfter,
             compactEventRefsEvery: options.compactEventRefsEvery,
+            spillEventTextAfter: options.spillEventTextAfter,
+            spillEventTextEvery: options.spillEventTextEvery,
+            legendEventTextSpillDir: options.spillEventTextDir,
+            legendEventTextCacheChunks: options.spillEventTextCacheChunks,
             compactNewLegendEventRefs: options.compactNewEventRefs,
             gcAfterCompaction: options.gcAfterCompaction,
             profilePhaseTimings: options.profileCivilizationPhases,
@@ -12072,7 +13078,7 @@ function main() {
             };
         }
 
-        console.log(`Advancing ${options.civilizations} civilizations for ${options.civilizationYears} years...`);
+        console.log(`Advancing ${options.civilizations} civilizations for ${options.civilizationYears} years with ${workerCount} civilization worker${workerCount === 1 ? "" : "s"}...`);
         civilizations = simulateCivilizations(world, civilizationOptions(options), runOptions);
     }
     console.log(`Rendering ${options.width}x${options.height} PNG...`);
