@@ -1,0 +1,18 @@
+{
+  "elevation": {
+    "seed": 187,
+    "island": 0.5
+  },
+  "biomes": {
+    "wind_angle_deg": 0,
+    "raininess": 0.9,
+    "rain_shadow": 0.5,
+    "evaporation": 0.5
+  },
+  "rivers": {
+    "flow": 0.2
+  },
+  "render": {
+    "biome_colors": 1
+  }
+}

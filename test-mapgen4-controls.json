@@ -1,0 +1,42 @@
+{
+  "elevation": {
+    "seed": 42,
+    "island": 0.5,
+    "noisy_coastlines": 0.01,
+    "hill_height": 0.02,
+    "mountain_jagged": 0,
+    "mountain_sharpness": 9.8,
+    "mountain_folds": 0.05,
+    "ocean_depth": 1.4
+  },
+  "biomes": {
+    "wind_angle_deg": 0,
+    "raininess": 0.9,
+    "rain_shadow": 0.5,
+    "evaporation": 0.5
+  },
+  "rivers": {
+    "lg_min_flow": 2.7,
+    "lg_river_width": -2.4,
+    "flow": 0.35
+  },
+  "render": {
+    "zoom": 0.20833333333333334,
+    "x": 500,
+    "y": 500,
+    "light_angle_deg": 80,
+    "slope": 2,
+    "flat": 2.5,
+    "ambient": 0.25,
+    "overhead": 30,
+    "tilt_deg": 0,
+    "rotate_deg": 0,
+    "mountain_height": 50,
+    "outline_depth": 1,
+    "outline_strength": 15,
+    "outline_threshold": 0,
+    "outline_coast": 0,
+    "outline_water": 13,
+    "biome_colors": 1
+  }
+}

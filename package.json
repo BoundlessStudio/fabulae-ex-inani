@@ -1,0 +1,34 @@
+{
+    "name": "world-mapgen-base",
+    "version": "0.1.0",
+    "private": true,
+    "type": "module",
+    "bin": {
+        "world-mapgen": "./dist/world-mapgen.cjs"
+    },
+    "scripts": {
+        "build": "node scripts/build-console.mjs",
+        "generate": "npm run build && node dist/world-mapgen.cjs",
+        "export:png": "npm run generate --",
+        "start": "node dist/world-mapgen.cjs",
+        "stress:500": "npm run build && node --expose-gc --max-old-space-size=12288 dist/world-mapgen.cjs --size 128 --controls simulation-controls.example.json --civilizations 5 --years 500 --civ-seed 77 --progress-every 100 --profile-civ-phases --gc-after-compaction --civ-profile-dir output/stress-probes/probe-500-profiles --civ-profile-json output/stress-probes/probe-500-final.json --out output/stress-probes/probe-500-final.png",
+        "serve:legends": "node scripts/serve-static.mjs",
+        "verify:legends": "node scripts/verify-legends.mjs",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "@redblobgames/prng": "https://github.com/redblobgames/prng",
+        "delaunator": "^5",
+        "fast-2d-poisson-disk-sampling": "^1",
+        "flatqueue": "^2",
+        "gl-matrix": "^3",
+        "pngjs": "^7.0.0",
+        "simplex-noise": "^4"
+    },
+    "devDependencies": {
+        "@types/node": "^26.0.1",
+        "@types/pngjs": "^6.0.5",
+        "esbuild": "^0.28.1",
+        "typescript": "^5.7.3"
+    }
+}

@@ -1,0 +1,8 @@
+/index.html
+build/
+dist/
+public/build/
+output/
+*.log
+node_modules/
+blog/
