@@ -7,7 +7,7 @@ const defaultCardsDir = "output/story-hook-report-cards/cards";
 const defaultOutputDir = "output/story-outlines";
 const defaultModel = process.env.OPENROUTER_MODEL || "openai/gpt-5.5";
 const defaultBaseUrl = process.env.OPENROUTER_BASE_URL || "https://openrouter.ai/api/v1";
-const defaultWritingRules = process.env.STORY_OUTLINE_WRITING_RULES || "writing-rules.md";
+const defaultWritingRules = process.env.STORY_OUTLINE_WRITING_RULES || "prompts/writing-rules.md";
 
 const promptSectionOrder = [
   "Writing Prompt Summary",

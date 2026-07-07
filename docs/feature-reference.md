@@ -256,7 +256,7 @@ If no filename is supplied, the outline script reads every `.md` report card in 
 node dist/world-mapgen.cjs outline-stories hook-000-character-garin-quaovars-unresolved-thread.md --cards-dir output/stress-probes/probe-500-story-hook-report-cards/cards --out output/story-outlines --overwrite
 ```
 
-The outline generator defaults to `openai/gpt-5.5`, uses the same OpenRouter environment variables as the report-card evaluator, and injects the writing rules from local `writing-rules.md` into the system prompt. Override that file with `--writing-rules <md>` or `STORY_OUTLINE_WRITING_RULES`. It writes one Markdown outline per report card under `outlines/`, plus `summary.md`, `index.md`, and `manifest.json`. Use `--provider mock` to test output shape without an API call.
+The outline generator defaults to `openai/gpt-5.5`, uses the same OpenRouter environment variables as the report-card evaluator, and injects the writing rules from local `prompts/writing-rules.md` into the system prompt. Override that file with `--writing-rules <md>` or `STORY_OUTLINE_WRITING_RULES`. It writes one Markdown outline per report card under `outlines/`, plus `summary.md`, `index.md`, and `manifest.json`. Use `--provider mock` to test output shape without an API call.
 
 Run the 500-year stress probe and then immediately evaluate story hooks:
 
