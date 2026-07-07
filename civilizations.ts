@@ -1769,9 +1769,59 @@ export type YearEvent = {
 };
 
 export type LegendEntityRef = {
-    kind: "civilization" | "settlement" | "settlement-control" | "natural-feature" | "person" | "person-allegiance" | "preference" | "tradition" | "epithet" | "reputation-milestone" | "artifact" | "artifact-condition" | "chronicle" | "written-work" | "memory" | "thought" | "personality-shift" | "need-episode" | "opinion" | "social-claim" | "conversation" | "rumor" | "secret" | "scheme" | "feud" | "oath" | "ceremony" | "ceremony-participation" | "activity" | "teaching" | "project" | "project-participation" | "obligation" | "holding" | "belonging" | "possession-attachment" | "estate" | "residence" | "career" | "organization" | "membership" | "organization-rank" | "relationship" | "relationship-milestone" | "union" | "belief" | "belief-adherence" | "god" | "commandment" | "destiny" | "miracle" | "myth" | "doctrine" | "magic-role" | "prophecy" | "civilization-goal" | "sacred-site" | "office" | "office-term" | "law" | "case" | "testimony" | "conflict" | "battle" | "battle-participation" | "military-unit" | "equipment-cache" | "spy-network" | "spy-operation" | "injury" | "illness" | "care-record" | "wound-legacy" | "memorial" | "burial" | "death-record" | "birth" | "age-milestone" | "appearance-feature" | "ambition" | "apprenticeship" | "skill" | "structure" | "journey" | "road" | "household" | "lineage" | "event";
+    kind: "civilization" | "settlement" | "settlement-control" | "natural-feature" | "person" | "person-allegiance" | "preference" | "tradition" | "epithet" | "reputation-milestone" | "artifact" | "artifact-condition" | "chronicle" | "written-work" | "memory" | "thought" | "personality-shift" | "need-episode" | "opinion" | "social-claim" | "conversation" | "rumor" | "secret" | "scheme" | "feud" | "oath" | "ceremony" | "ceremony-participation" | "activity" | "teaching" | "project" | "project-participation" | "obligation" | "holding" | "belonging" | "possession-attachment" | "estate" | "residence" | "career" | "organization" | "membership" | "organization-rank" | "relationship" | "relationship-milestone" | "union" | "belief" | "belief-adherence" | "god" | "commandment" | "destiny" | "miracle" | "myth" | "doctrine" | "magic-role" | "prophecy" | "civilization-goal" | "sacred-site" | "office" | "office-term" | "law" | "case" | "testimony" | "conflict" | "battle" | "battle-participation" | "military-unit" | "equipment-cache" | "spy-network" | "spy-operation" | "injury" | "illness" | "care-record" | "wound-legacy" | "memorial" | "burial" | "death-record" | "birth" | "age-milestone" | "appearance-feature" | "ambition" | "apprenticeship" | "skill" | "structure" | "journey" | "road" | "household" | "lineage" | "story-hook" | "event";
     id: number;
     name?: string;
+};
+
+export type StoryHookKind =
+    | "character"
+    | "place"
+    | "artifact"
+    | "conflict"
+    | "mystery"
+    | "prophecy"
+    | "relationship"
+    | "legacy";
+
+export type StoryHookTone =
+    | "adventure"
+    | "intrigue"
+    | "tragedy"
+    | "wonder"
+    | "recovery"
+    | "war"
+    | "religious"
+    | "domestic";
+
+export type StoryHook = {
+    id: number;
+    name: string;
+    kind: StoryHookKind;
+    tone: StoryHookTone;
+    year: number;
+    score: number;
+    urgency: number;
+    civilizationId?: number;
+    settlementId?: number;
+    personId?: number;
+    artifactId?: number;
+    battleId?: number;
+    conflictId?: number;
+    beliefId?: number;
+    godId?: number;
+    prophecyId?: number;
+    relationshipId?: number;
+    secretId?: number;
+    feudId?: number;
+    oathId?: number;
+    eventId?: number;
+    seedRefs: LegendEntityRef[];
+    prompt: string;
+    stakes: string;
+    complication: string;
+    suggestedFocus: string;
+    eventIds: number[];
 };
 
 export type SkillRecord = {
@@ -2994,6 +3044,11 @@ export type LegendsExport = {
     householdCount: number;
     lineageCount: number;
     eventCount: number;
+    storyHookCount: number;
+    storyHooks: Array<StoryHook & {
+        subjectRefs: LegendEntityRef[];
+        description: string;
+    }>;
     civilizations: Array<{
         id: number;
         name: string;
@@ -4938,6 +4993,7 @@ export type CivilizationSimulation = {
     residences: ResidenceRecord[];
     careers: CareerRecord[];
     roads: Road[];
+    storyHooks: StoryHook[];
     history: CivilizationYearSnapshot[];
     events: YearEvent[];
     legendEvents: LegendEvent[];
@@ -5045,6 +5101,7 @@ export type CivilizationSummary = {
     structureCount: number;
     householdCount: number;
     lineageCount: number;
+    storyHookCount: number;
     claimedTriangles: number;
     claimedRegions: number;
     civilizations: Array<{
@@ -9667,7 +9724,7 @@ function applyAnnualAgentProfessionDraft(agent: Agent, simulation: CivilizationS
         const professionEventId = recordLegendEvent(simulation, {
             year: simulation.year,
             type: "profession-changed",
-            headline: `${agent.name} became a ${agent.profession}.`,
+            headline: `${agent.name} became ${indefiniteArticle(agent.profession)} ${agent.profession}.`,
             description: `${agent.name} changed profession from ${previousProfession} to ${agent.profession} in ${simulation.settlements[agent.settlementId]?.name ?? "an unknown settlement"}.`,
             civilizationId: agent.civilizationId,
             settlementId: agent.settlementId,
@@ -11120,6 +11177,10 @@ function roadRef(simulation: CivilizationSimulation, id: number): LegendEntityRe
     return {kind: "road", id, name: roadLegendName(simulation, id)};
 }
 
+function storyHookRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
+    return {kind: "story-hook", id, name: simulation.storyHooks[id]?.name ?? `Story Hook ${id}`};
+}
+
 function structureRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
     return {kind: "structure", id, name: simulation.structures[id]?.name ?? `Structure ${id}`};
 }
@@ -11236,6 +11297,7 @@ function legendRefName(simulation: CivilizationSimulation, ref: LegendEntityRef)
     if (ref.kind === "road") return roadLegendName(simulation, ref.id);
     if (ref.kind === "household") return simulation.households[ref.id]?.name ?? `Household ${ref.id}`;
     if (ref.kind === "lineage") return simulation.lineages[ref.id]?.name ?? `Lineage ${ref.id}`;
+    if (ref.kind === "story-hook") return simulation.storyHooks[ref.id]?.name ?? `Story Hook ${ref.id}`;
     if (ref.kind === "event") {
         const event = simulation.legendEvents[ref.id];
         return event ? `${event.year}: ${legendEventHeadline(event)}` : `Event ${ref.id}`;
@@ -11553,6 +11615,24 @@ function uniqueNumberList(values: number[], limit = values.length): number[] {
     return result;
 }
 
+function indefiniteArticle(text: string): "a" | "an" {
+    const value = text.trim().toLowerCase();
+    if (/^(honest|honor|hour|heir)\b/.test(value)) return "an";
+    if (/^(one|once|user|unit|union|university|useful|euro)\b/.test(value)) return "a";
+    return /^[aeiou]/.test(value) ? "an" : "a";
+}
+
+function sentenceFragment(text: string): string {
+    return text.trim().replace(/[.!?]+$/, "");
+}
+
+function proseList(values: string[], fallback = "the record"): string {
+    if (values.length === 0) return fallback;
+    if (values.length === 1) return values[0];
+    if (values.length === 2) return `${values[0]} and ${values[1]}`;
+    return `${values.slice(0, -1).join(", ")}, and ${values[values.length - 1]}`;
+}
+
 function createThought(
     simulation: CivilizationSimulation,
     agent: Agent,
@@ -11631,7 +11711,7 @@ function createThoughtForMemory(simulation: CivilizationSimulation, memory: Memo
     if (hashFloat(simulation.options.seed, memory.id, agent.id, 4019) > chance) return;
     const tone = thoughtToneForMemory(memory.emotion);
     const intensity = clamp(memory.intensity + (primary ? 0.08 : 0) + hashFloat(simulation.options.seed, memory.id, agent.id, 4021) * 0.05, 0.05, 1);
-    const headline = legendEventHeadline(event);
+    const headline = sentenceFragment(legendEventHeadline(event));
     createThought(simulation, agent, {
         kind: thoughtKindForMemory(event),
         tone,
@@ -12182,8 +12262,8 @@ function createSocialClaimForOpinion(simulation: CivilizationSimulation, memory:
         intensity,
         subjectRefs,
         description: kind === "favor"
-            ? `${agent.name} believed ${target.name} was owed favor after ${legendEventHeadline(event)}.`
-            : `${agent.name} nursed a grudge against ${target.name} after ${legendEventHeadline(event)}.`,
+            ? `${agent.name} believed ${target.name} was owed favor after ${sentenceFragment(legendEventHeadline(event))}.`
+            : `${agent.name} nursed a grudge against ${target.name} after ${sentenceFragment(legendEventHeadline(event))}.`,
         eventIds: [],
     };
     simulation.socialClaims.push(claim);
@@ -12191,7 +12271,7 @@ function createSocialClaimForOpinion(simulation: CivilizationSimulation, memory:
     const eventId = recordLegendEvent(simulation, {
         year: memory.year,
         type: "social-claim-formed",
-        headline: `${agent.name} held a ${kind} toward ${target.name}.`,
+        headline: `${agent.name} held ${indefiniteArticle(kind)} ${kind} toward ${target.name}.`,
         description: `${claim.description} Intensity ${claim.intensity}.`,
         civilizationId: claim.civilizationId,
         settlementId: claim.settlementId,
@@ -12548,7 +12628,7 @@ function createMemoryForEvent(simulation: CivilizationSimulation, event: LegendE
 
     const id = simulation.memories.length;
     const subjects = uniqueLegendRefs(event.entityRefs.filter(ref => ref.kind !== "memory"), 14);
-    const headline = legendEventHeadline(event);
+    const headline = sentenceFragment(legendEventHeadline(event));
     const description = `${agent.name} remembered ${headline} with ${emotion} in year ${event.year}.`;
     const memory: Memory = {
         id,
@@ -13428,7 +13508,7 @@ function startCareer(
         officeId: office?.id,
         startEventId,
         subjectRefs,
-        description: `${agent.name} began life as ${profession === "child" ? "a child" : `a ${profession}`} in ${settlement.name}${structure ? ` at ${structure.name}` : ""}.`,
+        description: `${agent.name} began life as ${profession === "child" ? "a child" : `${indefiniteArticle(profession)} ${profession}`} in ${settlement.name}${structure ? ` at ${structure.name}` : ""}.`,
         eventIds: [startEventId],
     };
     simulation.careers.push(career);
@@ -15116,7 +15196,34 @@ function feudSidesForEvent(simulation: CivilizationSimulation, settlement: Settl
 }
 
 function feudName(kind: FeudKind, sideA: Agent[], sideB: Agent[]): string {
-    return `${feudKindLabel(kind)} feud of ${sideA[0]?.name ?? "one side"} and ${sideB[0]?.name ?? "the other side"}`;
+    return `${feudKindLabel(kind)} feud of ${feudSideLeadName(sideA, sideB, "one side")} and ${feudSideLeadName(sideB, sideA, "the other side")}`;
+}
+
+function normalizeFeudSides(sides: {sideA: Agent[]; sideB: Agent[]}): {sideA: Agent[]; sideB: Agent[]} | undefined {
+    const sideA = uniqueAgents(sides.sideA, 4);
+    const sideAIds = new Set(sideA.map(agent => agent.id));
+    const sideB = uniqueAgents(sides.sideB.filter(agent => !sideAIds.has(agent.id)), 4);
+    if (sideA.length === 0 || sideB.length === 0) return undefined;
+    return {sideA, sideB};
+}
+
+function feudSideLeadName(side: Agent[], opposingSide: Agent[], fallback: string): string {
+    const opposingNames = new Set(opposingSide.map(agent => agent.name));
+    const distinctLead = side.find(agent => !opposingNames.has(agent.name));
+    if (distinctLead) return distinctLead.name;
+    return side[0] ? `${side[0].name}'s side` : fallback;
+}
+
+function feudSideDescription(side: Agent[], opposingSide: Agent[], fallback: string): string {
+    const opposingNames = new Set(opposingSide.map(agent => agent.name));
+    const names: string[] = [];
+    for (let agent of side) {
+        if (names.includes(agent.name)) continue;
+        if (opposingNames.has(agent.name)) continue;
+        names.push(agent.name);
+    }
+    if (names.length > 0) return proseList(names, fallback);
+    return side[0] ? `${side[0].name}'s side` : fallback;
 }
 
 function addFeudIdToAgent(agent: Agent | undefined, feudId: number) {
@@ -15151,7 +15258,7 @@ function createFeud(simulation: CivilizationSimulation, settlement: Settlement, 
     if (simulation.feuds.some(feud => feud.sourceEventId === sourceEvent.id)) return undefined;
     const kind = feudKindForEvent(sourceEvent, simulation);
     if (!kind) return undefined;
-    const sides = feudSidesForEvent(simulation, settlement, agents, sourceEvent);
+    const sides = normalizeFeudSides(feudSidesForEvent(simulation, settlement, agents, sourceEvent) ?? {sideA: [], sideB: []});
     if (!sides || activeFeudBetween(simulation, sides.sideA, sides.sideB)) return undefined;
     const allSideAgents = [...sides.sideA, ...sides.sideB];
     const {householdIds, lineageIds} = householdAndLineageIdsForFeud(allSideAgents);
@@ -15162,6 +15269,8 @@ function createFeud(simulation: CivilizationSimulation, settlement: Settlement, 
     const score = feudEventScore(sourceEvent, simulation);
     const id = simulation.feuds.length;
     const severity = Math.round(clamp(0.22 + score * 0.09 + hashFloat(simulation.options.seed, sourceEvent.id, id, 2027) * 0.12, 0.18, 1) * 1000) / 1000;
+    const sideADescription = feudSideDescription(sides.sideA, sides.sideB, "one side");
+    const sideBDescription = feudSideDescription(sides.sideB, sides.sideA, "the other side");
     const feud: Feud = {
         id,
         name: feudName(kind, sides.sideA, sides.sideB),
@@ -15177,7 +15286,7 @@ function createFeud(simulation: CivilizationSimulation, settlement: Settlement, 
         householdIds,
         lineageIds,
         subjectRefs,
-        description: `${sides.sideA.map(agent => agent.name).join(", ")} entered a ${kind} feud with ${sides.sideB.map(agent => agent.name).join(", ")} after ${legendEventHeadline(sourceEvent)}`,
+        description: `${sideADescription} entered ${indefiniteArticle(kind)} ${kind} feud with ${sideBDescription} after ${sentenceFragment(legendEventHeadline(sourceEvent))}.`,
         eventIds: [],
     };
     simulation.feuds.push(feud);
@@ -15488,7 +15597,7 @@ function createOath(simulation: CivilizationSimulation, settlement: Settlement, 
         sourceEventId: sourceEvent.id,
         strength,
         subjectRefs,
-        description: `${swearer.name} swore a ${kind} oath after ${legendEventHeadline(sourceEvent)}`,
+        description: `${swearer.name} swore ${indefiniteArticle(kind)} ${kind} oath after ${sentenceFragment(legendEventHeadline(sourceEvent))}.`,
         eventIds: [],
     };
     simulation.oaths.push(oath);
@@ -28717,6 +28826,837 @@ function uniqueLegendRefs(refs: LegendEntityRef[], limit = 12): LegendEntityRef[
     return unique;
 }
 
+type StoryHookCandidate = Omit<StoryHook, "id">;
+
+const maxStoryHooks = 120;
+
+function roundedHookScore(value: number): number {
+    return Math.round(value * 1000) / 1000;
+}
+
+function hookEventIds(records: Array<{eventIds?: number[]; sourceEventId?: number; resolvedEventId?: number; revealedEventId?: number; startedEventId?: number; endedEventId?: number; startEventId?: number; endEventId?: number; settledEventId?: number}>, limit = 12): number[] {
+    const ids: number[] = [];
+    for (let record of records) {
+        ids.push(record.sourceEventId, record.resolvedEventId, record.revealedEventId, record.startedEventId, record.endedEventId, record.startEventId, record.endEventId, record.settledEventId);
+        ids.push(...(record.eventIds ?? []));
+    }
+    return uniqueNumberList(ids.filter((id): id is number => id !== undefined && id >= 0).sort((a, b) => b - a), limit);
+}
+
+function hookLatestEventYear(simulation: CivilizationSimulation, eventIds: number[], fallback: number): number {
+    let year = fallback;
+    for (let eventId of eventIds) {
+        const event = simulation.legendEvents[eventId];
+        if (event) year = Math.max(year, event.year);
+    }
+    return year;
+}
+
+function hookRecency(simulation: CivilizationSimulation, eventIds: number[]): number {
+    const latest = hookLatestEventYear(simulation, eventIds, 0);
+    return clamp(1 - (simulation.year - latest) / Math.max(1, simulation.year + 20), 0, 1);
+}
+
+function hookRefNames(simulation: CivilizationSimulation, refs: LegendEntityRef[], limit = 4): string {
+    const names: string[] = [];
+    const seenNames = new Set<string>();
+    for (let ref of uniqueLegendRefs(refs, refs.length)) {
+        const name = legendRefName(simulation, ref);
+        const key = name.toLowerCase();
+        if (seenNames.has(key)) continue;
+        seenNames.add(key);
+        names.push(name);
+        if (names.length >= limit) break;
+    }
+    if (names.length === 0) return "the record";
+    if (names.length === 1) return names[0];
+    if (names.length === 2) return `${names[0]} and ${names[1]}`;
+    return `${names.slice(0, -1).join(", ")}, and ${names[names.length - 1]}`;
+}
+
+function hookArticle(text: string): "a" | "an" {
+    return indefiniteArticle(text);
+}
+
+function hookList(parts: Array<string | undefined | false>, fallback = "the record"): string {
+    const values = parts.filter((part): part is string => Boolean(part));
+    if (values.length === 0) return fallback;
+    if (values.length === 1) return values[0];
+    if (values.length === 2) return `${values[0]} and ${values[1]}`;
+    return `${values.slice(0, -1).join(", ")}, and ${values[values.length - 1]}`;
+}
+
+function hookCount(count: number, singular: string, plural = `${singular}s`): string {
+    return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function hookCountList(entries: Array<[number, string, string?]>, fallback: string): string {
+    return hookList(entries
+        .filter(([count]) => count > 0)
+        .map(([count, singular, plural]) => hookCount(count, singular, plural)), fallback);
+}
+
+type DramaManagerIndexes = {
+    battlesBySettlement: Map<number, Battle[]>;
+    battlesByCapturedArtifact: Map<number, Battle[]>;
+    secretsBySettlement: Map<number, Secret[]>;
+    activeFeudsBySettlement: Map<number, Feud[]>;
+    propheciesBySettlement: Map<number, Prophecy[]>;
+    artifactsBySettlement: Map<number, Artifact[]>;
+    secretsByAgent: Map<number, Secret[]>;
+    feudsByAgent: Map<number, Feud[]>;
+    oathsByAgent: Map<number, Oath[]>;
+    secretsByArtifact: Map<number, Secret[]>;
+    oathsByArtifact: Map<number, Oath[]>;
+    propheciesByArtifact: Map<number, Prophecy[]>;
+    schemesBySecret: Map<number, Scheme[]>;
+    rumorsBySecret: Map<number, Rumor[]>;
+    oathsByFeud: Map<number, Oath[]>;
+};
+
+function pushIndexedRecord<T>(index: Map<number, T[]>, key: number | undefined, record: T) {
+    if (key === undefined || key < 0) return;
+    const bucket = index.get(key);
+    if (bucket) bucket.push(record);
+    else index.set(key, [record]);
+}
+
+function pushSubjectRefIndexedRecord<T extends {subjectRefs: LegendEntityRef[]}>(
+    index: Map<number, T[]>,
+    record: T,
+    kind: LegendEntityRef["kind"],
+) {
+    for (let ref of record.subjectRefs) {
+        if (ref.kind === kind) pushIndexedRecord(index, ref.id, record);
+    }
+}
+
+function uniqueRecordsById<T extends {id: number}>(records: Iterable<T>): T[] {
+    const seen = new Set<number>();
+    const unique: T[] = [];
+    for (let record of records) {
+        if (seen.has(record.id)) continue;
+        seen.add(record.id);
+        unique.push(record);
+    }
+    return unique;
+}
+
+function indexedRecordsForKey<T extends {id: number}>(index: Map<number, T[]>, key: number | undefined): T[] {
+    if (key === undefined || key < 0) return [];
+    return uniqueRecordsById(index.get(key) ?? []);
+}
+
+function indexedRecordsForKeys<T extends {id: number}>(index: Map<number, T[]>, keys: Iterable<number>): T[] {
+    const seen = new Set<number>();
+    const unique: T[] = [];
+    for (let key of keys) {
+        if (key < 0) continue;
+        for (let record of index.get(key) ?? []) {
+            if (seen.has(record.id)) continue;
+            seen.add(record.id);
+            unique.push(record);
+        }
+    }
+    return unique;
+}
+
+function createDramaManagerIndexes(simulation: CivilizationSimulation): DramaManagerIndexes {
+    const indexes: DramaManagerIndexes = {
+        battlesBySettlement: new Map(),
+        battlesByCapturedArtifact: new Map(),
+        secretsBySettlement: new Map(),
+        activeFeudsBySettlement: new Map(),
+        propheciesBySettlement: new Map(),
+        artifactsBySettlement: new Map(),
+        secretsByAgent: new Map(),
+        feudsByAgent: new Map(),
+        oathsByAgent: new Map(),
+        secretsByArtifact: new Map(),
+        oathsByArtifact: new Map(),
+        propheciesByArtifact: new Map(),
+        schemesBySecret: new Map(),
+        rumorsBySecret: new Map(),
+        oathsByFeud: new Map(),
+    };
+
+    for (let battle of simulation.battles) {
+        pushIndexedRecord(indexes.battlesBySettlement, battle.settlementId, battle);
+        for (let artifactId of battle.capturedArtifactIds) {
+            pushIndexedRecord(indexes.battlesByCapturedArtifact, artifactId, battle);
+        }
+    }
+
+    for (let secret of simulation.secrets) {
+        pushIndexedRecord(indexes.secretsBySettlement, secret.settlementId, secret);
+        for (let agentId of secret.keeperAgentIds) pushIndexedRecord(indexes.secretsByAgent, agentId, secret);
+        pushSubjectRefIndexedRecord(indexes.secretsByArtifact, secret, "artifact");
+    }
+    for (let agent of simulation.agents) {
+        for (let secretId of agent.secretIds) {
+            const secret = simulation.secrets[secretId];
+            if (secret) pushIndexedRecord(indexes.secretsByAgent, agent.id, secret);
+        }
+    }
+
+    for (let feud of simulation.feuds) {
+        if (feud.status === "active") pushIndexedRecord(indexes.activeFeudsBySettlement, feud.settlementId, feud);
+        for (let agentId of feud.sideAAgentIds) pushIndexedRecord(indexes.feudsByAgent, agentId, feud);
+        for (let agentId of feud.sideBAgentIds) pushIndexedRecord(indexes.feudsByAgent, agentId, feud);
+    }
+
+    for (let oath of simulation.oaths) {
+        pushIndexedRecord(indexes.oathsByAgent, oath.swearerAgentId, oath);
+        pushIndexedRecord(indexes.oathsByAgent, oath.targetAgentId, oath);
+        for (let agentId of oath.witnessAgentIds) pushIndexedRecord(indexes.oathsByAgent, agentId, oath);
+        pushIndexedRecord(indexes.oathsByArtifact, oath.targetArtifactId, oath);
+        pushSubjectRefIndexedRecord(indexes.oathsByArtifact, oath, "artifact");
+        pushIndexedRecord(indexes.oathsByFeud, oath.targetFeudId, oath);
+        pushSubjectRefIndexedRecord(indexes.oathsByFeud, oath, "feud");
+    }
+
+    for (let prophecy of simulation.prophecies) {
+        pushIndexedRecord(indexes.propheciesBySettlement, prophecy.settlementId, prophecy);
+        pushIndexedRecord(indexes.propheciesBySettlement, prophecy.targetSettlementId, prophecy);
+        pushIndexedRecord(indexes.propheciesByArtifact, prophecy.targetArtifactId, prophecy);
+        pushSubjectRefIndexedRecord(indexes.propheciesByArtifact, prophecy, "artifact");
+    }
+
+    for (let artifact of simulation.artifacts) {
+        pushIndexedRecord(indexes.artifactsBySettlement, artifact.ownerSettlementId, artifact);
+        pushIndexedRecord(indexes.artifactsBySettlement, artifact.settlementId, artifact);
+    }
+
+    for (let scheme of simulation.schemes) {
+        pushIndexedRecord(indexes.schemesBySecret, scheme.targetSecretId, scheme);
+        pushSubjectRefIndexedRecord(indexes.schemesBySecret, scheme, "secret");
+    }
+
+    for (let rumor of simulation.rumors) {
+        pushSubjectRefIndexedRecord(indexes.rumorsBySecret, rumor, "secret");
+    }
+
+    return indexes;
+}
+
+function hookFromCandidate(candidate: StoryHookCandidate, id: number): StoryHook {
+    return {
+        ...candidate,
+        id,
+        score: roundedHookScore(candidate.score),
+        urgency: roundedHookScore(clamp(candidate.urgency, 0, 1)),
+        eventIds: uniqueNumberList(candidate.eventIds, 14),
+        seedRefs: uniqueLegendRefs(candidate.seedRefs, 18),
+    };
+}
+
+function storyHookKey(candidate: StoryHookCandidate): string {
+    const primary = candidate.personId !== undefined ? `person:${candidate.personId}`
+        : candidate.artifactId !== undefined ? `artifact:${candidate.artifactId}`
+        : candidate.battleId !== undefined ? `battle:${candidate.battleId}`
+        : candidate.conflictId !== undefined ? `conflict:${candidate.conflictId}`
+        : candidate.prophecyId !== undefined ? `prophecy:${candidate.prophecyId}`
+        : candidate.relationshipId !== undefined ? `relationship:${candidate.relationshipId}`
+        : candidate.secretId !== undefined ? `secret:${candidate.secretId}`
+        : candidate.feudId !== undefined ? `feud:${candidate.feudId}`
+        : candidate.oathId !== undefined ? `oath:${candidate.oathId}`
+        : candidate.settlementId !== undefined ? `settlement:${candidate.settlementId}`
+        : candidate.godId !== undefined ? `god:${candidate.godId}`
+        : `event:${candidate.eventId ?? candidate.name}`;
+    return `${candidate.kind}:${primary}`;
+}
+
+function addStoryHookCandidate(candidates: StoryHookCandidate[], candidate: StoryHookCandidate) {
+    candidates.push({
+        ...candidate,
+        score: roundedHookScore(candidate.score),
+        urgency: roundedHookScore(clamp(candidate.urgency, 0, 1)),
+        seedRefs: uniqueLegendRefs(candidate.seedRefs, 18),
+        eventIds: uniqueNumberList(candidate.eventIds, 14),
+    });
+}
+
+function dramaManagerCharacterHooks(simulation: CivilizationSimulation, candidates: StoryHookCandidate[]) {
+    const people = simulation.agents
+        .map(agent => {
+            const secrecy = agent.secretIds.length + agent.schemeIds.length + agent.feudIds.length + agent.oathIds.length;
+            const mythic = agent.magicRoleIds.length + agent.beliefAdherenceIds.length + agent.ambitionIds.length;
+            const wounds = agent.injuryIds.length + agent.illnessIds.length + agent.woundLegacyIds.length;
+            const social = agent.socialBondIds.length + agent.relationshipMilestoneIds.length + agent.socialClaimIds.length;
+            const events = hookEventIds([
+                agent,
+                ...agent.secretIds.map(id => simulation.secrets[id]).filter(Boolean),
+                ...agent.schemeIds.map(id => simulation.schemes[id]).filter(Boolean),
+                ...agent.feudIds.map(id => simulation.feuds[id]).filter(Boolean),
+                ...agent.oathIds.map(id => simulation.oaths[id]).filter(Boolean),
+            ], 14);
+            const score = agent.reputation * 3.2
+                + agent.stress * 1.4
+                + social * 0.12
+                + secrecy * 0.34
+                + mythic * 0.28
+                + agent.battleIds.length * 0.3
+                + wounds * 0.18
+                + (agent.alive ? 0.45 : 0)
+                + hookRecency(simulation, events);
+            return {agent, events, score, secrecy, mythic, social};
+        })
+        .filter(entry => entry.score >= 1.2)
+        .sort((a, b) => b.score - a.score || a.agent.id - b.agent.id)
+        .slice(0, 28);
+
+    for (let entry of people) {
+        const {agent, events} = entry;
+        const settlement = simulation.settlements[agent.settlementId];
+        const civ = simulation.civilizations[agent.civilizationId];
+        const hooks = [
+            personRef(simulation, agent.id),
+            settlement ? settlementRef(simulation, settlement.id) : undefined,
+            civ ? civilizationRef(simulation, civ.id) : undefined,
+            ...agent.magicRoleIds.slice(0, 2).map(id => magicRoleRef(simulation, id)),
+            ...agent.secretIds.slice(0, 2).map(id => secretRef(simulation, id)),
+            ...agent.feudIds.slice(0, 2).map(id => feudRef(simulation, id)),
+            ...agent.oathIds.slice(0, 2).map(id => oathRef(simulation, id)),
+            ...agent.battleIds.slice(0, 2).map(id => battleRef(simulation, id)),
+        ].filter((ref): ref is LegendEntityRef => Boolean(ref));
+        const hiddenThread = agent.secretIds.length > 0 ? ` A hidden matter such as ${hookRefNames(simulation, agent.secretIds.slice(0, 2).map(id => secretRef(simulation, id)))} gives the hook a private pressure point.` : "";
+        const characterSignals = hookCountList([
+            [entry.social, "social link"],
+            [agent.battleIds.length, "battle"],
+            [agent.secretIds.length, "secret"],
+            [agent.feudIds.length, "feud"],
+            [agent.oathIds.length, "oath"],
+            [agent.magicRoleIds.length, "magic role"],
+        ], "their public role and recent choices");
+        const characterStakes = hookList([
+            "change local trust",
+            agent.secretIds.length ? "surface a secret" : undefined,
+            agent.feudIds.length ? "reopen a feud" : undefined,
+            agent.oathIds.length ? "test a sworn obligation" : undefined,
+            agent.battleIds.length ? "bring old battlefield claims back into view" : undefined,
+        ]);
+        addStoryHookCandidate(candidates, {
+            name: `${agent.name}'s unresolved thread`,
+            kind: "character",
+            tone: agent.secretIds.length || agent.schemeIds.length ? "intrigue" : agent.battleIds.length ? "war" : agent.stress > 0.7 ? "tragedy" : "domestic",
+            year: hookLatestEventYear(simulation, events, simulation.year),
+            score: entry.score,
+            urgency: clamp(agent.stress * 0.55 + (agent.alive ? 0.25 : 0.05) + agent.schemeIds.length * 0.08 + agent.feudIds.length * 0.07, 0, 1),
+            civilizationId: agent.civilizationId,
+            settlementId: agent.settlementId,
+            personId: agent.id,
+            eventId: events[0],
+            seedRefs: hooks,
+            prompt: `${agent.name} is ${hookArticle(agent.profession)} ${agent.profession} of ${settlement?.name ?? "an unsettled place"} with ${characterSignals}.${hiddenThread}`,
+            stakes: `Pressure around ${agent.name} can ${characterStakes} for ${civ?.name ?? "their people"}.`,
+            complication: `${agent.name}'s current profile is stress ${roundedHookScore(agent.stress)} and reputation ${roundedHookScore(agent.reputation)}; linked records include ${characterSignals}.`,
+            suggestedFocus: `Start with ${agent.name}, then follow ${hookRefNames(simulation, hooks.filter(ref => ref.kind !== "person"), 4)}.`,
+            eventIds: events,
+        });
+    }
+}
+
+function dramaManagerPlaceHooks(simulation: CivilizationSimulation, candidates: StoryHookCandidate[], indexes: DramaManagerIndexes) {
+    const settlements = simulation.settlements
+        .map(settlement => {
+            const battles = indexedRecordsForKey(indexes.battlesBySettlement, settlement.id);
+            const secrets = indexedRecordsForKey(indexes.secretsBySettlement, settlement.id);
+            const feuds = indexedRecordsForKey(indexes.activeFeudsBySettlement, settlement.id);
+            const prophecies = indexedRecordsForKey(indexes.propheciesBySettlement, settlement.id);
+            const artifacts = indexedRecordsForKey(indexes.artifactsBySettlement, settlement.id);
+            const controls = settlement.controlIds.map(id => simulation.settlementControls[id]).filter(Boolean);
+            const events = hookEventIds([settlement, ...battles, ...secrets, ...feuds, ...prophecies, ...artifacts, ...controls], 14);
+            const score = Math.min(3, settlement.population / 18)
+                + settlement.unrest * 1.6
+                + battles.length * 0.38
+                + secrets.length * 0.18
+                + feuds.length * 0.42
+                + prophecies.length * 0.28
+                + artifacts.length * 0.12
+                + controls.length * 0.14
+                + hookRecency(simulation, events);
+            return {settlement, battles, secrets, feuds, prophecies, artifacts, controls, events, score};
+        })
+        .filter(entry => entry.score >= 1.8)
+        .sort((a, b) => b.score - a.score || a.settlement.id - b.settlement.id)
+        .slice(0, 24);
+
+    for (let entry of settlements) {
+        const {settlement, battles, secrets, feuds, prophecies, artifacts, controls, events} = entry;
+        const civ = simulation.civilizations[settlement.civilizationId];
+        const refs = [
+            settlementRef(simulation, settlement.id),
+            civilizationRef(simulation, settlement.civilizationId),
+            ...battles.slice(0, 3).map(battle => battleRef(simulation, battle.id)),
+            ...secrets.slice(0, 2).map(secret => secretRef(simulation, secret.id)),
+            ...feuds.slice(0, 2).map(feud => feudRef(simulation, feud.id)),
+            ...prophecies.slice(0, 2).map(prophecy => prophecyRef(simulation, prophecy.id)),
+            ...artifacts.slice(0, 2).map(artifact => artifactRef(simulation, artifact.id)),
+            ...controls.slice(0, 2).map(control => settlementControlRef(simulation, control.id)),
+        ];
+        const placeSignals = hookCountList([
+            [battles.length, "battle"],
+            [secrets.length, "secret"],
+            [feuds.length, "active feud"],
+            [prophecies.length, "prophecy", "prophecies"],
+            [artifacts.length, "artifact"],
+            [controls.length, "control record"],
+        ], "population pressure without many linked records");
+        addStoryHookCandidate(candidates, {
+            name: `Trouble around ${settlement.name}`,
+            kind: "place",
+            tone: battles.length ? "war" : prophecies.length ? "religious" : secrets.length || feuds.length ? "intrigue" : "adventure",
+            year: hookLatestEventYear(simulation, events, settlement.foundedYear),
+            score: entry.score,
+            urgency: clamp(settlement.unrest * 0.55 + feuds.length * 0.1 + battles.length * 0.06 + prophecies.filter(prophecy => prophecy.status === "open").length * 0.08, 0, 1),
+            civilizationId: settlement.civilizationId,
+            settlementId: settlement.id,
+            battleId: battles[0]?.id,
+            prophecyId: prophecies[0]?.id,
+            secretId: secrets[0]?.id,
+            feudId: feuds[0]?.id,
+            eventId: events[0],
+            seedRefs: refs,
+            prompt: `${settlement.name} is a ${settlement.type} of ${civ?.name ?? "its civilization"} with population ${settlement.population}, unrest ${roundedHookScore(settlement.unrest)}, and ${placeSignals}.`,
+            stakes: `${civ?.name ?? "The local civilization"} risks losing order, sacred legitimacy, trade confidence, or memory of what really happened here.`,
+            complication: `Local records around ${settlement.name} concentrate ${placeSignals}.`,
+            suggestedFocus: `Open with ${settlement.name}, then follow ${hookRefNames(simulation, refs.slice(2), 5)}.`,
+            eventIds: events,
+        });
+    }
+}
+
+function dramaManagerArtifactHooks(simulation: CivilizationSimulation, candidates: StoryHookCandidate[], indexes: DramaManagerIndexes) {
+    const artifacts = simulation.artifacts
+        .map(artifact => {
+            const battles = indexedRecordsForKey(indexes.battlesByCapturedArtifact, artifact.id);
+            const secrets = indexedRecordsForKey(indexes.secretsByArtifact, artifact.id);
+            const oaths = indexedRecordsForKey(indexes.oathsByArtifact, artifact.id);
+            const prophecies = indexedRecordsForKey(indexes.propheciesByArtifact, artifact.id);
+            const events = uniqueNumberList([
+                ...artifact.provenance.map(entry => entry.eventId),
+                ...hookEventIds([artifact, ...battles, ...secrets, ...oaths, ...prophecies], 14),
+            ].filter(id => id !== undefined && id >= 0).sort((a, b) => b - a), 14);
+            const score = artifact.renown / 12
+                + artifact.value / 40
+                + (artifact.scale === "wonder" ? 2.3 : artifact.scale === "monumental" ? 1.4 : artifact.scale === "personal" ? 0.55 : 0.25)
+                + (artifact.quality === "legendary" ? 1.2 : artifact.quality === "masterwork" ? 0.55 : 0.2)
+                + (artifact.condition === "lost" ? 1.4 : artifact.condition === "damaged" ? 0.65 : artifact.condition === "restored" ? 0.35 : 0)
+                + artifact.provenance.length * 0.14
+                + battles.length * 0.38
+                + secrets.length * 0.26
+                + oaths.length * 0.25
+                + prophecies.length * 0.35
+                + hookRecency(simulation, events);
+            return {artifact, battles, secrets, oaths, prophecies, events, score};
+        })
+        .filter(entry => entry.score >= 1.4)
+        .sort((a, b) => b.score - a.score || a.artifact.id - b.artifact.id)
+        .slice(0, 26);
+
+    for (let entry of artifacts) {
+        const {artifact, battles, secrets, oaths, prophecies, events} = entry;
+        const owner = artifact.ownerAgentId === undefined ? undefined : simulation.agents[artifact.ownerAgentId];
+        const ownerPlace = simulation.settlements[artifact.ownerSettlementId];
+        const refs = [
+            artifactRef(simulation, artifact.id),
+            civilizationRef(simulation, artifact.civilizationId),
+            settlementRef(simulation, artifact.ownerSettlementId),
+            personRef(simulation, artifact.creatorAgentId),
+            ...(owner ? [personRef(simulation, owner.id)] : []),
+            ...battles.slice(0, 2).map(battle => battleRef(simulation, battle.id)),
+            ...secrets.slice(0, 2).map(secret => secretRef(simulation, secret.id)),
+            ...oaths.slice(0, 2).map(oath => oathRef(simulation, oath.id)),
+            ...prophecies.slice(0, 2).map(prophecy => prophecyRef(simulation, prophecy.id)),
+        ];
+        const artifactSignals = hookCountList([
+            [artifact.provenance.length, "provenance entry", "provenance entries"],
+            [battles.length, "battle link"],
+            [secrets.length, "secret"],
+            [oaths.length, "oath"],
+            [prophecies.length, "prophecy", "prophecies"],
+        ], "its maker and current holding place");
+        addStoryHookCandidate(candidates, {
+            name: `${artifact.name}'s unfinished provenance`,
+            kind: "artifact",
+            tone: artifact.condition === "lost" ? "recovery" : prophecies.length ? "religious" : battles.length ? "war" : artifact.scale === "wonder" ? "wonder" : "adventure",
+            year: hookLatestEventYear(simulation, events, artifact.createdYear),
+            score: entry.score,
+            urgency: clamp((artifact.condition === "lost" ? 0.45 : 0.12) + prophecies.filter(prophecy => prophecy.status === "open").length * 0.12 + secrets.length * 0.08 + oaths.filter(oath => oath.status === "active").length * 0.1 + battles.length * 0.04, 0, 1),
+            civilizationId: artifact.civilizationId,
+            settlementId: artifact.ownerSettlementId,
+            personId: owner?.id ?? artifact.creatorAgentId,
+            artifactId: artifact.id,
+            battleId: battles[0]?.id,
+            prophecyId: prophecies[0]?.id,
+            secretId: secrets[0]?.id,
+            oathId: oaths[0]?.id,
+            eventId: events[0],
+            seedRefs: refs,
+            prompt: `${artifact.name} is ${hookArticle(artifact.quality)} ${artifact.quality} ${artifact.material} ${artifact.kind} tied to ${ownerPlace?.name ?? "an unknown place"} through ${artifactSignals}.`,
+            stakes: `Whoever controls ${artifact.name} can claim memory, legitimacy, wealth, sacred duty, or proof of an older wrong.`,
+            complication: `${artifact.name} is ${artifact.condition}; renown ${roundedHookScore(artifact.renown)}, value ${roundedHookScore(artifact.value)}, with ${artifactSignals}.`,
+            suggestedFocus: `Begin at ${artifact.name}, then inspect ${hookRefNames(simulation, refs.slice(1), 5)}.`,
+            eventIds: events,
+        });
+    }
+}
+
+function dramaManagerConflictHooks(simulation: CivilizationSimulation, candidates: StoryHookCandidate[]) {
+    for (let conflict of simulation.conflicts) {
+        const battles = conflict.battleIds.map(id => simulation.battles[id]).filter(Boolean);
+        const events = hookEventIds([conflict, ...battles], 14);
+        const refs = [
+            conflictRef(simulation, conflict.id),
+            civilizationRef(simulation, conflict.attackerCivilizationId),
+            civilizationRef(simulation, conflict.defenderCivilizationId),
+            ...(conflict.targetSettlementId !== undefined ? [settlementRef(simulation, conflict.targetSettlementId)] : []),
+            ...battles.slice(0, 4).map(battle => battleRef(simulation, battle.id)),
+            ...conflict.capturedArtifactIds.slice(0, 3).map(id => artifactRef(simulation, id)),
+        ];
+        const score = battles.length * 0.8 + conflict.casualtyAgentIds.length * 0.16 + conflict.capturedSettlementIds.length * 0.42 + conflict.capturedArtifactIds.length * 0.32 + (conflict.status === "active" ? 1.6 : 0.5) + hookRecency(simulation, events);
+        if (score < 1.5) continue;
+        const conflictSignals = hookCountList([
+            [battles.length, "battle"],
+            [conflict.casualtyAgentIds.length, "casualty", "casualties"],
+            [conflict.capturedSettlementIds.length, "captured settlement"],
+            [conflict.capturedArtifactIds.length, "captured artifact"],
+        ], "unsettled border pressure");
+        addStoryHookCandidate(candidates, {
+            name: `${conflict.name}'s unsettled cost`,
+            kind: "conflict",
+            tone: "war",
+            year: hookLatestEventYear(simulation, events, conflict.startedYear),
+            score,
+            urgency: clamp((conflict.status === "active" ? 0.55 : 0.16) + battles.length * 0.04 + conflict.casualtyAgentIds.length * 0.01 + conflict.capturedSettlementIds.length * 0.06, 0, 1),
+            civilizationId: conflict.instigatorCivilizationId,
+            settlementId: conflict.targetSettlementId,
+            conflictId: conflict.id,
+            battleId: battles[0]?.id,
+            artifactId: conflict.capturedArtifactIds[0],
+            eventId: events[0],
+            seedRefs: refs,
+            prompt: `${conflict.name} connects ${simulation.civilizations[conflict.attackerCivilizationId]?.name ?? "one side"} and ${simulation.civilizations[conflict.defenderCivilizationId]?.name ?? "another side"} through ${conflictSignals}.`,
+            stakes: `A settlement, border, artifact, captive memory, or public grievance from ${conflict.name} can still reshape politics.`,
+            complication: `${conflict.name} is ${conflict.status}; records include ${conflictSignals}.`,
+            suggestedFocus: `Trace ${conflict.name} through ${hookRefNames(simulation, refs.slice(3), 5)}.`,
+            eventIds: events,
+        });
+    }
+
+    for (let battle of simulation.battles) {
+        const settlement = simulation.settlements[battle.settlementId];
+        const events = hookEventIds([battle], 10);
+        const score = battle.casualtyAgentIds.length * 0.22 + battle.capturedArtifactIds.length * 0.55 + (battle.kind === "siege" ? 0.9 : 0.35) + Math.abs(battle.attackerPower - battle.defenderPower) * 0.008 + hookRecency(simulation, events);
+        if (score < 1.4) continue;
+        const refs = [
+            battleRef(simulation, battle.id),
+            ...(battle.conflictId !== undefined ? [conflictRef(simulation, battle.conflictId)] : []),
+            settlementRef(simulation, battle.settlementId),
+            civilizationRef(simulation, battle.attackerCivilizationId),
+            civilizationRef(simulation, battle.defenderCivilizationId),
+            ...(battle.attackerCommanderId !== undefined ? [personRef(simulation, battle.attackerCommanderId)] : []),
+            ...(battle.defenderCommanderId !== undefined ? [personRef(simulation, battle.defenderCommanderId)] : []),
+            ...battle.capturedArtifactIds.slice(0, 3).map(id => artifactRef(simulation, id)),
+            ...battle.casualtyAgentIds.slice(0, 4).map(id => personRef(simulation, id)),
+        ];
+        const battleSignals = hookCountList([
+            [battle.casualtyAgentIds.length, "casualty", "casualties"],
+            [battle.capturedArtifactIds.length, "captured artifact"],
+        ], "no recorded casualties or captured artifacts");
+        addStoryHookCandidate(candidates, {
+            name: `Aftermath at ${battle.battlefieldName}`,
+            kind: "conflict",
+            tone: "war",
+            year: battle.year,
+            score,
+            urgency: clamp(0.18 + battle.casualtyAgentIds.length * 0.018 + battle.capturedArtifactIds.length * 0.1 + hookRecency(simulation, events) * 0.35, 0, 1),
+            civilizationId: battle.attackerCivilizationId,
+            settlementId: battle.settlementId,
+            battleId: battle.id,
+            conflictId: battle.conflictId,
+            artifactId: battle.capturedArtifactIds[0],
+            eventId: events[0],
+            seedRefs: refs,
+            prompt: `${battle.battlefieldName} near ${settlement?.name ?? "an unknown settlement"} is a specific battlefield where the record already tracks sides, commanders, casualties, terrain, and captured artifacts.`,
+            stakes: `Survivors, heirs, commanders, and owners of captured objects can turn this battlefield into a claim, shrine, revenge, or investigation.`,
+            complication: `${battle.name} was ${hookArticle(battle.kind)} ${battle.kind} on ${battlefieldTerrainLabel(battle.battlefieldTerrain)} with ${battleSignals}.`,
+            suggestedFocus: `Open on ${battle.battlefieldName}, then follow ${hookRefNames(simulation, refs.slice(1), 5)}.`,
+            eventIds: events,
+        });
+    }
+}
+
+function dramaManagerMythicHooks(simulation: CivilizationSimulation, candidates: StoryHookCandidate[]) {
+    for (let prophecy of simulation.prophecies) {
+        const goalLinks = prophecy.civilizationGoalIds.map(id => simulation.civilizationGoals[id]).filter(Boolean);
+        const events = hookEventIds([prophecy, ...goalLinks], 14);
+        const refs = [
+            prophecyRef(simulation, prophecy.id),
+            civilizationRef(simulation, prophecy.civilizationId),
+            settlementRef(simulation, prophecy.settlementId),
+            ...(prophecy.godId !== undefined ? [godRef(simulation, prophecy.godId)] : []),
+            ...(prophecy.beliefId !== undefined ? [beliefRef(simulation, prophecy.beliefId)] : []),
+            ...(prophecy.targetSettlementId !== undefined ? [settlementRef(simulation, prophecy.targetSettlementId)] : []),
+            ...(prophecy.targetArtifactId !== undefined ? [artifactRef(simulation, prophecy.targetArtifactId)] : []),
+            ...(prophecy.targetAgentId !== undefined ? [personRef(simulation, prophecy.targetAgentId)] : []),
+            ...goalLinks.slice(0, 3).map(goal => civilizationGoalRef(simulation, goal.id)),
+        ];
+        const score = prophecy.strength * 2.3 + (prophecy.status === "open" ? 1.4 : 0.45) + goalLinks.length * 0.35 + hookRecency(simulation, events);
+        if (score < 1.3) continue;
+        const prophecySignals = hookCountList([
+            [goalLinks.length, "civilization goal"],
+        ], "no linked civilization goals");
+        addStoryHookCandidate(candidates, {
+            name: `${prophecy.name}'s interpretation`,
+            kind: "prophecy",
+            tone: "religious",
+            year: hookLatestEventYear(simulation, events, prophecy.year),
+            score,
+            urgency: clamp((prophecy.status === "open" ? 0.45 : 0.12) + prophecy.strength * 0.35 + goalLinks.filter(goal => goal.status === "active").length * 0.08, 0, 1),
+            civilizationId: prophecy.civilizationId,
+            settlementId: prophecy.targetSettlementId ?? prophecy.settlementId,
+            personId: prophecy.targetAgentId ?? prophecy.speakerAgentId,
+            artifactId: prophecy.targetArtifactId,
+            beliefId: prophecy.beliefId,
+            godId: prophecy.godId,
+            prophecyId: prophecy.id,
+            eventId: events[0],
+            seedRefs: refs,
+            prompt: `${prophecy.name} is ${hookArticle(prophecy.kind)} ${prophecy.kind} prophecy whose status, divine links, targets, and kingdom goals are already present in the legends.`,
+            stakes: `A ruler, priest, heir, settlement, or artifact can be pushed toward action by how people interpret ${prophecy.name}.`,
+            complication: `${prophecy.name} is ${prophecy.status}, strength ${roundedHookScore(prophecy.strength)}, and tied to ${prophecySignals}.`,
+            suggestedFocus: `Start with the prophecy text and compare it against ${hookRefNames(simulation, refs.slice(1), 5)}.`,
+            eventIds: events,
+        });
+    }
+
+    for (let god of simulation.gods) {
+        const openProphecies = god.prophecyIds.map(id => simulation.prophecies[id]).filter(prophecy => prophecy?.status === "open");
+        const activeGoals = god.civilizationGoalIds.map(id => simulation.civilizationGoals[id]).filter(goal => goal?.status === "active");
+        const events = hookEventIds([god, ...openProphecies, ...activeGoals], 14);
+        const score = god.influence * 1.4 + god.favor * 0.9 + openProphecies.length * 0.45 + activeGoals.length * 0.36 + god.miracleIds.length * 0.18 + god.commandmentIds.length * 0.15 + hookRecency(simulation, events);
+        if (score < 1.5) continue;
+        const refs = [
+            godRef(simulation, god.id),
+            beliefRef(simulation, god.beliefId),
+            settlementRef(simulation, god.originSettlementId),
+            civilizationRef(simulation, god.civilizationId),
+            ...god.commandmentIds.slice(0, 3).map(id => commandmentRef(simulation, id)),
+            ...openProphecies.slice(0, 3).map(prophecy => prophecyRef(simulation, prophecy.id)),
+            ...activeGoals.slice(0, 3).map(goal => civilizationGoalRef(simulation, goal.id)),
+        ];
+        const godSignals = hookCountList([
+            [openProphecies.length, "open prophecy", "open prophecies"],
+            [activeGoals.length, "active goal"],
+        ], "no open prophecies or active goals");
+        addStoryHookCandidate(candidates, {
+            name: `${god.name}'s pressure on the world`,
+            kind: "legacy",
+            tone: "religious",
+            year: hookLatestEventYear(simulation, events, god.foundedYear),
+            score,
+            urgency: clamp(god.influence * 0.2 + (1 - god.favor) * 0.25 + openProphecies.length * 0.09 + activeGoals.length * 0.06, 0, 1),
+            civilizationId: god.civilizationId,
+            settlementId: god.originSettlementId,
+            beliefId: god.beliefId,
+            godId: god.id,
+            prophecyId: openProphecies[0]?.id,
+            eventId: events[0],
+            seedRefs: refs,
+            prompt: `${god.name} has control spheres for ${god.controlSpheres.join(", ")} and already links creation myth, religion, prophecies, destiny, miracles, commandments, and goals.`,
+            stakes: `${simulation.civilizations[god.civilizationId]?.name ?? "The civilization"} may obey, reinterpret, resist, or weaponize ${god.name}'s mandate.`,
+            complication: `${god.name} is ${god.temperament}, favor ${roundedHookScore(god.favor)}, influence ${roundedHookScore(god.influence)}, with ${godSignals}.`,
+            suggestedFocus: `Read ${god.name}'s page beside ${hookRefNames(simulation, refs.slice(1), 5)}.`,
+            eventIds: events,
+        });
+    }
+}
+
+function dramaManagerRelationshipHooks(simulation: CivilizationSimulation, candidates: StoryHookCandidate[], indexes: DramaManagerIndexes) {
+    const relationships = simulation.socialBonds
+        .map(bond => {
+            const people = bond.agentIds.map(id => simulation.agents[id]).filter(Boolean);
+            const sharedSecrets = indexedRecordsForKeys(indexes.secretsByAgent, bond.agentIds);
+            const sharedFeuds = indexedRecordsForKeys(indexes.feudsByAgent, bond.agentIds);
+            const sharedOaths = indexedRecordsForKeys(indexes.oathsByAgent, bond.agentIds);
+            const milestones = bond.milestoneIds.map(id => simulation.relationshipMilestones[id]).filter(Boolean);
+            const events = hookEventIds([bond, ...milestones, ...sharedSecrets, ...sharedFeuds, ...sharedOaths], 14);
+            const score = bond.strength * 1.3 + bond.tension * 1.4 + (1 - bond.trust) * 0.8 + milestones.length * 0.16 + sharedSecrets.length * 0.28 + sharedFeuds.length * 0.35 + sharedOaths.length * 0.26 + (bond.active ? 0.45 : 0.05) + hookRecency(simulation, events);
+            return {bond, people, milestones, sharedSecrets, sharedFeuds, sharedOaths, events, score};
+        })
+        .filter(entry => entry.score >= 1.2)
+        .sort((a, b) => b.score - a.score || a.bond.id - b.bond.id)
+        .slice(0, 28);
+
+    for (let entry of relationships) {
+        const {bond, people, milestones, sharedSecrets, sharedFeuds, sharedOaths, events} = entry;
+        const refs = [
+            relationshipRef(simulation, bond.id),
+            ...bond.agentIds.map(id => personRef(simulation, id)),
+            settlementRef(simulation, bond.settlementId),
+            civilizationRef(simulation, bond.civilizationId),
+            ...milestones.slice(0, 3).map(milestone => relationshipMilestoneRef(simulation, milestone.id)),
+            ...sharedSecrets.slice(0, 2).map(secret => secretRef(simulation, secret.id)),
+            ...sharedFeuds.slice(0, 2).map(feud => feudRef(simulation, feud.id)),
+            ...sharedOaths.slice(0, 2).map(oath => oathRef(simulation, oath.id)),
+        ];
+        const relationshipName = relationshipKindLabel(bond.kind);
+        const peopleNames = people.map(agent => agent.name).join(" and ");
+        const relationshipSignals = hookCountList([
+            [milestones.length, "milestone"],
+            [sharedSecrets.length, "shared secret"],
+            [sharedFeuds.length, "linked feud"],
+            [sharedOaths.length, "linked oath"],
+        ], "trust and tension");
+        const relationshipStakes = hookList([
+            sharedSecrets.length ? "expose secrets" : undefined,
+            sharedFeuds.length ? "escalate or settle a feud" : undefined,
+            sharedOaths.length ? "test sworn obligations" : undefined,
+            "redirect loyalties",
+            bond.kind === "mentorship" ? "pass knowledge or duty between generations" : undefined,
+            bond.kind === "rivalry" ? "turn competition into public conflict" : undefined,
+            bond.kind === "patronage" ? "turn protection into obligation" : undefined,
+        ], "change private trust");
+        addStoryHookCandidate(candidates, {
+            name: `${relationshipName} under pressure`,
+            kind: "relationship",
+            tone: bond.kind === "rivalry" || sharedSecrets.length || sharedFeuds.length ? "intrigue" : bond.tension > 0.6 ? "tragedy" : "domestic",
+            year: hookLatestEventYear(simulation, events, bond.startedYear),
+            score: entry.score,
+            urgency: clamp(bond.tension * 0.5 + (1 - bond.trust) * 0.25 + sharedSecrets.length * 0.06 + sharedFeuds.length * 0.08 + (bond.active ? 0.12 : 0), 0, 1),
+            civilizationId: bond.civilizationId,
+            settlementId: bond.settlementId,
+            personId: bond.agentIds[0],
+            relationshipId: bond.id,
+            secretId: sharedSecrets[0]?.id,
+            feudId: sharedFeuds[0]?.id,
+            oathId: sharedOaths[0]?.id,
+            eventId: events[0],
+            seedRefs: refs,
+            prompt: `${relationshipName} between ${peopleNames} is a ${bond.active ? "current" : "past"} relationship shaped by ${relationshipSignals}.`,
+            stakes: `The relationship can ${relationshipStakes}.`,
+            complication: `Current scores are strength ${roundedHookScore(bond.strength)}, trust ${roundedHookScore(bond.trust)}, and tension ${roundedHookScore(bond.tension)}; linked records include ${relationshipSignals}.`,
+            suggestedFocus: `Open with ${relationshipName.toLowerCase()} scenes between ${peopleNames}, then follow ${hookRefNames(simulation, refs.slice(5), 5)}.`,
+            eventIds: events,
+        });
+    }
+}
+
+function dramaManagerMysteryHooks(simulation: CivilizationSimulation, candidates: StoryHookCandidate[], indexes: DramaManagerIndexes) {
+    for (let secret of simulation.secrets) {
+        const relatedSchemes = indexedRecordsForKey(indexes.schemesBySecret, secret.id);
+        const relatedRumors = indexedRecordsForKey(indexes.rumorsBySecret, secret.id);
+        const events = hookEventIds([secret, ...relatedSchemes, ...relatedRumors], 12);
+        const refs = [
+            secretRef(simulation, secret.id),
+            settlementRef(simulation, secret.settlementId),
+            civilizationRef(simulation, secret.civilizationId),
+            ...secret.keeperAgentIds.slice(0, 4).map(id => personRef(simulation, id)),
+            ...relatedSchemes.slice(0, 2).map(scheme => schemeRef(simulation, scheme.id)),
+            ...relatedRumors.slice(0, 2).map(rumor => rumorRef(simulation, rumor.id)),
+            ...secret.subjectRefs.slice(0, 6),
+        ];
+        const score = secret.severity * 2.2 + (secret.status === "hidden" ? 1.1 : 0.35) + secret.keeperAgentIds.length * 0.12 + relatedSchemes.length * 0.38 + relatedRumors.length * 0.2 + hookRecency(simulation, events);
+        if (score < 1.1) continue;
+        const secretSignals = hookCountList([
+            [secret.keeperAgentIds.length, "keeper"],
+            [relatedSchemes.length, "scheme"],
+            [relatedRumors.length, "rumor"],
+        ], "no active schemes or rumors");
+        addStoryHookCandidate(candidates, {
+            name: `${secret.name}'s hidden cost`,
+            kind: "mystery",
+            tone: "intrigue",
+            year: hookLatestEventYear(simulation, events, secret.year),
+            score,
+            urgency: clamp((secret.status === "hidden" ? 0.42 : 0.12) + secret.severity * 0.35 + relatedSchemes.filter(scheme => scheme.status === "active").length * 0.12, 0, 1),
+            civilizationId: secret.civilizationId,
+            settlementId: secret.settlementId,
+            personId: secret.keeperAgentIds[0],
+            secretId: secret.id,
+            eventId: events[0],
+            seedRefs: refs,
+            prompt: `${secret.name} is ${hookArticle(secret.kind)} ${secret.kind} secret with keepers, subjects, rumors, and schemes already present in the archive.`,
+            stakes: `Revealing or burying ${secret.name} can change reputations, legal outcomes, faith, lineage, ownership, or settlement politics.`,
+            complication: `${secret.name} is ${secret.status}, severity ${roundedHookScore(secret.severity)}, with ${secretSignals}.`,
+            suggestedFocus: `Start with the keepers of ${secret.name}, then inspect ${hookRefNames(simulation, refs.slice(4), 5)}.`,
+            eventIds: events,
+        });
+    }
+
+    for (let feud of simulation.feuds.filter(feud => feud.status === "active" || feud.severity >= 0.55)) {
+        const relatedOaths = indexedRecordsForKey(indexes.oathsByFeud, feud.id);
+        const events = hookEventIds([feud, ...relatedOaths], 12);
+        const refs = [
+            feudRef(simulation, feud.id),
+            settlementRef(simulation, feud.settlementId),
+            civilizationRef(simulation, feud.civilizationId),
+            ...feud.sideAAgentIds.slice(0, 3).map(id => personRef(simulation, id)),
+            ...feud.sideBAgentIds.slice(0, 3).map(id => personRef(simulation, id)),
+            ...relatedOaths.slice(0, 3).map(oath => oathRef(simulation, oath.id)),
+            ...feud.subjectRefs.slice(0, 6),
+        ];
+        const score = feud.severity * 2 + (feud.status === "active" ? 0.9 : 0.2) + (feud.sideAAgentIds.length + feud.sideBAgentIds.length) * 0.08 + relatedOaths.length * 0.28 + hookRecency(simulation, events);
+        const feudSignals = hookList([
+            `${hookCount(feud.sideAAgentIds.length, "person", "people")} on one side`,
+            `${hookCount(feud.sideBAgentIds.length, "person", "people")} on the other`,
+            relatedOaths.length ? hookCount(relatedOaths.length, "linked oath") : undefined,
+        ]);
+        addStoryHookCandidate(candidates, {
+            name: `${feud.name}'s next spark`,
+            kind: "legacy",
+            tone: "intrigue",
+            year: hookLatestEventYear(simulation, events, feud.startedYear),
+            score,
+            urgency: clamp((feud.status === "active" ? 0.38 : 0.1) + feud.severity * 0.42 + relatedOaths.filter(oath => oath.status === "active").length * 0.08, 0, 1),
+            civilizationId: feud.civilizationId,
+            settlementId: feud.settlementId,
+            personId: feud.sideAAgentIds[0] ?? feud.sideBAgentIds[0],
+            feudId: feud.id,
+            oathId: relatedOaths[0]?.id,
+            eventId: events[0],
+            seedRefs: refs,
+            prompt: `${feud.name} already has sides, households or lineages, source events, subject refs, and oath links that can ignite another scene.`,
+            stakes: `A feud can drag relatives, witnesses, sacred promises, property, or old crimes into current politics.`,
+            complication: `${feud.name} is ${feud.status}, severity ${roundedHookScore(feud.severity)}, with ${feudSignals}.`,
+            suggestedFocus: `Begin with the opposing sides, then follow ${hookRefNames(simulation, refs.slice(3), 5)}.`,
+            eventIds: events,
+        });
+    }
+}
+
+function runDramaManager(simulation: CivilizationSimulation): StoryHook[] {
+    const candidates: StoryHookCandidate[] = [];
+    const indexes = createDramaManagerIndexes(simulation);
+    dramaManagerCharacterHooks(simulation, candidates);
+    dramaManagerPlaceHooks(simulation, candidates, indexes);
+    dramaManagerArtifactHooks(simulation, candidates, indexes);
+    dramaManagerConflictHooks(simulation, candidates);
+    dramaManagerMythicHooks(simulation, candidates);
+    dramaManagerRelationshipHooks(simulation, candidates, indexes);
+    dramaManagerMysteryHooks(simulation, candidates, indexes);
+
+    const bestByKey = new Map<string, StoryHookCandidate>();
+    for (let candidate of candidates) {
+        const key = storyHookKey(candidate);
+        const existing = bestByKey.get(key);
+        if (!existing || candidate.score > existing.score || candidate.score === existing.score && candidate.urgency > existing.urgency) {
+            bestByKey.set(key, candidate);
+        }
+    }
+
+    const sorted = [...bestByKey.values()]
+        .sort((a, b) => b.score - a.score || b.urgency - a.urgency || b.year - a.year || a.name.localeCompare(b.name))
+        .slice(0, maxStoryHooks)
+        .map((candidate, id) => hookFromCandidate(candidate, id));
+
+    return sorted.map(hook => ({
+        ...hook,
+        seedRefs: uniqueLegendRefs([{kind: "story-hook", id: hook.id, name: hook.name}, ...hook.seedRefs], 18),
+    }));
+}
+
 function chronicleSubjectName(simulation: CivilizationSimulation, refs: LegendEntityRef[], settlement: Settlement): string {
     const priority = ["artifact", "battle", "case", "law", "person", "lineage", "organization", "belief", "structure", "settlement", "civilization"];
     for (let kind of priority) {
@@ -28968,7 +29908,7 @@ function createWrittenWork(simulation: CivilizationSimulation, settlement: Settl
         subjectRefs,
         copies,
         influence,
-        description: `${author.name} authored a ${kind} in ${settlement.name}, drawing on ${legendEventHeadline(sourceEvent)}`,
+        description: `${author.name} authored ${indefiniteArticle(kind)} ${kind} in ${settlement.name}, drawing on ${sentenceFragment(legendEventHeadline(sourceEvent))}.`,
         eventIds: [],
     };
     simulation.writtenWorks.push(work);
@@ -29835,7 +30775,7 @@ function recordApprenticeProfessionChange(
     const professionEventId = recordLegendEvent(simulation, {
         year: simulation.year,
         type: "profession-changed",
-        headline: `${apprentice.name} became a ${profession}.`,
+        headline: `${apprentice.name} became ${indefiniteArticle(profession)} ${profession}.`,
         description: `${apprentice.name} changed profession from ${previousProfession} to ${profession} after apprenticeship in ${simulation.settlements[apprentice.settlementId]?.name ?? "an unknown settlement"}.`,
         civilizationId: apprentice.civilizationId,
         settlementId: apprentice.settlementId,
@@ -32504,6 +33444,7 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
         residences: [],
         careers: [],
         roads: [],
+        storyHooks: [],
         history: [],
         events: [],
         legendEvents: [],
@@ -32614,6 +33555,7 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
             }
         }
         if (refreshedYear !== simulation.year) refreshDerivedCivilizationState(world, simulation, workerPool);
+        simulation.storyHooks = timedPhase(simulation, "drama-manager", () => runDramaManager(simulation));
         simulation.legendEventTextSpillStore?.flush();
     } finally {
         workerPool?.shutdown();
@@ -32751,6 +33693,7 @@ export function summarizeCivilizations(simulation: CivilizationSimulation): Civi
         structureCount: simulation.structures.length,
         householdCount: simulation.households.length,
         lineageCount: simulation.lineages.length,
+        storyHookCount: simulation.storyHooks.length,
         claimedTriangles,
         claimedRegions,
         civilizations: simulation.civilizations.map(civ => {
@@ -37935,6 +38878,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
         householdCount: simulation.households.length,
         lineageCount: simulation.lineages.length,
         eventCount: simulation.legendEvents.length,
+        storyHookCount: simulation.storyHooks.length,
         civilizations: simulation.civilizations.map(civ => ({
             id: civ.id,
             name: civ.name,
@@ -39790,6 +40734,37 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
                 ...estate.disputeOathIds.flatMap(id => simulation.oaths[id]?.eventIds ?? []),
                 ...exportEventIds(eventIds, "estate", estate.id, estate.eventIds),
             ], 32),
+        })),
+        storyHooks: simulation.storyHooks.map(hook => ({
+            id: hook.id,
+            name: hook.name,
+            kind: hook.kind,
+            tone: hook.tone,
+            year: hook.year,
+            score: hook.score,
+            urgency: hook.urgency,
+            civilizationId: hook.civilizationId,
+            settlementId: hook.settlementId,
+            personId: hook.personId,
+            artifactId: hook.artifactId,
+            battleId: hook.battleId,
+            conflictId: hook.conflictId,
+            beliefId: hook.beliefId,
+            godId: hook.godId,
+            prophecyId: hook.prophecyId,
+            relationshipId: hook.relationshipId,
+            secretId: hook.secretId,
+            feudId: hook.feudId,
+            oathId: hook.oathId,
+            eventId: hook.eventId,
+            seedRefs: hook.seedRefs.map(ref => ({...ref})),
+            subjectRefs: hook.seedRefs.map(ref => ({...ref})),
+            prompt: hook.prompt,
+            stakes: hook.stakes,
+            complication: hook.complication,
+            suggestedFocus: hook.suggestedFocus,
+            description: `${hook.prompt} ${hook.stakes} ${hook.complication}`,
+            eventIds: hook.eventIds,
         })),
         events: simulation.legendEvents.map(event => ({
             ...event,

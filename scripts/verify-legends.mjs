@@ -6,6 +6,7 @@ const chunkSize = 500;
 const mentionChunkSize = 500;
 
 const kindSpecs = [
+  ["story-hooks", "storyHooks", "story-hook"],
   ["people", "people", "person"],
   ["births", "births", "birth"],
   ["age-milestones", "ageMilestones", "age-milestone"],
@@ -187,10 +188,13 @@ const countFields = new Map([
   ["structureCount", "structures"],
   ["householdCount", "households"],
   ["lineageCount", "lineages"],
+  ["storyHookCount", "storyHooks"],
   ["eventCount", "events"],
 ]);
 
 const fieldTargets = new Map([
+  ["storyHookId", "story-hook"],
+  ["storyHookIds", "story-hook"],
   ["activityId", "activity"],
   ["activityIds", "activity"],
   ["conversationId", "conversation"],
@@ -595,7 +599,7 @@ function validateObjectLinks(issues, maps, value, context) {
   if (!isRecord(value)) return;
 
   for (let [field, child] of Object.entries(value)) {
-    if (field === "subjectRefs" || field === "entityRefs" || field === "targetRefs" || field === "depictionRefs" || field === "dedicationRefs") {
+    if (field === "subjectRefs" || field === "entityRefs" || field === "seedRefs" || field === "targetRefs" || field === "depictionRefs" || field === "dedicationRefs") {
       if (!Array.isArray(child)) {
         pushIssue(issues, `${context}.${field}: expected array`);
         continue;

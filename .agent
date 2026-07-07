@@ -1,0 +1,4 @@
+Browser file:/// navigation:
+- The browser plugin policy blocks direct file:/// navigation for generated local viewer output.
+- For future Legends Viewer/browser checks, start a temporary in-place Python web server from the output directory instead, then open the localhost URL.
+- Example: from `output/drama-manager-smoke`, run `python -m http.server 8000` and use `http://127.0.0.1:8000/index.html#/story-hooks/21`.

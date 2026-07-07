@@ -646,11 +646,11 @@ function legendsViewerHtml(data: string, dataSource?: string): string {
 <style>
 :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; background: #f4f1e8; color: #211f1a; }
 body { margin: 0; }
-.app { display: grid; grid-template-columns: minmax(280px, 360px) 1fr; min-height: 100vh; }
+.app { display: grid; grid-template-columns: minmax(280px, 360px) 1fr; height: 100vh; min-height: 100vh; }
 aside { border-right: 1px solid #c9c1ae; background: #eee8da; padding: 16px; overflow: auto; }
-main { padding: 20px 28px; overflow: auto; }
+main { overflow: auto; }
 h1 { font-size: 20px; margin: 0 0 12px; }
-h2 { font-size: 24px; margin: 0 0 8px; }
+h2 { font-size: 30px; line-height: 1.12; margin: 0; }
 h3 { font-size: 15px; margin: 24px 0 8px; text-transform: uppercase; letter-spacing: .04em; color: #665b49; }
 .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0 16px; }
 .metric { background: #faf7ef; border: 1px solid #d8cfbd; border-radius: 6px; padding: 8px; }
@@ -671,10 +671,25 @@ button { border: 1px solid #aa9d84; border-radius: 6px; background: #faf7ef; pad
 .item { text-align: left; border: 1px solid #d1c7b4; background: #fffaf0; border-radius: 6px; padding: 9px; color: inherit; }
 .item.active { border-color: #2f5e6e; box-shadow: inset 3px 0 0 #2f5e6e; }
 .item small { display: block; color: #6f6657; margin-top: 3px; }
-.detail { max-width: 920px; }
-.meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 18px; }
+.detail { max-width: 1180px; padding: 24px 32px 48px; }
+.page-header { border-bottom: 1px solid #d3c8b5; margin-bottom: 14px; padding-bottom: 16px; }
+.breadcrumb { color: #6f6657; font-size: 13px; margin-bottom: 8px; }
+.page-title-row { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; }
+.record-badge { border: 1px solid #b8ad97; border-radius: 999px; color: #4f473a; background: #faf7ef; font-size: 12px; padding: 5px 8px; white-space: nowrap; }
+.deck { color: #4f473a; line-height: 1.5; max-width: 820px; margin: 10px 0 0; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
 .pill { background: #e7ddca; border-radius: 999px; padding: 5px 9px; font-size: 13px; }
 .pill a { color: inherit; font-weight: 600; }
+.key-facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.fact { background: #fffdf7; border: 1px solid #d8cfbd; border-radius: 6px; padding: 8px 10px; min-width: 0; }
+.fact span { display: block; color: #6f6657; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
+.fact strong { display: block; font-size: 14px; line-height: 1.3; overflow-wrap: anywhere; }
+.quick-nav { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border-bottom: 1px solid #d3c8b5; margin: 0 0 14px; padding: 0 0 14px; }
+.quick-nav a { border: 1px solid #c8bca7; border-radius: 999px; background: #faf7ef; color: #2f5e6e; font-size: 12px; padding: 5px 9px; }
+.section-stack { display: grid; gap: 14px; }
+.detail-section { background: #fffdf7; border: 1px solid #d8cfbd; border-radius: 8px; padding: 14px 16px; scroll-margin-top: 16px; }
+.detail-section > h3:first-child { margin-top: 0; }
+.detail-section > h3:last-child { margin-bottom: 0; }
 .timeline { border-left: 3px solid #b8ad97; padding-left: 14px; display: grid; gap: 10px; }
 .mention-timeline { margin-bottom: 14px; }
 .event { background: #fffaf0; border: 1px solid #d1c7b4; border-radius: 6px; padding: 10px 12px; }
@@ -682,19 +697,23 @@ button { border: 1px solid #aa9d84; border-radius: 6px; background: #faf7ef; pad
 .refs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .ref { background: #ede4d2; border-radius: 999px; padding: 3px 7px; font-size: 12px; }
 .relations { display: grid; gap: 10px; margin-bottom: 18px; }
+.detail-section .relations:last-child { margin-bottom: 0; }
 .relation-group strong { display: block; margin-bottom: 4px; color: #665b49; }
 .empty { color: #6f6657; font-style: italic; }
 .narrative { background: #fffaf0; border: 1px solid #d1c7b4; border-radius: 6px; padding: 12px 14px; margin: 12px 0 18px; line-height: 1.45; }
+.detail-section .narrative { margin-bottom: 0; }
 .narrative p { margin: 0 0 8px; }
 .narrative p:last-child { margin-bottom: 0; }
 .map-context { display: grid; grid-template-columns: minmax(220px, 360px) 1fr; gap: 14px; align-items: start; margin: 10px 0 18px; }
+.detail-section .map-context { margin-bottom: 0; }
 .map-frame { position: relative; aspect-ratio: 1 / 1; border: 1px solid #c9c1ae; border-radius: 6px; overflow: hidden; background: #ded6c6; }
 .map-frame img { width: 100%; height: 100%; display: block; object-fit: cover; }
 .map-marker { position: absolute; width: 16px; height: 16px; border: 3px solid #fffaf0; border-radius: 999px; background: #c23b2a; box-shadow: 0 0 0 2px #2a2119, 0 2px 8px rgba(0,0,0,.35); transform: translate(-50%, -50%); }
 .map-caption { margin: 0; line-height: 1.45; }
 .load-error { background: #fff2ed; border: 1px solid #d0937d; border-radius: 6px; padding: 12px; color: #5a2112; }
 .load-error code { background: #f8d8cd; border-radius: 4px; padding: 1px 4px; }
-@media (max-width: 760px) { .app { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid #c9c1ae; max-height: 48vh; } .map-context { grid-template-columns: 1fr; } }
+@media (max-width: 980px) { .key-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .app { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid #c9c1ae; max-height: 48vh; } .detail { padding: 18px; } .page-title-row { display: block; } .record-badge { display: inline-block; margin-top: 8px; } .key-facts { grid-template-columns: 1fr; } .map-context { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
@@ -951,7 +970,11 @@ data.estates = data.estates || [];
 data.estateCount = data.estateCount || data.estates.length;
 data.chapters = data.chapters || [];
 data.chapterCount = data.chapterCount || data.chapters.length;
+data.storyHooks = data.storyHooks || [];
+data["story-hooks"] = data.storyHooks;
+data.storyHookCount = data.storyHookCount || data.storyHooks.length;
 const kinds = [
+  ["story-hooks", "Story Hooks"],
   ["people", "People"],
   ["births", "Births"],
   ["age-milestones", "Age Milestones"],
@@ -1043,7 +1066,7 @@ const kinds = [
   ["civilizations", "Civs"],
   ["events", "Events"]
 ];
-const state = {kind: "people", query: "", globalSearch: false};
+const state = {kind: data.storyHooks.length ? "story-hooks" : "people", query: "", globalSearch: false};
 const globalSearchKinds = kinds.map(([kind]) => kind);
 const globalSearchMinimumLength = 3;
 const dataKeys = {
@@ -1135,6 +1158,7 @@ const dataKeys = {
   belongings: "belongings",
   "possession-attachments": "possessionAttachments",
   estates: "estates",
+  "story-hooks": "storyHooks",
   civilizations: "civilizations",
   events: "events"
 };
@@ -1227,6 +1251,7 @@ const maps = {
   belongings: new Map(data.belongings.map(x => [x.id, x])),
   "possession-attachments": new Map(data.possessionAttachments.map(x => [x.id, x])),
   estates: new Map(data.estates.map(x => [x.id, x])),
+  "story-hooks": new Map(data.storyHooks.map(x => [x.id, x])),
   civilizations: new Map(data.civilizations.map(x => [x.id, x])),
   events: new Map(data.events.map(x => [x.id, x]))
 };
@@ -1264,7 +1289,7 @@ function writeCache(cache, key, value, limit) {
   }
   return value;
 }
-const refKinds = {person: "people", "person-allegiance": "person-allegiances", preference: "preferences", tradition: "traditions", epithet: "epithets", "reputation-milestone": "reputation-milestones", settlement: "settlements", "settlement-control": "settlement-controls", "natural-feature": "natural-features", structure: "structures", household: "households", lineage: "lineages", chapter: "chapters", organization: "organizations", membership: "memberships", "organization-rank": "organization-ranks", belief: "beliefs", "belief-adherence": "belief-adherences", "myths-magic": "myths-magic", god: "gods", commandment: "commandments", destiny: "destinies", miracle: "miracles", myth: "myths", doctrine: "doctrines", "magic-role": "magic-roles", prophecy: "prophecies", "civilization-goal": "civilization-goals", "sacred-site": "sacred-sites", office: "offices", "office-term": "office-terms", law: "laws", case: "cases", testimony: "testimonies", conflict: "conflicts", battle: "battles", "battle-participation": "battle-participations", "military-unit": "military-units", "equipment-cache": "equipment-caches", "spy-network": "spy-networks", "spy-operation": "spy-operations", injury: "injuries", illness: "illnesses", "care-record": "care-records", "wound-legacy": "wound-legacies", memorial: "memorials", burial: "burials", "death-record": "death-records", birth: "births", "age-milestone": "age-milestones", "appearance-feature": "appearance-features", ambition: "ambitions", apprenticeship: "apprenticeships", skill: "skills", residence: "residences", career: "careers", journey: "journeys", road: "roads", relationship: "relationships", "relationship-milestone": "relationship-milestones", union: "unions", artifact: "artifacts", "artifact-condition": "artifact-conditions", chronicle: "chronicles", "written-work": "written-works", memory: "memories", thought: "thoughts", "personality-shift": "personality-shifts", "need-episode": "need-episodes", opinion: "opinions", "social-claim": "social-claims", conversation: "conversations", rumor: "rumors", secret: "secrets", scheme: "schemes", feud: "feuds", oath: "oaths", ceremony: "ceremonies", "ceremony-participation": "ceremony-participations", activity: "activities", teaching: "teachings", project: "projects", "project-participation": "project-participations", obligation: "obligations", holding: "holdings", belonging: "belongings", "possession-attachment": "possession-attachments", estate: "estates", civilization: "civilizations", event: "events"};
+const refKinds = {person: "people", "person-allegiance": "person-allegiances", preference: "preferences", tradition: "traditions", epithet: "epithets", "reputation-milestone": "reputation-milestones", settlement: "settlements", "settlement-control": "settlement-controls", "natural-feature": "natural-features", structure: "structures", household: "households", lineage: "lineages", chapter: "chapters", organization: "organizations", membership: "memberships", "organization-rank": "organization-ranks", belief: "beliefs", "belief-adherence": "belief-adherences", "myths-magic": "myths-magic", god: "gods", commandment: "commandments", destiny: "destinies", miracle: "miracles", myth: "myths", doctrine: "doctrines", "magic-role": "magic-roles", prophecy: "prophecies", "civilization-goal": "civilization-goals", "sacred-site": "sacred-sites", office: "offices", "office-term": "office-terms", law: "laws", case: "cases", testimony: "testimonies", conflict: "conflicts", battle: "battles", "battle-participation": "battle-participations", "military-unit": "military-units", "equipment-cache": "equipment-caches", "spy-network": "spy-networks", "spy-operation": "spy-operations", injury: "injuries", illness: "illnesses", "care-record": "care-records", "wound-legacy": "wound-legacies", memorial: "memorials", burial: "burials", "death-record": "death-records", birth: "births", "age-milestone": "age-milestones", "appearance-feature": "appearance-features", ambition: "ambitions", apprenticeship: "apprenticeships", skill: "skills", residence: "residences", career: "careers", journey: "journeys", road: "roads", relationship: "relationships", "relationship-milestone": "relationship-milestones", union: "unions", artifact: "artifacts", "artifact-condition": "artifact-conditions", chronicle: "chronicles", "written-work": "written-works", memory: "memories", thought: "thoughts", "personality-shift": "personality-shifts", "need-episode": "need-episodes", opinion: "opinions", "social-claim": "social-claims", conversation: "conversations", rumor: "rumors", secret: "secrets", scheme: "schemes", feud: "feuds", oath: "oaths", ceremony: "ceremonies", "ceremony-participation": "ceremony-participations", activity: "activities", teaching: "teachings", project: "projects", "project-participation": "project-participations", obligation: "obligations", holding: "holdings", belonging: "belongings", "possession-attachment": "possession-attachments", estate: "estates", "story-hook": "story-hooks", civilization: "civilizations", event: "events"};
 function esc(value) {
   return String(value == null ? "" : value).replace(/[&<>"']/g, ch => {
     if (ch === "&") return "&amp;";
@@ -1388,6 +1413,7 @@ function holdingName(id) { return maps.holdings.get(id)?.name || indexLabel("hol
 function belongingName(id) { return maps.belongings.get(id)?.name || indexLabel("belongings", id, "Belonging"); }
 function possessionAttachmentName(id) { return maps["possession-attachments"].get(id)?.name || indexLabel("possession-attachments", id, "Possession Attachment"); }
 function estateName(id) { return maps.estates.get(id)?.name || indexLabel("estates", id, "Estate"); }
+function storyHookName(id) { return maps["story-hooks"].get(id)?.name || indexLabel("story-hooks", id, "Story Hook"); }
 function eventName(id) {
   const event = maps.events.get(id);
   return event ? years(event.year) + ": " + event.headline : indexLabel("events", id, "Event");
@@ -1461,7 +1487,196 @@ function relationshipFacetPills(item) {
   ];
 }
 function metric(label, value) { return '<div class="metric"><strong>' + esc(value) + '</strong>' + esc(label) + '</div>'; }
-function hashFor(kind, id) { return "#" + kind + (id == null ? "" : "/" + id); }
+function normalizeRouteSection(section) {
+  return String(section || "").replace(/^section-/, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+const router = {
+  defaultKind: "people",
+  parse(hash) {
+    const rawHash = String(hash == null ? location.hash : hash).replace(/^#\\/?/, "");
+    if (!rawHash) return {kind: this.defaultKind, id: null, section: ""};
+    const queryIndex = rawHash.indexOf("?");
+    const path = queryIndex < 0 ? rawHash : rawHash.slice(0, queryIndex);
+    const query = queryIndex < 0 ? "" : rawHash.slice(queryIndex + 1);
+    const parts = path.split("/").filter(Boolean).map(part => {
+      try { return decodeURIComponent(part); }
+      catch { return part; }
+    });
+    const kind = maps[parts[0]] ? parts[0] : this.defaultKind;
+    const rawId = parts[1] == null || parts[1] === "index" ? "" : parts[1];
+    const numericId = rawId === "" ? null : Number(rawId);
+    const id = Number.isFinite(numericId) ? numericId : null;
+    let section = "";
+    if (query) section = new URLSearchParams(query).get("section") || "";
+    if (!section && parts[2]) section = parts[2] === "section" ? parts[3] || "" : parts[2];
+    return {kind, id, section: normalizeRouteSection(section)};
+  },
+  current() {
+    return this.parse(location.hash);
+  },
+  toHash(route) {
+    const kind = maps[route?.kind] ? route.kind : this.defaultKind;
+    const id = route?.id == null || route.id === "" ? null : Number(route.id);
+    const section = normalizeRouteSection(route?.section);
+    const path = "#/" + encodeURIComponent(kind) + (Number.isFinite(id) ? "/" + encodeURIComponent(String(id)) : "");
+    return section ? path + "?section=" + encodeURIComponent(section) : path;
+  },
+  navigate(route, options) {
+    const next = this.toHash({...this.current(), ...route});
+    if (location.hash === next) return;
+    if (options?.replace) history.replaceState(null, "", next);
+    else location.hash = next;
+  }
+};
+function stripHtml(value) {
+  return String(value == null ? "" : value).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+function compactText(value, limit) {
+  const text = stripHtml(value);
+  const max = limit || 340;
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1).trimEnd() + "...";
+}
+function factHtml(label, value) {
+  const text = stripHtml(value);
+  if (!text) return "";
+  return '<div class="fact"><span>' + esc(label) + '</span><strong>' + value + '</strong></div>';
+}
+function factText(label, value) {
+  if (value == null || value === "") return "";
+  return factHtml(label, esc(value));
+}
+function addPageFact(facts, label, value, rawHtml) {
+  if (facts.length >= 10) return;
+  const html = rawHtml ? factHtml(label, value) : factText(label, value);
+  if (html) facts.push(html);
+}
+function addCountFact(facts, label, values) {
+  if (!Array.isArray(values) || values.length === 0) return;
+  addPageFact(facts, label, String(values.length), false);
+}
+function pageSummaryText(kind, item) {
+  if (kind === "events") return compactText(item.description || displaySublabelFor(kind, item), 420);
+  return compactText(item.description || item.effect || item.principle || item.demand || item.detail || displaySublabelFor(kind, item), 420);
+}
+function pageFacts(kind, item, events) {
+  const facts = [];
+  addPageFact(facts, "Collection", kindLabel(kind), false);
+  addPageFact(facts, "Record", "#" + item.id, false);
+  if (kind === "story-hooks") {
+    addPageFact(facts, "Hook", item.kind, false);
+    addPageFact(facts, "Tone", item.tone, false);
+    addPageFact(facts, "Score", item.score, false);
+    addPageFact(facts, "Urgency", item.urgency, false);
+    addPageFact(facts, "Year", years(item.year), false);
+    if (item.civilizationId != null) addPageFact(facts, "Civilization", civLink(item.civilizationId), true);
+    if (item.settlementId != null) addPageFact(facts, "Place", settlementLink(item.settlementId), true);
+    if (item.personId != null) addPageFact(facts, "Person", personLink(item.personId), true);
+  } else if (kind === "people") {
+    addPageFact(facts, "Status", item.alive ? "alive" : "dead", false);
+    addPageFact(facts, "Profession", item.profession, false);
+    addPageFact(facts, "Civilization", civLink(item.civilizationId), true);
+    addPageFact(facts, "Place", settlementLink(item.settlementId), true);
+    addPageFact(facts, "Age", item.age, false);
+    addPageFact(facts, "Reputation", reputationLabel(item.reputation) + " " + item.reputation, false);
+  } else if (kind === "settlements") {
+    addPageFact(facts, "Type", item.type, false);
+    addPageFact(facts, "Civilization", civLink(item.civilizationId), true);
+    addPageFact(facts, "Population", item.population, false);
+    addPageFact(facts, "Founded", years(item.foundedYear), false);
+    addPageFact(facts, "Controlled", years(item.controlledSinceYear), false);
+    addCountFact(facts, "Structures", item.structureIds);
+  } else if (kind === "civilizations") {
+    addPageFact(facts, "Status", item.status, false);
+    addPageFact(facts, "Origin", item.originKind, false);
+    addPageFact(facts, "Population", item.population, false);
+    addPageFact(facts, "Capital", settlementLink(item.capitalSettlementId), true);
+    addPageFact(facts, "Founded", years(item.foundedYear), false);
+    addPageFact(facts, "Collapse", item.collapseStage == null ? "" : "stage " + item.collapseStage, false);
+  } else if (kind === "relationships") {
+    addPageFact(facts, "Kind", relationshipKindLabel(item.kind), false);
+    addPageFact(facts, "Status", relationshipStatusLabel(item), false);
+    addPageFact(facts, "People", (item.agentIds || []).slice(0, 2).map(personLink).join(" "), true);
+    addPageFact(facts, "Trust", bondValue(item.trust, 0).toFixed(3), false);
+    addPageFact(facts, "Tension", bondValue(item.tension, 0).toFixed(3), false);
+    addCountFact(facts, "Milestones", item.milestoneIds);
+  } else if (kind === "artifacts") {
+    addPageFact(facts, "Kind", item.kind, false);
+    addPageFact(facts, "Scale", item.scale, false);
+    addPageFact(facts, "Condition", item.condition, false);
+    addPageFact(facts, "Civilization", civLink(item.civilizationId), true);
+    addPageFact(facts, "Place", settlementLink(item.settlementId), true);
+    addPageFact(facts, "Renown", item.renown, false);
+  } else if (kind === "battles") {
+    addPageFact(facts, "Year", years(item.year), false);
+    addPageFact(facts, "Kind", item.kind, false);
+    addPageFact(facts, "Outcome", item.outcome, false);
+    addPageFact(facts, "Place", settlementLink(item.settlementId), true);
+    addPageFact(facts, "Battlefield", item.battlefieldTerrain, false);
+    addPageFact(facts, "Casualties", (item.casualtyAgentIds || []).length, false);
+  } else if (kind === "conflicts") {
+    addPageFact(facts, "Status", item.status, false);
+    addPageFact(facts, "Kind", item.kind, false);
+    addPageFact(facts, "Started", years(item.startedYear), false);
+    addPageFact(facts, "Battles", (item.battleIds || []).length, false);
+    addPageFact(facts, "Attacker", civLink(item.attackerCivilizationId), true);
+    addPageFact(facts, "Defender", civLink(item.defenderCivilizationId), true);
+  } else if (["beliefs", "myths-magic", "gods", "commandments", "destinies", "miracles", "myths", "doctrines", "magic-roles", "prophecies", "civilization-goals", "sacred-sites"].includes(kind)) {
+    addPageFact(facts, "Kind", item.kind || item.domain || item.status || kindLabel(kind), false);
+    if (item.status != null) addPageFact(facts, "Status", item.status, false);
+    if (item.domain != null) addPageFact(facts, "Domain", item.domain, false);
+    if (item.civilizationId != null) addPageFact(facts, "Civilization", civLink(item.civilizationId), true);
+    if (item.settlementId != null) addPageFact(facts, "Place", settlementLink(item.settlementId), true);
+    if (item.godId != null) addPageFact(facts, "God", godLink(item.godId), true);
+    if (item.year != null) addPageFact(facts, "Year", years(item.year), false);
+    if (item.foundedYear != null) addPageFact(facts, "Founded", years(item.foundedYear), false);
+  } else if (kind === "events") {
+    addPageFact(facts, "Type", item.type, false);
+    addPageFact(facts, "Year", years(item.year), false);
+    addCountFact(facts, "References", item.entityRefs);
+    if (item.civilizationId != null) addPageFact(facts, "Civilization", civLink(item.civilizationId), true);
+    if (item.settlementId != null) addPageFact(facts, "Place", settlementLink(item.settlementId), true);
+    if (item.personId != null) addPageFact(facts, "Person", personLink(item.personId), true);
+  } else {
+    if (item.kind != null) addPageFact(facts, "Kind", item.kind, false);
+    if (item.status != null) addPageFact(facts, "Status", item.status, false);
+    if (item.year != null) addPageFact(facts, "Year", years(item.year), false);
+    if (item.startedYear != null) addPageFact(facts, "Started", years(item.startedYear), false);
+    if (item.endedYear != null) addPageFact(facts, "Ended", years(item.endedYear), false);
+    if (item.civilizationId != null) addPageFact(facts, "Civilization", civLink(item.civilizationId), true);
+    if (item.settlementId != null) addPageFact(facts, "Place", settlementLink(item.settlementId), true);
+    if (item.personId != null) addPageFact(facts, "Person", personLink(item.personId), true);
+    if (item.agentId != null) addPageFact(facts, "Person", personLink(item.agentId), true);
+  }
+  addPageFact(facts, "Timeline", events.length + " event" + (events.length === 1 ? "" : "s"), false);
+  addCountFact(facts, "Subjects", item.subjectRefs || item.entityRefs);
+  return facts.join("");
+}
+function renderPageHeader(kind, item, title, meta, events) {
+  const summary = pageSummaryText(kind, item);
+  const facts = pageFacts(kind, item, events);
+  return '<header class="page-header">' +
+    '<div class="breadcrumb">' + link(kind, null, kindLabel(kind)) + '</div>' +
+    '<div class="page-title-row"><h2>' + esc(title) + '</h2><span class="record-badge">' + esc(kindLabel(kind) + " #" + item.id) + '</span></div>' +
+    (summary ? '<p class="deck">' + esc(summary) + '</p>' : '') +
+    '<div class="meta">' + meta.map(x => '<span class="pill">' + x + '</span>').join("") + '</div>' +
+    (facts ? '<div class="key-facts">' + facts + '</div>' : '') +
+  '</header>';
+}
+function sectionId(id) {
+  return "section-" + (normalizeRouteSection(id) || "detail");
+}
+function detailSection(section) {
+  return '<section class="detail-section" id="' + esc(sectionId(section.id)) + '">' + section.html + '</section>';
+}
+function renderSectionNav(sections) {
+  if (sections.length <= 1) return "";
+  const current = router.current();
+  return '<nav class="quick-nav">' + sections.map(section =>
+    '<a href="' + esc(router.toHash({...current, section: section.id})) + '">' + esc(section.label) + '</a>'
+  ).join("") + '</nav>';
+}
+function hashFor(kind, id, section) { return router.toHash({kind, id, section}); }
 function link(kind, id, label, className) {
   return '<a href="' + esc(hashFor(kind, id)) + '"' + (className ? ' class="' + esc(className) + '"' : "") + '>' + esc(label) + '</a>';
 }
@@ -1562,6 +1777,7 @@ function holdingLink(id) { return link("holdings", id, holdingName(id)); }
 function belongingLink(id) { return link("belongings", id, belongingName(id)); }
 function possessionAttachmentLink(id) { return link("possession-attachments", id, possessionAttachmentName(id)); }
 function estateLink(id) { return link("estates", id, estateName(id)); }
+function storyHookLink(id) { return link("story-hooks", id, storyHookName(id)); }
 function eventLink(id) { return link("events", id, eventName(id)); }
 function renderSummary() {
   const epithetCount = data.epithetCount || data.people.reduce((sum, person) => sum + (person.epithets || []).length, 0);
@@ -1751,6 +1967,7 @@ function labelFor(kind, item) {
   if (kind === "belongings") return item.name;
   if (kind === "possession-attachments") return item.name;
   if (kind === "estates") return item.name;
+  if (kind === "story-hooks") return item.name;
   if (kind === "civilizations") return item.name;
   return item.headline;
 }
@@ -1871,6 +2088,7 @@ function sublabelFor(kind, item) {
   if (kind === "belongings") return item.material + " " + item.kind + ", " + item.status + ", owner " + (item.ownerAgentId == null ? "none" : personName(item.ownerAgentId)) + ", sentiment " + item.sentiment;
   if (kind === "possession-attachments") return item.kind + " of " + personName(item.agentId) + " toward " + (item.artifactId == null ? belongingName(item.belongingId) : artifactName(item.artifactId)) + ", intensity " + item.intensity + ", " + years(item.year);
   if (kind === "estates") return "estate of " + personName(item.decedentAgentId) + ", heirs " + (item.heirAgentIds || []).length + ", assets " + ((item.artifactIds || []).length + (item.holdingIds || []).length + (item.belongingIds || []).length) + ", " + years(item.year);
+  if (kind === "story-hooks") return item.kind + " hook, " + item.tone + ", score " + item.score + ", urgency " + item.urgency + ", " + years(item.year);
   if (kind === "civilizations") return (item.status ? item.status + ", " : "") + "population " + item.population + (item.originKind ? ", " + item.originKind : "") + (item.creationDomain ? ", creation " + item.creationDomain : "") + ", events " + item.eventIds.length;
   return years(item.year) + " - " + item.type;
 }
@@ -3120,6 +3338,7 @@ function mapSettlementFor(kind, item) {
   if (kind === "sacred-sites") return item;
   if (kind === "people") return maps.settlements.get(item.settlementId);
   if (kind === "artifacts") return maps.settlements.get(item.ownerSettlementId || item.settlementId);
+  if (kind === "story-hooks") return maps.settlements.get(item.settlementId);
   return null;
 }
 
@@ -3133,6 +3352,9 @@ function mapContextText(kind, item, settlement) {
   }
   if (kind === "artifacts") {
     return artifactLink(item.id) + " is last recorded in " + settlementLink(settlement.id) + " at map coordinates " + coordinates + ".";
+  }
+  if (kind === "story-hooks") {
+    return storyHookLink(item.id) + " is anchored near " + settlementLink(settlement.id) + " at map coordinates " + coordinates + ".";
   }
   if (kind === "sacred-sites") {
     return sacredSiteLink(item.id) + " is marked near " + settlementLink(item.settlementId) + " at map coordinates " + coordinates + ".";
@@ -4161,6 +4383,47 @@ function uniqueLinkList(links, limit) {
 
 function subjectLinks(item, limit) {
   return (item.subjectRefs || []).slice(0, limit || 16).map(refLink);
+}
+
+function storyHookWikiSection(kind, item) {
+  if (kind !== "story-hooks") return "";
+  const focus = [
+    item.personId == null ? "" : personLink(item.personId),
+    item.settlementId == null ? "" : settlementLink(item.settlementId),
+    item.artifactId == null ? "" : artifactLink(item.artifactId),
+    item.battleId == null ? "" : battleLink(item.battleId),
+    item.conflictId == null ? "" : conflictLink(item.conflictId),
+    item.relationshipId == null ? "" : relationshipLink(item.relationshipId),
+    item.secretId == null ? "" : secretLink(item.secretId),
+    item.feudId == null ? "" : feudLink(item.feudId),
+    item.oathId == null ? "" : oathLink(item.oathId),
+    item.prophecyId == null ? "" : prophecyLink(item.prophecyId),
+    item.godId == null ? "" : godLink(item.godId),
+    item.beliefId == null ? "" : beliefLink(item.beliefId)
+  ].filter(Boolean);
+  const sourceRefs = uniqueLinkList((item.seedRefs || item.subjectRefs || []).map(refLink), 18);
+  const events = (item.eventIds || []).slice(0, 14).map(eventLink);
+  const overview = [
+    factPill(item.kind + " hook"),
+    factPill("tone " + item.tone),
+    factPill("score " + item.score),
+    factPill("urgency " + item.urgency),
+    factPill(years(item.year)),
+    item.civilizationId == null ? "" : civLink(item.civilizationId)
+  ].filter(Boolean);
+  const narrative = narrativeParagraphs([
+    esc(item.prompt || ""),
+    esc(item.stakes || ""),
+    esc(item.complication || ""),
+    esc(item.suggestedFocus || "")
+  ]);
+  const groups = [
+    relationGroup("Overview", overview),
+    relationGroup("Focus", focus),
+    relationGroup("Source Records", sourceRefs),
+    relationGroup("Timeline Seeds", events)
+  ].join("");
+  return '<h3>Story Hook</h3>' + narrative + (groups ? '<div class="relations">' + groups + '</div>' : "");
 }
 
 function recordEchoLinks(refKind, id, limit) {
@@ -6037,6 +6300,20 @@ function profileSection(kind, item) {
   return groups ? '<h3>Profile</h3><div class="relations">' + groups + '</div>' : "";
 }
 function linkedMeta(kind, item) {
+  if (kind === "story-hooks") return [
+    esc(item.kind),
+    esc("tone " + item.tone),
+    esc("score " + item.score),
+    esc("urgency " + item.urgency),
+    esc(years(item.year)),
+    item.civilizationId == null ? "" : civLink(item.civilizationId),
+    item.settlementId == null ? "" : settlementLink(item.settlementId),
+    item.personId == null ? "" : personLink(item.personId),
+    item.artifactId == null ? "" : artifactLink(item.artifactId),
+    item.battleId == null ? "" : battleLink(item.battleId),
+    item.conflictId == null ? "" : conflictLink(item.conflictId),
+    item.prophecyId == null ? "" : prophecyLink(item.prophecyId)
+  ].filter(Boolean);
   if (kind === "people") return [
     ...(item.epithets || []).slice(0, 2).map(epithet => esc(epithet.name)),
     esc(item.profession),
@@ -10563,6 +10840,8 @@ async function loadWorldMentions(kind, id) {
   return chunk[String(id)] || {};
 }
 const relationFieldKinds = {
+  storyHookId: "story-hooks",
+  storyHookIds: "story-hooks",
   activityId: "activities",
   activityIds: "activities",
   teachingId: "teachings",
@@ -10920,9 +11199,28 @@ const relatedRecordHydrationCaps = {
   organizations: 20,
   artifacts: 20,
   "artifact-conditions": 30,
+  "story-hooks": 30,
   default: 20
 };
 const routeContextIndexKinds = {
+  "story-hooks": [
+    "people",
+    "settlements",
+    "civilizations",
+    "artifacts",
+    "conflicts",
+    "battles",
+    "relationships",
+    "secrets",
+    "schemes",
+    "feuds",
+    "oaths",
+    "beliefs",
+    "gods",
+    "prophecies",
+    "civilization-goals",
+    "events"
+  ],
   settlements: [
     "people",
     "structures",
@@ -11012,7 +11310,7 @@ function collectHydrationTargets(item) {
   for (const [field, value] of Object.entries(item)) {
     const directKind = relationFieldKinds[field];
     if (directKind) addHydrationValue(targets, directKind, value);
-    if (field === "entityRefs" || field === "subjectRefs" || field === "targetRefs" || field === "depictionRefs" || field === "dedicationRefs") {
+    if (field === "entityRefs" || field === "subjectRefs" || field === "seedRefs" || field === "targetRefs" || field === "depictionRefs" || field === "dedicationRefs") {
       for (const ref of value || []) addHydrationTarget(targets, refKinds[ref.kind] || ref.kind, ref.id);
     }
     if (field === "targetRef" && value) addHydrationTarget(targets, refKinds[value.kind] || value.kind, value.id);
@@ -11048,45 +11346,50 @@ function renderDetail(kind, item) {
   let title = labelFor(kind, item);
   let meta = linkedMeta(kind, item);
   const events = kind === "events" ? [item] : itemEvents(item);
+  const sections = [
+    {id: "narrative", label: "Narrative", html: narrativeSection(kind, item)},
+    {id: "map", label: "Map", html: mapContextSection(kind, item)},
+    {id: "profile", label: "Profile", html: profileSection(kind, item)},
+    {id: "natural-feature", label: "Natural Feature", html: naturalFeatureWikiSection(kind, item)},
+    {id: "myths-magic", label: "Myths and Magic", html: mythicWikiSection(kind, item)},
+    {id: "story-hook", label: "Story Hook", html: storyHookWikiSection(kind, item)},
+    {id: "chapter", label: "Chapter", html: chapterWikiSection(kind, item)},
+    {id: "record", label: "Record", html: recordWikiSection(kind, item)},
+    {id: "life-milestones", label: "Life Milestones", html: lifeMilestoneWikiSection(kind, item)},
+    {id: "institutions", label: "Institutions", html: institutionalWikiSection(kind, item)},
+    {id: "continuity", label: "Continuity", html: continuityWikiSection(kind, item)},
+    {id: "event-summary", label: "Event Summary", html: eventWikiSection(kind, item)},
+    {id: "structure-chapters", label: "Structure Chapters", html: structureChaptersSection(kind, item)},
+    {id: "conflict-chapters", label: "Conflict Chapters", html: conflictChaptersSection(kind, item)},
+    {id: "battle-chapters", label: "Battle Chapters", html: battleChaptersSection(kind, item)},
+    {id: "biography", label: "Biography", html: personBiographySection(kind, item)},
+    {id: "social-web", label: "Social Web", html: socialWebSection(kind, item)},
+    {id: "life-chapters", label: "Life Chapters", html: personLifeChaptersSection(kind, item)},
+    {id: "legacy", label: "Legacy", html: personLegacySection(kind, item)},
+    {id: "relationship-chapters", label: "Relationship Chapters", html: relationshipChaptersSection(kind, item)},
+    {id: "world-mentions", label: "World Mentions", html: worldMentionsSection(kind, item)},
+    {id: "settlement", label: "Settlement", html: settlementWikiSection(kind, item)},
+    {id: "place-chapters", label: "Place Chapters", html: settlementPlaceChaptersSection(kind, item)},
+    {id: "road", label: "Road", html: roadWikiSection(kind, item)},
+    {id: "road-chapters", label: "Road Chapters", html: roadChaptersSection(kind, item)},
+    {id: "artifact", label: "Artifact", html: artifactWikiSection(kind, item)},
+    {id: "artifact-chapters", label: "Artifact Chapters", html: artifactChaptersSection(kind, item)},
+    {id: "civilization", label: "Civilization", html: civilizationWikiSection(kind, item)},
+    {id: "civilization-chapters", label: "Civilization Chapters", html: civilizationChaptersSection(kind, item)},
+    {id: "organization", label: "Organization", html: organizationWikiSection(kind, item)},
+    {id: "organization-chapters", label: "Organization Chapters", html: organizationChaptersSection(kind, item)},
+    {id: "household", label: "Household", html: householdWikiSection(kind, item)},
+    {id: "household-chapters", label: "Household Chapters", html: householdChaptersSection(kind, item)},
+    {id: "lineage", label: "Lineage", html: lineageWikiSection(kind, item)},
+    {id: "lineage-chapters", label: "Lineage Chapters", html: lineageChaptersSection(kind, item)},
+    {id: "provenance", label: "Provenance", html: artifactProvenanceSection(kind, item)},
+    {id: "relations", label: "Relations", html: relationsSection(kind, item)},
+    {id: "timeline", label: "Timeline", html: '<h3>Timeline</h3>' + renderTimeline(events)}
+  ].filter(section => stripHtml(section.html) !== "");
   document.getElementById("detail").innerHTML =
-    '<h2>' + esc(title) + '</h2><div class="meta">' + meta.map(x => '<span class="pill">' + x + '</span>').join("") + '</div>' +
-    narrativeSection(kind, item) +
-    mapContextSection(kind, item) +
-    profileSection(kind, item) +
-    naturalFeatureWikiSection(kind, item) +
-    mythicWikiSection(kind, item) +
-    chapterWikiSection(kind, item) +
-    recordWikiSection(kind, item) +
-    lifeMilestoneWikiSection(kind, item) +
-    institutionalWikiSection(kind, item) +
-    continuityWikiSection(kind, item) +
-    eventWikiSection(kind, item) +
-    structureChaptersSection(kind, item) +
-    conflictChaptersSection(kind, item) +
-    battleChaptersSection(kind, item) +
-    personBiographySection(kind, item) +
-    socialWebSection(kind, item) +
-    personLifeChaptersSection(kind, item) +
-    personLegacySection(kind, item) +
-    relationshipChaptersSection(kind, item) +
-    worldMentionsSection(kind, item) +
-    settlementWikiSection(kind, item) +
-    settlementPlaceChaptersSection(kind, item) +
-    roadWikiSection(kind, item) +
-    roadChaptersSection(kind, item) +
-    artifactWikiSection(kind, item) +
-    artifactChaptersSection(kind, item) +
-    civilizationWikiSection(kind, item) +
-    civilizationChaptersSection(kind, item) +
-    organizationWikiSection(kind, item) +
-    organizationChaptersSection(kind, item) +
-    householdWikiSection(kind, item) +
-    householdChaptersSection(kind, item) +
-    lineageWikiSection(kind, item) +
-    lineageChaptersSection(kind, item) +
-    artifactProvenanceSection(kind, item) +
-    relationsSection(kind, item) +
-    '<h3>Timeline</h3>' + renderTimeline(events);
+    renderPageHeader(kind, item, title, meta, events) +
+    renderSectionNav(sections) +
+    '<div class="section-stack">' + sections.map(detailSection).join("") + '</div>';
 }
 function renderIndexOnlyDetail(kind, entry, message) {
   const title = entry?.label || (kinds.find(([k]) => k === kind)?.[1] || "Legends");
@@ -11099,12 +11402,9 @@ function renderIndexOnlyDetail(kind, entry, message) {
     '<h3>Full Archive Entry</h3><p class="empty">This record is present in the complete lookup index. Serve this folder locally to load rich record chunks on demand; the full raw entry is also available in legends.json.</p>';
 }
 function route() {
-  const raw = location.hash.replace(/^#/, "");
-  const [hashKind, hashId] = raw.split("/");
-  const kind = maps[hashKind] ? hashKind : "people";
-  const id = hashId == null || hashId === "" ? null : Number(hashId);
-  state.kind = kind;
-  return {kind, id};
+  const parsed = router.current();
+  state.kind = parsed.kind;
+  return parsed;
 }
 function filteredItems() {
   const source = (viewerIndex[state.kind] && viewerIndex[state.kind].length ? viewerIndex[state.kind] : data[state.kind]) || [];
@@ -11140,7 +11440,8 @@ function filteredGlobalItems() {
 }
 async function renderList() {
   const requestId = ++renderRequestId;
-  const {kind, id} = route();
+  const currentRoute = route();
+  const {kind, id} = currentRoute;
   let indexLoadError = null;
   try {
     await loadIndex(kind);
@@ -11184,14 +11485,32 @@ async function renderList() {
   if (requestId !== renderRequestId) return;
   if (richItem || !indexEntry) {
     renderDetail(kind, richItem);
+    scrollToRouteSection(currentRoute.section);
     if (richItem) renderAsyncDetailSections(kind, richItem, requestId);
   }
-  else renderIndexOnlyDetail(kind, indexEntry);
+  else {
+    renderIndexOnlyDetail(kind, indexEntry);
+    scrollToRouteSection(currentRoute.section);
+  }
 }
 function renderTabs() {
   const {kind} = route();
   const tabs = document.getElementById("tabs");
   tabs.innerHTML = kinds.map(([tabKind, label]) => '<a href="' + esc(hashFor(tabKind)) + '"' + (tabKind === kind ? ' class="active"' : '') + '>' + esc(label) + '</a>').join("");
+}
+function scrollToRouteSection(section) {
+  const detail = document.getElementById("detail");
+  const main = document.querySelector("main");
+  const targetSection = normalizeRouteSection(section);
+  requestAnimationFrame(() => {
+    if (!targetSection) {
+      if (main) main.scrollTop = 0;
+      return;
+    }
+    const target = document.getElementById(sectionId(targetSection));
+    if (target) target.scrollIntoView({block: "start"});
+    else if (detail) detail.scrollIntoView({block: "start"});
+  });
 }
 document.getElementById("search").addEventListener("input", event => {
   state.query = event.target.value;
@@ -11208,7 +11527,7 @@ function renderApp() {
   void renderList();
 }
 window.addEventListener("hashchange", renderApp);
-if (!location.hash) location.hash = "#people";
+if (!location.hash) router.navigate({kind: data.storyHooks?.length ? "story-hooks" : "people"}, {replace: true});
 renderApp();
 })();
 </script>
@@ -11242,6 +11561,7 @@ const legendsViewerTopLevelArrayLimits: Record<string, number> = {
     reputationMilestones: 100,
     relationshipMilestones: 100,
     chapters: 100,
+    storyHooks: 120,
     events: 300,
 };
 const defaultLegendsViewerPrimitiveListLimit = 80;
@@ -11325,6 +11645,7 @@ const legendsViewerNestedArrayLimits: Record<string, number> = {
     spreadSettlementIds: 80,
     structureIds: 80,
     subjectRefs: 24,
+    seedRefs: 24,
     sacredSiteIds: 80,
     testimonyIds: 80,
     thoughtIds: 80,
@@ -11344,6 +11665,7 @@ type LegendIndexLookups = {
 const legendsViewerRecordSourceCache = new WeakMap<object, Record<string, LegendRecord[]>>();
 
 const legendsViewerKindSpecs = [
+    {kind: "story-hooks", key: "storyHooks"},
     {kind: "people", key: "people"},
     {kind: "births", key: "births"},
     {kind: "age-milestones", key: "ageMilestones"},
@@ -11676,6 +11998,7 @@ function createLegendsViewerRecordSource(legends: LegendsExport): Record<string,
 
 function legendIndexLabelFor(kind: string, item: LegendRecord, lookups: LegendIndexLookups) {
     if (kind === "people") return legendIndexPersonName(item);
+    if (kind === "story-hooks") return compactLegendIndexText(item.name ?? `Story Hook ${item.id}`, 140);
     if (kind === "chapters") return compactLegendIndexText(item.name ?? item.title ?? `Chapter ${item.id}`, 140);
     if (kind === "roads") {
         return `${legendIndexNamed(lookups, "settlements", item.fromSettlementId, "Settlement")} to ${legendIndexNamed(lookups, "settlements", item.toSettlementId, "Settlement")} road`;
@@ -11692,6 +12015,18 @@ function legendIndexSublabelFor(kind: string, item: LegendRecord, lookups: Legen
     if (kind === "people") {
         const status = item.alive ? `age ${item.age}` : `died ${legendIndexYears(item.diedYear)}`;
         return compactLegendIndexText(`${item.profession ?? "person"} of ${legendIndexNamed(lookups, "civilizations", item.civilizationId, "Civilization")}, ${item.mentalState ?? "mind unknown"}, ${status}`, 170);
+    }
+    if (kind === "story-hooks") {
+        const parts = [
+            `${item.kind ?? "story"} hook`,
+            item.tone == null ? "" : `tone ${item.tone}`,
+            item.score == null ? "" : `score ${item.score}`,
+            item.urgency == null ? "" : `urgency ${item.urgency}`,
+            item.civilizationId == null ? "" : legendIndexNamed(lookups, "civilizations", item.civilizationId, "Civilization"),
+            item.settlementId == null ? "" : legendIndexNamed(lookups, "settlements", item.settlementId, "Settlement"),
+            legendIndexYears(item.year),
+        ].filter(Boolean);
+        return compactLegendIndexText(parts.join(", "), 190);
     }
     if (kind === "chapters") {
         const start = legendIndexYears(item.startYear);
@@ -11797,12 +12132,14 @@ const legendIndexFacetFields = [
     "restoredCivilizationId",
     "settlementId",
     "severity",
+    "score",
     "startYear",
     "startedYear",
     "status",
     "strength",
     "structureId",
     "title",
+    "tone",
     "toSettlementId",
     "type",
     "year",
@@ -12029,11 +12366,14 @@ const legendMentionRefKindByKind: Record<string, string> = {
     belongings: "belonging",
     "possession-attachments": "possession-attachment",
     estates: "estate",
+    "story-hooks": "story-hook",
     civilizations: "civilization",
     events: "event",
 };
 
 const legendMentionFieldKinds: Record<string, string> = {
+    storyHookId: "story-hooks",
+    storyHookIds: "story-hooks",
     ...Object.fromEntries(legendPersonMentionScalarFields.map(field => [field, "people"])),
     ...Object.fromEntries(legendPersonMentionArrayFields.map(field => [field, "people"])),
     ...Object.fromEntries(legendSettlementMentionScalarFields.map(field => [field, "settlements"])),
@@ -12357,6 +12697,7 @@ function collectLegendMentionIds(item: LegendRecord, target: (typeof legendMenti
         for (let value of values) addLegendMentionId(ids, value);
     }
     addLegendMentionRefs(ids, item.subjectRefs, target.refKind);
+    addLegendMentionRefs(ids, item.seedRefs, target.refKind);
     addLegendMentionRefs(ids, item.entityRefs, target.refKind);
     addLegendMentionRefs(ids, item.targetRefs, target.refKind);
     addLegendMentionRefs(ids, item.depictionRefs, target.refKind);
@@ -12911,6 +13252,25 @@ function civilizationProfile(simulation: CivilizationSimulation) {
         topPhaseTimings: topPhaseTimings(simulation),
         counts,
         topArrays: topCivilizationArrayCounts(counts),
+        storyHookSamples: simulation.storyHooks.slice(0, 12).map(hook => ({
+            id: hook.id,
+            name: hook.name,
+            kind: hook.kind,
+            tone: hook.tone,
+            year: hook.year,
+            score: hook.score,
+            urgency: hook.urgency,
+            prompt: hook.prompt,
+            stakes: hook.stakes,
+            complication: hook.complication,
+            suggestedFocus: hook.suggestedFocus,
+            seedRefs: hook.seedRefs.slice(0, 8).map(ref => ({
+                kind: ref.kind,
+                id: ref.id,
+                name: ref.name,
+            })),
+            eventIds: hook.eventIds.slice(0, 8),
+        })),
         memory: {
             heapUsedBytes: memory.heapUsed,
             heapTotalBytes: memory.heapTotal,
@@ -13081,6 +13441,11 @@ function main() {
         console.log(`Advancing ${options.civilizations} civilizations for ${options.civilizationYears} years with ${workerCount} civilization worker${workerCount === 1 ? "" : "s"}...`);
         civilizations = simulateCivilizations(world, civilizationOptions(options), runOptions);
     }
+
+    if (civilizations && options.civilizationProfileJson) {
+        writeCivilizationProfileJson(civilizations, options.civilizationProfileJson);
+    }
+
     console.log(`Rendering ${options.width}x${options.height} PNG...`);
     const image = renderWorldMapPng(world, {width: options.width, height: options.height, civilizations});
     fs.writeFileSync(outputPath, PNG.sync.write(image));
@@ -13091,10 +13456,6 @@ function main() {
         fs.mkdirSync(path.dirname(civilizationJsonPath), {recursive: true});
         fs.writeFileSync(civilizationJsonPath, JSON.stringify(summarizeCivilizations(civilizations), null, 2));
         console.log(`Wrote ${civilizationJsonPath}`);
-    }
-
-    if (civilizations && options.civilizationProfileJson) {
-        writeCivilizationProfileJson(civilizations, options.civilizationProfileJson);
     }
 
     if (civilizations && (options.legendsJson || options.legendsHtml)) {
