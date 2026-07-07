@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>500-Year Stress Test - July 7, 2026</title>
+<style>
+:root {
+  color-scheme: light;
+  font-family: Inter, Segoe UI, Arial, sans-serif;
+  background: #f7f8f6;
+  color: #1d2320;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: #1f6670; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.shell { max-width: 1160px; margin: 0 auto; padding: 30px; }
+.crumb { color: #64706b; font-size: 14px; margin-bottom: 18px; }
+h1 { font-size: 34px; line-height: 1.15; margin: 0 0 8px; letter-spacing: 0; }
+h2 { font-size: 22px; margin: 30px 0 12px; letter-spacing: 0; }
+p { line-height: 1.55; }
+.deck { color: #4f5c58; margin: 0 0 24px; max-width: 760px; }
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid #9bc6a9;
+  background: #edf8f0;
+  color: #245b35;
+  border-radius: 6px;
+  font-weight: 700;
+  font-size: 14px;
+  margin: 4px 0 22px;
+}
+.grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.metric {
+  border: 1px solid #cbd5d0;
+  background: #fff;
+  border-radius: 8px;
+  padding: 14px;
+}
+.metric span { display: block; color: #64706b; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.metric strong { display: block; font-size: 24px; margin-top: 6px; }
+.visual {
+  display: grid;
+  grid-template-columns: minmax(240px, 320px) 1fr;
+  gap: 22px;
+  align-items: start;
+  margin-top: 12px;
+}
+.map {
+  width: 100%;
+  image-rendering: pixelated;
+  border: 1px solid #cbd5d0;
+  background: #fff;
+  border-radius: 8px;
+}
+.note {
+  border-left: 4px solid #a6652a;
+  background: #fff8ef;
+  padding: 12px 14px;
+  color: #4f3922;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border: 1px solid #cbd5d0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+th, td { padding: 10px 12px; border-bottom: 1px solid #e1e7e3; text-align: right; white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { background: #eef3f0; color: #33403b; font-size: 13px; }
+tr:last-child td { border-bottom: 0; }
+code {
+  font-family: Consolas, Monaco, monospace;
+  background: #edf1ef;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.command {
+  white-space: pre-wrap;
+  word-break: break-word;
+  border: 1px solid #cbd5d0;
+  background: #fff;
+  border-radius: 8px;
+  padding: 14px;
+  font-family: Consolas, Monaco, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.links a {
+  border: 1px solid #b8c7c1;
+  background: #fff;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-weight: 600;
+}
+@media (max-width: 820px) {
+  .shell { padding: 22px; }
+  .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .visual { grid-template-columns: 1fr; }
+  table { display: block; overflow-x: auto; }
+}
+@media (max-width: 520px) {
+  .grid { grid-template-columns: 1fr; }
+  h1 { font-size: 28px; }
+}
+</style>
+</head>
+<body>
+<main class="shell">
+  <div class="crumb"><a href="../index.html">Published results</a> / Stress probe</div>
+  <h1>500-Year Stress Test</h1>
+  <p class="deck">A 128x128, five-civilization simulation stress probe run with civilization seed 77 on July 7, 2026.</p>
+  <div class="status">PASS - completed 500 simulated years</div>
+
+  <section class="grid" aria-label="Final metrics">
+    <div class="metric"><span>Elapsed</span><strong>83m 49s</strong></div>
+    <div class="metric"><span>Alive / Total Agents</span><strong>33,013 / 182,910</strong></div>
+    <div class="metric"><span>Legend Events</span><strong>2,586,562</strong></div>
+    <div class="metric"><span>RSS at Year 500</span><strong>10,492 MB</strong></div>
+    <div class="metric"><span>Settlements</span><strong>121</strong></div>
+    <div class="metric"><span>Civilizations</span><strong>28</strong></div>
+    <div class="metric"><span>Stories</span><strong>120 Hooks</strong></div>
+    <div class="metric"><span>Spill Chunks</span><strong>607 Local</strong></div>
+  </section>
+
+  <section class="visual">
+    <img class="map" src="probe-500-final.png" width="128" height="128" alt="Final 128 by 128 map render for the 500-year stress test">
+    <div>
+      <h2>Run Summary</h2>
+      <p>The run completed cleanly and wrote the final profile JSON plus PNG render. The final checkpoint held 2,309,193 compacted legend events, 2,485,809 spilled legend event texts, and 6,775,080 nested event-id links.</p>
+      <p>The heaviest final phase timings were civilization expansion/conflict at 52.2s, settlement creation at 52.2s, settlement agent seeding at 50.9s, settlement adult seeding at 48.6s, agent economy at 25.1s, and health/death at 16.7s.</p>
+      <p class="note">The spilled event text directory is retained locally at <code>output/stress-probes/probe-500-event-text</code>. It contains 607 JSON chunks totaling 406,101,180 bytes, so it is not copied into this published page.</p>
+    </div>
+  </section>
+
+  <h2>Checkpoint Growth</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Year</th>
+        <th>Elapsed</th>
+        <th>Alive</th>
+        <th>Total Agents</th>
+        <th>Settlements</th>
+        <th>Roads</th>
+        <th>Legend Events</th>
+        <th>Heap Used</th>
+        <th>RSS</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>100</td><td>2m 15s</td><td>12,107</td><td>27,691</td><td>25</td><td>15</td><td>293,424</td><td>1,062 MB</td><td>1,834 MB</td></tr>
+      <tr><td>200</td><td>6m 59s</td><td>18,196</td><td>54,075</td><td>45</td><td>29</td><td>629,259</td><td>2,184 MB</td><td>3,128 MB</td></tr>
+      <tr><td>300</td><td>17m 31s</td><td>22,548</td><td>88,447</td><td>65</td><td>34</td><td>1,140,195</td><td>3,856 MB</td><td>5,205 MB</td></tr>
+      <tr><td>400</td><td>37m 41s</td><td>28,617</td><td>130,437</td><td>89</td><td>47</td><td>1,762,784</td><td>5,803 MB</td><td>7,693 MB</td></tr>
+      <tr><td>500</td><td>83m 49s</td><td>33,013</td><td>182,910</td><td>121</td><td>42</td><td>2,586,562</td><td>8,298 MB</td><td>10,492 MB</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Final Counts</h2>
+  <table>
+    <tbody>
+      <tr><td>Memories</td><td>695,839</td><td>Opinions</td><td>214,248</td></tr>
+      <tr><td>Residences</td><td>223,814</td><td>Careers</td><td>419,602</td></tr>
+      <tr><td>Memberships</td><td>62,426</td><td>Activities</td><td>100,297</td></tr>
+      <tr><td>Holdings</td><td>18,431</td><td>Belongings</td><td>14,212</td></tr>
+      <tr><td>Fallen civilizations</td><td>20</td><td>Successor civilizations</td><td>23</td></tr>
+      <tr><td>Deaths recorded</td><td>149,897</td><td>Births recorded</td><td>182,910</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Command</h2>
+  <pre class="command">npm run stress:500</pre>
+  <p>The script expanded to <code>node --expose-gc --max-old-space-size=12288 dist/world-mapgen.cjs --size 128 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 500 --civ-seed 77 --progress-every 100 --profile-civ-phases --gc-after-compaction --spill-event-text-dir output/stress-probes/probe-500-event-text --spill-event-text-after 10 --spill-event-text-every 5 --spill-event-text-cache-chunks 256 --civ-profile-dir output/stress-probes/probe-500-profiles --civ-profile-json output/stress-probes/probe-500-final.json --out output/stress-probes/probe-500-final.png</code>.</p>
+
+  <h2>Artifacts</h2>
+  <div class="links">
+    <a href="probe-500-final.png">Final PNG</a>
+    <a href="probe-500-final.json">Final JSON</a>
+    <a href="run.log">Run Log</a>
+    <a href="run.err.log">Build/Stderr Log</a>
+    <a href="profiles/year-100.json">Year 100 Profile</a>
+    <a href="profiles/year-200.json">Year 200 Profile</a>
+    <a href="profiles/year-300.json">Year 300 Profile</a>
+    <a href="profiles/year-400.json">Year 400 Profile</a>
+    <a href="profiles/year-500.json">Year 500 Profile</a>
+  </div>
+</main>
+</body>
+</html>
