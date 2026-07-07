@@ -29,6 +29,7 @@ import {
     type LegendsExportSource,
     type StoryHookKind,
 } from "../simulation/civilizations.ts";
+import {publishLegendsRun, publishMapSize} from "./publish-legends.ts";
 import {writeSnapshotGif} from "./snapshot-gif.ts";
 
 const defaultEventRefNameRetentionYears = 30;
@@ -53,6 +54,8 @@ type CliOptions = {
     civilizationProfileDir?: string;
     legendsJson?: string;
     legendsHtml?: string;
+    publish: boolean;
+    publishDir?: string;
     snapshotDir?: string;
     snapshotEvery: number;
     snapshotRenderEvery: number;
@@ -81,7 +84,7 @@ Usage:
 
 Commands:
   generate                 Generate a PNG map. This is the default command.
-  publish-legends          Move or copy the latest Legends output into published/.
+  publish-legends          Copy the newest Legends viewer output into published/, replacing the previous run.
   serve-legends            Serve a generated Legends viewer directory.
   verify-legends           Verify a Legends archive and optional viewer output.
   compare-civ-profiles     Compare two civilization profile JSON files.
@@ -114,6 +117,9 @@ Options:
   --legends-json <json>       Write detailed Legends archive JSON
   --legends-html <html>       Write browser-friendly sampled Legends viewer
                               Use --legends-json for the full archive
+  --publish                   Replace published/ with this run's Legends viewer when the run
+                              completes. Requires --legends-html, --legends-json, and --size 640
+  --publish-dir <dir>         Published site root for --publish. Defaults to published
   --snapshot-dir <dir>        Write annual civilization snapshots and map frames
   --snapshot-every <years>    Snapshot JSON interval. Defaults to 1 with --snapshot-dir
   --snapshot-render-every <years>
@@ -152,6 +158,7 @@ Examples:
   npm run generate -- --out output/seed-42.png --set elevation.seed=42
   npm run generate -- --civilizations 5 --years 300 --civ-json output/civilizations.json
   npm run generate -- --size 1024 --controls examples/controls/mapgen4-controls.json
+  npm run generate -- --size 640 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 100 --civ-seed 77 --out output/legends/map.png --legends-json output/legends/legends.json --legends-html output/legends/index.html --snapshot-dir output/legends/snapshots --snapshot-every 1 --snapshot-render-every 1 --publish
 `);
 }
 
@@ -231,6 +238,7 @@ function parseArgs(argv: string[]): CliOptions {
         civilizationSeed: 1,
         expansionRate: undefined,
         settlementInterval: undefined,
+        publish: false,
         snapshotEvery: 0,
         snapshotRenderEvery: 25,
         snapshotGifFps: 8,
@@ -336,6 +344,13 @@ function parseArgs(argv: string[]): CliOptions {
         } else if (arg === "--legends-html" || arg.startsWith("--legends-html=")) {
             const result = readValue(argv, i, "--legends-html");
             options.legendsHtml = result.value;
+            i = result.nextIndex;
+        } else if (arg === "--publish") {
+            options.publish = true;
+        } else if (arg === "--publish-dir" || arg.startsWith("--publish-dir=")) {
+            const result = readValue(argv, i, "--publish-dir");
+            options.publishDir = result.value;
+            options.publish = true;
             i = result.nextIndex;
         } else if (arg === "--snapshot-dir" || arg.startsWith("--snapshot-dir=")) {
             const result = readValue(argv, i, "--snapshot-dir");
@@ -448,6 +463,20 @@ function parseArgs(argv: string[]): CliOptions {
     }
     if (options.spillEventTextAfter > 0 && options.spillEventTextCacheChunks === 0) {
         options.spillEventTextCacheChunks = 128;
+    }
+    if (options.publish) {
+        if (options.civilizations === 0) {
+            throw new Error("--publish requires a civilization simulation; pass --civilizations and --years");
+        }
+        if (!options.legendsHtml || !options.legendsJson) {
+            throw new Error("--publish requires --legends-html and --legends-json so a complete Legends viewer exists to publish");
+        }
+        if (path.dirname(path.resolve(options.legendsHtml)) !== path.dirname(path.resolve(options.legendsJson))) {
+            throw new Error("--publish requires --legends-html and --legends-json to be written to the same directory");
+        }
+        if (options.width !== publishMapSize || options.height !== publishMapSize) {
+            throw new Error(`--publish requires --size ${publishMapSize}, got ${options.width}x${options.height}`);
+        }
     }
     if (process.env.npm_config_summary === "true") {
         options.summary = true;
@@ -11729,6 +11758,32 @@ function legendsSourceCollection(source: LegendsExportSource, key: string): Lege
     return isLegendsCollection(value) ? value as LegendsRecordCollection : arrayAsLegendsCollection([]);
 }
 
+function memoizeLegendsCollection<T>(collection: LegendsCollection<T>): LegendsCollection<T> {
+    const cache: T[] = new Array(collection.length);
+    const cached = new Uint8Array(collection.length);
+    return {
+        legendsCollection: true,
+        length: collection.length,
+        get(index: number) {
+            if (!cached[index]) {
+                cache[index] = collection.get(index);
+                cached[index] = 1;
+            }
+            return cache[index];
+        },
+    };
+}
+
+function memoizeLegendsExportSource(source: LegendsExportSource): LegendsExportSource {
+    const memoized: Record<string, unknown> = {};
+    for (let [key, value] of Object.entries(source)) {
+        memoized[key] = isLegendsCollection(value)
+            ? memoizeLegendsCollection(value as LegendsCollection<unknown>)
+            : value;
+    }
+    return memoized as unknown as LegendsExportSource;
+}
+
 // Shared per-export state for the viewer writers. The archive is consumed one
 // record at a time through lazy collections; only compact derived structures
 // (name lookups, synthetic chapters, mention entries) stay resident.
@@ -12738,6 +12793,7 @@ const legendMentionTargets: LegendMentionTarget[] = legendsViewerKindSpecs
             arrayFields: legendMentionFieldsForKind(spec.kind, true),
         }];
     });
+const legendMentionTargetKindByRefKind = new Map(legendMentionTargets.map(target => [target.refKind, target.kind]));
 
 function addLegendMentionId(ids: Set<number>, value: unknown) {
     const id = Number(value);
@@ -12830,6 +12886,56 @@ function addLegendMentionEntryToTarget(
     (groups[sourceKind] ??= []).push(entry);
 }
 
+function addLegendMentionIdForKind(idsByTarget: Map<string, Set<number>>, targetKind: string | undefined, value: unknown) {
+    if (!targetKind) return;
+    const id = Number(value);
+    if (!Number.isFinite(id) || id < 0) return;
+    let ids = idsByTarget.get(targetKind);
+    if (!ids) {
+        ids = new Set();
+        idsByTarget.set(targetKind, ids);
+    }
+    ids.add(id);
+}
+
+function collectLegendMentionIdsByTarget(item: LegendRecord) {
+    const idsByTarget = new Map<string, Set<number>>();
+
+    for (let [field, value] of Object.entries(item)) {
+        const targetKind = legendMentionFieldKinds[field];
+        if (!targetKind) continue;
+        if (field.endsWith("Ids")) {
+            if (!Array.isArray(value)) continue;
+            for (let entry of value) addLegendMentionIdForKind(idsByTarget, targetKind, entry);
+        } else {
+            addLegendMentionIdForKind(idsByTarget, targetKind, value);
+        }
+    }
+
+    const addRefs = (value: unknown) => {
+        if (!Array.isArray(value)) return;
+        for (let ref of value) {
+            if (!ref || typeof ref !== "object") continue;
+            const record = ref as Record<string, unknown>;
+            addLegendMentionIdForKind(idsByTarget, legendMentionTargetKindByRefKind.get(String(record.kind)), record.id);
+        }
+    };
+    addRefs(item.subjectRefs);
+    addRefs(item.seedRefs);
+    addRefs(item.entityRefs);
+    addRefs(item.targetRefs);
+    addRefs(item.depictionRefs);
+    addRefs(item.dedicationRefs);
+
+    const targetRef = item.targetRef;
+    if (targetRef && typeof targetRef === "object") {
+        const record = targetRef as Record<string, unknown>;
+        addLegendMentionIdForKind(idsByTarget, legendMentionTargetKindByRefKind.get(String(record.kind)), record.id);
+    }
+
+    return idsByTarget;
+}
+
 function addChapterTargetMentions(
     context: LegendsViewerContext,
     byTarget: Record<string, Map<number, Record<string, LegendMentionEntry[]>>>,
@@ -12878,10 +12984,9 @@ function createLegendsMentionIndexes(context: LegendsViewerContext) {
         for (let index = 0; index < records.length; index++) {
             const item = records.get(index);
             const entry = createLegendMentionEntry(spec.kind, item, context.lookups);
-            for (let target of legendMentionTargets) {
-                const ids = collectLegendMentionIds(item, target);
-                if (!ids.size) continue;
-                const targetMap = byTarget[target.kind];
+            for (let [targetKind, ids] of collectLegendMentionIdsByTarget(item)) {
+                const targetMap = byTarget[targetKind];
+                if (!targetMap) continue;
                 for (let entityId of ids) {
                     let groups = targetMap.get(entityId);
                     if (!groups) {
@@ -13087,13 +13192,18 @@ function writeLegendsViewerMentionIndexes(context: LegendsViewerContext, htmlPat
 
 function writeLegendsHtml(source: LegendsExportSource, htmlPath: string, mapImagePath?: string) {
     const outputPath = path.resolve(htmlPath);
+    console.log("Preparing Legends viewer context...");
     const context = createLegendsViewerContext(source);
+    console.log("Writing Legends viewer indexes...");
     writeLegendsViewerIndexes(context, outputPath);
+    console.log("Writing Legends viewer chunks...");
     writeLegendsViewerChunks(context, outputPath);
+    console.log("Writing Legends viewer mention indexes...");
     writeLegendsViewerMentionIndexes(context, outputPath);
     const relativeMapImagePath = mapImagePath
         ? path.relative(path.dirname(outputPath), path.resolve(mapImagePath)).replace(/\\/g, "/")
         : undefined;
+    console.log("Writing Legends viewer HTML...");
     const viewerLegends = createLegendsViewerArchive(context, relativeMapImagePath);
     const sentinel = "__WORLD_MAP_LEGENDS_JSON__";
     const html = legendsViewerHtml(sentinel);
@@ -13980,7 +14090,8 @@ export function runGenerateCommand(argv = process.argv.slice(2)) {
     }
 
     if (civilizations && (options.legendsJson || options.legendsHtml)) {
-        const legendsSource = exportLegendsSource(civilizations, {terrainSeed, meshSeed});
+        const rawLegendsSource = exportLegendsSource(civilizations, {terrainSeed, meshSeed});
+        const legendsSource = options.legendsHtml ? memoizeLegendsExportSource(rawLegendsSource) : rawLegendsSource;
         if (options.legendsJson) {
             writeLegendsJson(legendsSource, options.legendsJson);
         }
@@ -13995,5 +14106,13 @@ export function runGenerateCommand(argv = process.argv.slice(2)) {
 
     if (options.summary) {
         summarize(world, outputPath, options.width, options.height, civilizations);
+    }
+
+    if (civilizations && options.publish && options.legendsHtml) {
+        publishLegendsRun(path.dirname(path.resolve(options.legendsHtml)), {
+            publishedDir: options.publishDir,
+            framesDir: options.snapshotDir ? path.join(path.resolve(options.snapshotDir), "maps") : undefined,
+            gifFps: options.snapshotGifFps,
+        });
     }
 }

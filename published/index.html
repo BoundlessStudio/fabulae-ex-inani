@@ -3,32 +3,72 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Published Results</title>
+<title>Torreach and Norreach Simulation</title>
 <style>
 :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; background: #f7f8f6; color: #1d2320; }
 body { margin: 0; }
 a { color: #1f6670; text-decoration: none; }
 a:hover { text-decoration: underline; }
-.shell { max-width: 1100px; margin: 0 auto; padding: 30px; }
-h1 { font-size: 38px; margin: 0 0 8px; letter-spacing: 0; }
-.deck { color: #4f5c58; margin: 0 0 22px; }
-.list { display: grid; gap: 14px; }
-.item { border: 1px solid #cbd5d0; background: #ffffff; border-radius: 8px; padding: 18px; }
-.item h2 { margin: 0 0 6px; font-size: 20px; letter-spacing: 0; }
-.item p { margin: 0; color: #4f5c58; line-height: 1.5; }
-.meta { margin-top: 10px; color: #64706b; font-size: 14px; }
+.shell { max-width: 1360px; margin: 0 auto; padding: 28px; container-type: inline-size; }
+.topbar { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 22px; }
+.back { font-size: 14px; color: #4f5c58; }
+h1 { font-size: 42px; line-height: 1.05; margin: 0; letter-spacing: 0; }
+.deck { max-width: 760px; color: #4f5c58; line-height: 1.5; margin: 10px 0 0; }
+.layout { display: grid; grid-template-columns: minmax(420px, 640px) minmax(320px, 1fr); gap: 24px; align-items: start; margin-top: 24px; }
+.world { margin: 0; }
+.world img { width: 100%; max-width: 640px; aspect-ratio: 1 / 1; object-fit: cover; border: 1px solid #cbd5d0; background: #d8dfdb; display: block; }
+.panel { border: 1px solid #cbd5d0; background: #ffffff; border-radius: 8px; padding: 16px; }
+.panel h2 { font-size: 18px; margin: 0 0 12px; }
+.metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.metric { border: 1px solid #d9e0dc; border-radius: 6px; padding: 10px; background: #fbfcfb; min-width: 0; }
+.metric span { display: block; color: #60706b; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 4px; }
+.metric strong { font-size: 21px; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.button { border: 1px solid #8aa09a; border-radius: 6px; padding: 9px 11px; background: #edf4f1; color: #163f45; font-weight: 600; }
+.facts { display: grid; gap: 8px; color: #3d4945; }
+.facts div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e2e7e4; padding-bottom: 8px; }
+.facts div:last-child { border-bottom: 0; padding-bottom: 0; }
+.facts span { color: #60706b; }
+@container (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+@media (max-width: 980px) { .layout { grid-template-columns: 1fr; } h1 { font-size: 32px; } .shell { padding: 20px; } }
 </style>
 </head>
 <body>
 <div class="shell">
-<h1>Published Results</h1>
-<p class="deck">Static simulation exports and stress-test reports ready for GitHub Pages.</p>
-<div class="list">
-<article class="item">
-<h2><a href="stress-500-2026-07-07/index.html">500-Year Stress Test</a></h2>
-<p>A 128x128, five-civilization stress probe completed on July 7, 2026 with seed 77.</p>
-<div class="meta">PASS - 83m 49s - 2,586,562 legend events - 33,013 alive agents</div>
-</article>
+<div class="topbar"><span class="back">Fabulae Ex Inani</span><span class="back">sim-26-07-07-18-26-seed-077</span></div>
+<header>
+<h1>Torreach and Norreach Simulation</h1>
+<p class="deck">Year 0 to 100. Seed 77 with 5 civilizations, 25 settlements, 27687 people, and 293495 recorded events.</p>
+</header>
+<div class="layout">
+<figure class="world"><img src="map.gif" alt="World timeline GIF"></figure>
+<div class="panel">
+<h2>Summary</h2>
+<div class="metrics">
+<div class="metric"><span>Years</span><strong>100</strong></div>
+<div class="metric"><span>Civilizations</span><strong>5</strong></div>
+<div class="metric"><span>Settlements</span><strong>25</strong></div>
+<div class="metric"><span>People</span><strong>27687</strong></div>
+<div class="metric"><span>Events</span><strong>293495</strong></div>
+<div class="metric"><span>Story hooks</span><strong>120</strong></div>
+</div>
+<div class="actions">
+<a class="button" href="legends.html">Open Legends Viewer</a>
+<a class="button" href="map.png">Map PNG</a>
+<a class="button" href="map.gif">Map GIF</a>
+<a class="button" href="legends.json">Legends JSON</a>
+</div>
+</div>
+<div class="panel">
+<h2>Run Details</h2>
+<div class="facts">
+<div><span>Range</span><strong>Year 0 to 100</strong></div>
+<div><span>Civilization seed</span><strong>77</strong></div>
+<div><span>Terrain seed</span><strong>187</strong></div>
+<div><span>Mesh seed</span><strong>12345</strong></div>
+<div><span>Published</span><strong>2026-07-07T22:26:37.268Z</strong></div>
+</div>
+</div>
 </div>
 </div>
 </body>

@@ -5,19 +5,21 @@ import {writeSnapshotGif} from "./snapshot-gif.ts";
 
 const defaultPublishedDir = "published";
 const defaultOutputRoot = "output";
-const publishMapSize = 640;
+export const publishMapSize = 640;
 const defaultGifFps = 8;
+const requiredViewerChunkDirs = ["indexes", "records"];
+const optionalViewerChunkDirs = ["texts", "mentions"];
 
-type PublishOptions = {
-    sourceDir?: string;
-    publishedDir: string;
-    runName?: string;
+export type PublishRunOptions = {
+    publishedDir?: string;
     title?: string;
     seed?: number;
     framesDir?: string;
-    copy: boolean;
-    overwrite: boolean;
-    gifFps: number;
+    gifFps?: number;
+};
+
+type PublishCommandOptions = PublishRunOptions & {
+    sourceDir?: string;
 };
 
 type RunMetadata = {
@@ -49,23 +51,23 @@ type CandidateSource = {
 function printPublishHelp() {
     console.log(`Usage: world-mapgen publish-legends [source-dir] [options]
 
-Move or copy a generated Legends viewer output into published/sim-YY-MM-DD-HH-MM-seed-###.
+Copy a generated Legends viewer into the published/ site root, replacing the previously published run.
+Only the Legends viewer files are published: the wiki viewer as legends.html, legends.json, the
+indexes/, records/, texts/, and mentions/ chunk directories, map.png, yearly frames under
+snapshots/maps/, a rebuilt map.gif and world.gif, plus a generated landing index.html and run.json.
+Logs and other run artifacts stay in output/.
 
 Options:
   --from <dir>             Source Legends output directory. Defaults to newest output/** with legends.json and index.html.
-  --published-dir <dir>    Published site root. Defaults to published
-  --name <slug>            Override the generated run directory name
+  --published-dir <dir>    Published site root to replace. Defaults to published
   --title <title>          Override the run landing page title
-  --seed <seed>            Override the seed used in the run directory name
+  --seed <seed>            Override the seed recorded for the run
   --frames-dir <dir>       Directory of yearly map PNG frames to turn into map.gif
   --gif-fps <fps>          GIF frames per second. Defaults to ${defaultGifFps}
-  --copy                   Copy source output instead of moving it
-  --overwrite              Replace an existing run directory with the same name
   --help                   Show this help
 
-Recommended publishable generation:
-  node dist/world-mapgen.cjs generate --size 640 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 100 --civ-seed 77 --out output/legends/map.png --legends-json output/legends/legends.json --legends-html output/legends/index.html --snapshot-dir output/legends/snapshots --snapshot-every 1 --snapshot-render-every 1 --snapshot-gif output/legends/map.gif
-  node dist/world-mapgen.cjs publish-legends output/legends
+Recommended publishable generation (publishes automatically when the run completes):
+  node dist/world-mapgen.cjs generate --size ${publishMapSize} --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 100 --civ-seed 77 --out output/legends/map.png --legends-json output/legends/legends.json --legends-html output/legends/index.html --snapshot-dir output/legends/snapshots --snapshot-every 1 --snapshot-render-every 1 --publish
 `);
 }
 
@@ -85,13 +87,8 @@ function parsePositiveInteger(value: string, name: string): number {
     return parsed;
 }
 
-function parseArgs(argv: string[]): PublishOptions {
-    const options: PublishOptions = {
-        publishedDir: defaultPublishedDir,
-        copy: false,
-        overwrite: false,
-        gifFps: defaultGifFps,
-    };
+function parseArgs(argv: string[]): PublishCommandOptions {
+    const options: PublishCommandOptions = {};
 
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
@@ -105,10 +102,6 @@ function parseArgs(argv: string[]): PublishOptions {
         } else if (arg === "--published-dir" || arg.startsWith("--published-dir=")) {
             const result = readValue(argv, i, "--published-dir");
             options.publishedDir = result.value;
-            i = result.nextIndex;
-        } else if (arg === "--name" || arg.startsWith("--name=")) {
-            const result = readValue(argv, i, "--name");
-            options.runName = result.value;
             i = result.nextIndex;
         } else if (arg === "--title" || arg.startsWith("--title=")) {
             const result = readValue(argv, i, "--title");
@@ -126,10 +119,8 @@ function parseArgs(argv: string[]): PublishOptions {
             const result = readValue(argv, i, "--gif-fps");
             options.gifFps = parsePositiveInteger(result.value, "--gif-fps");
             i = result.nextIndex;
-        } else if (arg === "--copy") {
-            options.copy = true;
-        } else if (arg === "--overwrite") {
-            options.overwrite = true;
+        } else if (arg === "--copy" || arg === "--overwrite" || arg === "--name" || arg.startsWith("--name=")) {
+            throw new Error(`${arg.split("=")[0]} was removed: publish-legends now always copies only the Legends viewer files and replaces the published directory`);
         } else if (arg.startsWith("--")) {
             throw new Error(`Unknown publish-legends option "${arg}"`);
         } else if (!options.sourceDir) {
@@ -225,35 +216,6 @@ function timestampRunId(date: Date, seed: number): string {
     return `sim-${year}-${month}-${day}-${hour}-${minute}-seed-${seedLabel}`;
 }
 
-function assertSafeRunName(name: string): string {
-    if (!/^[a-zA-Z0-9._-]+$/.test(name)) {
-        throw new Error(`Run name "${name}" must contain only letters, numbers, dots, underscores, or hyphens`);
-    }
-    if (name === "." || name === "..") throw new Error(`Invalid run name "${name}"`);
-    return name;
-}
-
-function copyOrMoveDirectory(sourceDir: string, destinationDir: string, options: PublishOptions) {
-    if (fs.existsSync(destinationDir)) {
-        if (!options.overwrite) throw new Error(`Destination already exists: ${destinationDir}. Pass --overwrite to replace it.`);
-        fs.rmSync(destinationDir, {recursive: true, force: true});
-    }
-
-    fs.mkdirSync(path.dirname(destinationDir), {recursive: true});
-    if (options.copy) {
-        fs.cpSync(sourceDir, destinationDir, {recursive: true});
-        return;
-    }
-
-    try {
-        fs.renameSync(sourceDir, destinationDir);
-    } catch (error: any) {
-        if (error?.code !== "EXDEV") throw error;
-        fs.cpSync(sourceDir, destinationDir, {recursive: true});
-        fs.rmSync(sourceDir, {recursive: true, force: true});
-    }
-}
-
 function resolveMapPath(sourceDir: string, data: any): string | undefined {
     const imagePath = typeof data?.viewerMap?.imagePath === "string" ? data.viewerMap.imagePath : undefined;
     const candidates = [
@@ -273,17 +235,6 @@ function assertPublishPngSize(source: Buffer, label: string): {width: number; he
     return {width: image.width, height: image.height};
 }
 
-function writePublishPngBuffer(source: Buffer, destinationPath: string, label: string): {width: number; height: number} {
-    const size = assertPublishPngSize(source, label);
-    fs.mkdirSync(path.dirname(destinationPath), {recursive: true});
-    fs.writeFileSync(destinationPath, source);
-    return size;
-}
-
-function writePublishPng(sourcePath: string, destinationPath: string, label: string): {width: number; height: number} {
-    return writePublishPngBuffer(fs.readFileSync(sourcePath), destinationPath, label);
-}
-
 function findFramePaths(dir: string): string[] {
     if (!isDirectory(dir)) return [];
     return fs.readdirSync(dir)
@@ -293,42 +244,17 @@ function findFramePaths(dir: string): string[] {
         .filter(filePath => fs.statSync(filePath).isFile());
 }
 
-function detectFramePaths(destinationDir: string, options: PublishOptions): string[] {
-    if (options.framesDir) return findFramePaths(path.resolve(options.framesDir));
-
+function detectSourceFramePaths(sourceDir: string): string[] {
     const candidates = [
-        path.join(destinationDir, "snapshots", "maps"),
-        path.join(destinationDir, "snapshot", "maps"),
-        path.join(destinationDir, "maps"),
+        path.join(sourceDir, "snapshots", "maps"),
+        path.join(sourceDir, "snapshot", "maps"),
+        path.join(sourceDir, "maps"),
     ];
     for (let candidate of candidates) {
         const frames = findFramePaths(candidate);
         if (frames.length > 0) return frames;
     }
     return [];
-}
-
-function prepareFrames(framePaths: string[], mapPath: string, destinationDir: string): number {
-    const mapsDir = path.join(destinationDir, "snapshots", "maps");
-    const sourceBuffers = (framePaths.length > 0 ? framePaths : [mapPath])
-        .map(framePath => ({name: path.basename(framePath), buffer: fs.readFileSync(framePath)}));
-
-    fs.rmSync(mapsDir, {recursive: true, force: true});
-    fs.mkdirSync(mapsDir, {recursive: true});
-
-    for (let index = 0; index < sourceBuffers.length; index++) {
-        const framePath = path.join(mapsDir, `year-${String(index).padStart(3, "0")}.png`);
-        writePublishPngBuffer(sourceBuffers[index].buffer, framePath, `Frame ${sourceBuffers[index].name}`);
-    }
-    return sourceBuffers.length;
-}
-
-function ensureGif(destinationDir: string, frameCount: number, fps: number) {
-    const mapsDir = path.join(destinationDir, "snapshots", "maps");
-    const gifPath = path.join(destinationDir, "map.gif");
-    writeSnapshotGif(mapsDir, gifPath, fps);
-    fs.copyFileSync(gifPath, path.join(destinationDir, "world.gif"));
-    console.log(`Prepared ${frameCount} GIF frame${frameCount === 1 ? "" : "s"}`);
 }
 
 function escapeJsonForHtml(json: string): string {
@@ -350,18 +276,6 @@ function rewriteViewerMapPath(viewerPath: string) {
     data.viewerMap = {imagePath: "map.png"};
     const replacement = `${match[1]}${escapeJsonForHtml(JSON.stringify(data))}${match[3]}`;
     fs.writeFileSync(viewerPath, html.replace(scriptJsonPattern(), replacement));
-}
-
-function renameViewerIndex(destinationDir: string): string {
-    const indexPath = path.join(destinationDir, "index.html");
-    const legendsPath = path.join(destinationDir, "legends.html");
-    if (fs.existsSync(indexPath)) {
-        if (fs.existsSync(legendsPath)) fs.rmSync(legendsPath, {force: true});
-        fs.renameSync(indexPath, legendsPath);
-    }
-    if (!fs.existsSync(legendsPath)) throw new Error(`Missing Legends viewer index.html or legends.html in ${destinationDir}`);
-    rewriteViewerMapPath(legendsPath);
-    return legendsPath;
 }
 
 function defaultTitle(data: any, seed: number): string {
@@ -466,7 +380,7 @@ h1 { font-size: 42px; line-height: 1.05; margin: 0; letter-spacing: 0; }
 </head>
 <body>
 <div class="shell">
-<div class="topbar"><a class="back" href="../">Published simulations</a><span class="back">${escapeHtml(metadata.id)}</span></div>
+<div class="topbar"><span class="back">Fabulae Ex Inani</span><span class="back">${escapeHtml(metadata.id)}</span></div>
 <header>
 <h1>${escapeHtml(metadata.title)}</h1>
 <p class="deck">${escapeHtml(metadata.simulationRange)}. Seed ${escapeHtml(metadata.seed)} with ${escapeHtml(summary.civilizations)} civilization${summary.civilizations === 1 ? "" : "s"}, ${escapeHtml(summary.settlements)} settlement${summary.settlements === 1 ? "" : "s"}, ${escapeHtml(summary.people)} people, and ${escapeHtml(summary.events)} recorded events.</p>
@@ -507,117 +421,114 @@ ${metric("Story hooks", summary.storyHooks)}
 `;
 }
 
-function publishedIndexHtml(runs: RunMetadata[]): string {
-    const items = runs.map(run => {
-        const summary = run.summary;
-        return `<article class="run">
-<a class="thumb" href="${escapeHtml(run.id)}/"><img src="${escapeHtml(run.id)}/map.png" alt="${escapeHtml(run.title)} map"></a>
-<div>
-<h2><a href="${escapeHtml(run.id)}/">${escapeHtml(run.title)}</a></h2>
-<p>${escapeHtml(run.simulationRange)} - seed ${escapeHtml(run.seed)} - ${escapeHtml(summary.civilizations)} civs - ${escapeHtml(summary.people)} people - ${escapeHtml(summary.events)} events</p>
-<div class="links"><a href="${escapeHtml(run.id)}/legends.html">Legends</a><a href="${escapeHtml(run.id)}/map.gif">GIF</a><a href="${escapeHtml(run.id)}/legends.json">JSON</a></div>
-</div>
-</article>`;
-    }).join("\n");
-
-    const body = runs.length > 0
-        ? items
-        : `<p class="empty">No simulations have been published yet.</p>`;
-
-    return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Published Simulations</title>
-<style>
-:root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; background: #f7f8f6; color: #1d2320; }
-body { margin: 0; }
-a { color: #1f6670; text-decoration: none; }
-a:hover { text-decoration: underline; }
-.shell { max-width: 1100px; margin: 0 auto; padding: 30px; }
-h1 { font-size: 38px; margin: 0 0 8px; letter-spacing: 0; }
-.deck { color: #4f5c58; margin: 0 0 22px; }
-.list { display: grid; gap: 14px; }
-.run { display: grid; grid-template-columns: 132px 1fr; gap: 16px; align-items: center; border: 1px solid #cbd5d0; background: #ffffff; border-radius: 8px; padding: 12px; }
-.thumb img { width: 132px; height: 132px; object-fit: cover; display: block; background: #d8dfdb; }
-h2 { font-size: 20px; margin: 0 0 6px; }
-p { line-height: 1.45; }
-.run p { margin: 0; color: #4f5c58; }
-.links { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
-.links a { border: 1px solid #8aa09a; border-radius: 6px; padding: 6px 8px; background: #edf4f1; font-size: 14px; }
-.empty { border: 1px solid #cbd5d0; background: #ffffff; border-radius: 8px; padding: 18px; color: #4f5c58; }
-@media (max-width: 620px) { .shell { padding: 20px; } .run { grid-template-columns: 1fr; } .thumb img { width: 100%; height: auto; aspect-ratio: 1 / 1; } }
-</style>
-</head>
-<body>
-<div class="shell">
-<h1>Published Simulations</h1>
-<p class="deck">Static Legends Viewer exports ready for GitHub Pages.</p>
-<div class="list">
-${body}
-</div>
-</div>
-</body>
-</html>
-`;
-}
-
 function writeRunMetadata(destinationDir: string, metadata: RunMetadata) {
     fs.writeFileSync(path.join(destinationDir, "run.json"), JSON.stringify(metadata, null, 2));
     fs.writeFileSync(path.join(destinationDir, "index.html"), runLandingHtml(metadata));
 }
 
-export function refreshPublishedIndex(publishedDir = defaultPublishedDir) {
-    const root = path.resolve(publishedDir);
-    fs.mkdirSync(root, {recursive: true});
-    fs.writeFileSync(path.join(root, ".nojekyll"), "");
+function assertSafePublishTarget(publishedDir: string, sourceDir: string) {
+    if (publishedDir === path.parse(publishedDir).root) {
+        throw new Error(`Refusing to publish into filesystem root ${publishedDir}`);
+    }
+    if (fs.existsSync(path.join(publishedDir, ".git"))) {
+        throw new Error(`Refusing to replace ${publishedDir}: it contains a .git entry`);
+    }
+    const relSource = path.relative(publishedDir, sourceDir);
+    if (relSource === "" || (!relSource.startsWith("..") && !path.isAbsolute(relSource))) {
+        throw new Error(`Source ${sourceDir} is inside the published directory ${publishedDir}; publish from an output/ run instead`);
+    }
+    const relPublished = path.relative(sourceDir, publishedDir);
+    if (relPublished === "" || (!relPublished.startsWith("..") && !path.isAbsolute(relPublished))) {
+        throw new Error(`Published directory ${publishedDir} is inside the source directory ${sourceDir}`);
+    }
+}
 
-    const runs = fs.readdirSync(root, {withFileTypes: true})
-        .filter(entry => entry.isDirectory())
-        .map(entry => path.join(root, entry.name, "run.json"))
-        .filter(filePath => fs.existsSync(filePath))
-        .map(filePath => JSON.parse(fs.readFileSync(filePath, "utf8")) as RunMetadata)
-        .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt) || b.id.localeCompare(a.id));
+function clearDirectory(dir: string) {
+    fs.mkdirSync(dir, {recursive: true});
+    for (let entry of fs.readdirSync(dir)) {
+        fs.rmSync(path.join(dir, entry), {recursive: true, force: true});
+    }
+}
 
-    fs.writeFileSync(path.join(root, "index.html"), publishedIndexHtml(runs));
-    console.log(`Wrote ${path.join(root, "index.html")}`);
+function copyViewerChunkDirs(sourceDir: string, publishedDir: string) {
+    for (let dirName of [...requiredViewerChunkDirs, ...optionalViewerChunkDirs]) {
+        const chunkDir = path.join(sourceDir, dirName);
+        if (isDirectory(chunkDir)) {
+            fs.cpSync(chunkDir, path.join(publishedDir, dirName), {recursive: true});
+        } else if (requiredViewerChunkDirs.includes(dirName)) {
+            console.warn(`Warning: ${sourceDir} has no ${dirName}/ directory; the published viewer will fall back to its embedded sample archive`);
+        }
+    }
+}
+
+export function publishLegendsRun(sourceDirInput: string, overrides: PublishRunOptions = {}): string {
+    const sourceDir = path.resolve(sourceDirInput);
+    if (!isDirectory(sourceDir)) throw new Error(`Legends source is not a directory: ${sourceDir}`);
+
+    const viewerHtmlPath = [path.join(sourceDir, "index.html"), path.join(sourceDir, "legends.html")]
+        .find(candidate => fs.existsSync(candidate));
+    if (!viewerHtmlPath) throw new Error(`Missing Legends viewer index.html or legends.html in ${sourceDir}. Generate with --legends-html first.`);
+    const legendsJsonPath = path.join(sourceDir, "legends.json");
+    if (!fs.existsSync(legendsJsonPath)) throw new Error(`Missing legends.json in ${sourceDir}. Generate with --legends-json first.`);
+
+    const publishedDir = path.resolve(overrides.publishedDir ?? defaultPublishedDir);
+    assertSafePublishTarget(publishedDir, sourceDir);
+
+    const data = loadRunData(sourceDir);
+    const seed = seedFromData(data, overrides.seed);
+    const title = overrides.title ?? defaultTitle(data, seed);
+    const publishedAt = new Date();
+    const runId = timestampRunId(publishedAt, seed);
+
+    // Validate every publishable asset before touching the published directory,
+    // so a failed publish never leaves it half-replaced.
+    const mapSourcePath = resolveMapPath(sourceDir, data);
+    if (!mapSourcePath) throw new Error(`Could not find a source map PNG for ${sourceDir}`);
+    const mapBuffer = fs.readFileSync(mapSourcePath);
+    assertPublishPngSize(mapBuffer, "Map PNG");
+
+    const framePaths = overrides.framesDir
+        ? findFramePaths(path.resolve(overrides.framesDir))
+        : detectSourceFramePaths(sourceDir);
+    const frames = framePaths.map(framePath => {
+        const buffer = fs.readFileSync(framePath);
+        assertPublishPngSize(buffer, `Frame ${path.basename(framePath)}`);
+        return buffer;
+    });
+    if (frames.length === 0) frames.push(mapBuffer);
+
+    clearDirectory(publishedDir);
+
+    const legendsPath = path.join(publishedDir, "legends.html");
+    fs.copyFileSync(viewerHtmlPath, legendsPath);
+    rewriteViewerMapPath(legendsPath);
+    fs.copyFileSync(legendsJsonPath, path.join(publishedDir, "legends.json"));
+    copyViewerChunkDirs(sourceDir, publishedDir);
+    fs.writeFileSync(path.join(publishedDir, "map.png"), mapBuffer);
+
+    const mapsDir = path.join(publishedDir, "snapshots", "maps");
+    fs.mkdirSync(mapsDir, {recursive: true});
+    for (let index = 0; index < frames.length; index++) {
+        fs.writeFileSync(path.join(mapsDir, `year-${String(index).padStart(3, "0")}.png`), frames[index]);
+    }
+    const gifPath = path.join(publishedDir, "map.gif");
+    writeSnapshotGif(mapsDir, gifPath, overrides.gifFps ?? defaultGifFps);
+    fs.copyFileSync(gifPath, path.join(publishedDir, "world.gif"));
+    console.log(`Prepared ${frames.length} GIF frame${frames.length === 1 ? "" : "s"}`);
+
+    const metadata = buildMetadata(runId, data, seed, title, publishedAt.toISOString());
+    writeRunMetadata(publishedDir, metadata);
+    fs.writeFileSync(path.join(publishedDir, ".nojekyll"), "");
+
+    console.log(`Published Legends viewer from ${sourceDir} to ${publishedDir}`);
+    return publishedDir;
 }
 
 export function runPublishLegendsCommand(argv = process.argv.slice(2)) {
     const options = parseArgs(argv);
     const sourceDir = path.resolve(options.sourceDir ?? findLatestLegendsOutput(defaultOutputRoot) ?? "");
     if (!sourceDir || !isDirectory(sourceDir) || !hasLegendsOutputFiles(sourceDir)) {
-        throw new Error(`Could not find a Legends output directory. Pass --from <dir> or generate one first.`);
+        throw new Error(`Could not find a Legends output directory. Pass --from <dir> or generate one with --legends-html and --legends-json first.`);
     }
-
-    const data = loadRunData(sourceDir);
-    const seed = seedFromData(data, options.seed);
-    const runId = assertSafeRunName(options.runName ?? timestampRunId(new Date(), seed));
-    const destinationDir = path.join(path.resolve(options.publishedDir), runId);
-    const externalMapPath = resolveMapPath(sourceDir, data);
-    if (!externalMapPath) throw new Error(`Could not find a source map PNG for ${sourceDir}`);
-    const mapRelativeToSource = path.relative(sourceDir, externalMapPath);
-
-    copyOrMoveDirectory(sourceDir, destinationDir, options);
-    const legendsPath = renameViewerIndex(destinationDir);
-    console.log(`Prepared Legends viewer at ${legendsPath}`);
-
-    const mapPath = path.join(destinationDir, "map.png");
-    const movedMapPath = !mapRelativeToSource.startsWith("..") && !path.isAbsolute(mapRelativeToSource)
-        ? path.join(destinationDir, mapRelativeToSource)
-        : externalMapPath;
-    const mapSourcePath = fs.existsSync(mapPath) ? mapPath : movedMapPath;
-    const mapStats = writePublishPng(mapSourcePath, mapPath, "Map PNG");
-    console.log(`Verified map.png at ${mapStats.width}x${mapStats.height}`);
-
-    const frameCount = prepareFrames(detectFramePaths(destinationDir, options), mapPath, destinationDir);
-    ensureGif(destinationDir, frameCount, options.gifFps);
-
-    const title = options.title ?? defaultTitle(data, seed);
-    const metadata = buildMetadata(runId, data, seed, title, new Date().toISOString());
-    writeRunMetadata(destinationDir, metadata);
-    refreshPublishedIndex(options.publishedDir);
-
-    console.log(`Published ${sourceDir} to ${destinationDir}`);
+    publishLegendsRun(sourceDir, options);
 }

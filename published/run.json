@@ -1,0 +1,26 @@
+{
+  "id": "sim-26-07-07-18-26-seed-077",
+  "title": "Torreach and Norreach Simulation",
+  "publishedAt": "2026-07-07T22:26:37.268Z",
+  "simulationRange": "Year 0 to 100",
+  "startYear": 0,
+  "endYear": 100,
+  "seed": 77,
+  "terrainSeed": 187,
+  "meshSeed": 12345,
+  "summary": {
+    "civilizations": 5,
+    "settlements": 25,
+    "people": 27687,
+    "events": 293495,
+    "storyHooks": 120
+  },
+  "assets": {
+    "landing": "index.html",
+    "legends": "legends.html",
+    "map": "map.png",
+    "mapGif": "map.gif",
+    "worldGif": "world.gif",
+    "legendsJson": "legends.json"
+  }
+}

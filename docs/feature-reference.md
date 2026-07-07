@@ -111,14 +111,13 @@ Generate a Dwarf-Fortress-style Legends archive and self-contained wiki viewer:
 npm run generate -- --size 1024 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 100 --civ-seed 77 --out output/legends-map.png --legends-json output/legends/legends.json --legends-html output/legends/index.html
 ```
 
-Generate a publish-ready Legends run with a 640 pixel map and one rendered map frame per simulated year:
+Generate a publish-ready Legends run with a 640 pixel map and one rendered map frame per simulated year, publishing it when the run completes:
 
 ```sh
-npm run generate -- --size 640 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 100 --civ-seed 77 --out output/legends/map.png --legends-json output/legends/legends.json --legends-html output/legends/index.html --snapshot-dir output/legends/snapshots --snapshot-every 1 --snapshot-render-every 1 --snapshot-gif output/legends/map.gif
-node dist/world-mapgen.cjs publish-legends output/legends
+npm run generate -- --size 640 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 100 --civ-seed 77 --out output/legends/map.png --legends-json output/legends/legends.json --legends-html output/legends/index.html --snapshot-dir output/legends/snapshots --snapshot-every 1 --snapshot-render-every 1 --publish
 ```
 
-`publish-legends` moves the source run to `published/sim-YY-MM-DD-HH-MM-seed-###` by default. It can also publish the newest `output/**` Legends directory when no source is passed, or copy instead of move with `--copy`. Published runs get a root landing page with the run title, simulation range, summary metrics, `map.gif`, `world.gif`, `map.png`, `legends.json`, and the full wiki viewer at `legends.html`. The command also regenerates `published/index.html`, which is the GitHub Pages root.
+`--publish` (or the standalone `publish-legends` command) replaces the contents of `published/` with the latest run's Legends viewer. Only the viewer files are copied — the wiki viewer as `legends.html`, `legends.json`, the `indexes/`, `records/`, `texts/`, and `mentions/` chunk directories, `map.png`, yearly frames under `snapshots/maps/`, and a rebuilt `map.gif` and `world.gif` — never logs, profiles, or other run artifacts, which stay in `output/`. The published root gets a generated landing `index.html` with the run title, simulation range, and summary metrics, plus `run.json` metadata, and is the GitHub Pages root. Standalone `publish-legends` publishes the newest `output/**` directory containing `legends.json` and a viewer HTML when no source is passed; pass `--from <dir>` to pick one explicitly. Both paths require the map and frames to already be `640x640`.
 
 Serve the generated viewer over local HTTP:
 

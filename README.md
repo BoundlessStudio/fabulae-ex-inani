@@ -82,11 +82,10 @@ node dist/world-mapgen.cjs verify-legends output/legends/legends.json output/leg
 Publish a run for GitHub Pages:
 
 ```sh
-npm run generate -- --size 640 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 100 --civ-seed 77 --out output/legends/map.png --legends-json output/legends/legends.json --legends-html output/legends/index.html --snapshot-dir output/legends/snapshots --snapshot-every 1 --snapshot-render-every 1 --snapshot-gif output/legends/map.gif
-node dist/world-mapgen.cjs publish-legends output/legends
+npm run generate -- --size 640 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 100 --civ-seed 77 --out output/legends/map.png --legends-json output/legends/legends.json --legends-html output/legends/index.html --snapshot-dir output/legends/snapshots --snapshot-every 1 --snapshot-render-every 1 --publish
 ```
 
-`publish-legends` moves the generated output into `published/sim-YY-MM-DD-HH-MM-seed-###`, normalizes `map.png` to `640x640`, creates `map.gif` and `world.gif`, turns the run root `index.html` into a summary landing page, keeps the wiki viewer at `legends.html`, and regenerates `published/index.html`.
+With `--publish`, the Legends viewer is copied into `published/` as soon as the run completes, replacing whatever was published before. Only the viewer files are copied: the wiki viewer as `legends.html`, `legends.json`, the `indexes/`, `records/`, `texts/`, and `mentions/` chunk directories, `map.png`, yearly frames under `snapshots/maps/`, a rebuilt `map.gif` and `world.gif`, plus a generated landing `index.html` and `run.json`. Logs and other run artifacts stay in `output/`. To publish an existing run without regenerating, use `node dist/world-mapgen.cjs publish-legends output/legends`.
 
 ## Repository Layout
 
