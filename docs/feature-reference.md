@@ -247,7 +247,7 @@ Stress-test a 500-year simulation with checkpoint profiles:
 npm run stress:500
 ```
 
-This uses a small 128px render target, the default parallel civilization workers, phase timing checkpoints, old-event text spilling after a 10-year hot window, and writes `output/stress-probes/probe-500-final.png`, `output/stress-probes/probe-500-final.json`, old event text chunks in `output/stress-probes/probe-500-event-text/`, and 100-year checkpoint profiles in `output/stress-probes/probe-500-profiles/` as `year-100.json`, `year-200.json`, `year-300.json`, `year-400.json`, and `year-500.json` when the full run completes. Worker terrain snapshots use shared buffers where practical so default parallel runs do not clone full triangle arrays once per worker, and settlement resource potentials are cached at settlement creation before annual economy drafts are dispatched.
+This uses a 640px final render target, the default parallel civilization workers, phase timing checkpoints, old-event text spilling after a 10-year hot window, and writes `output/stress-probes/probe-500-final.png`, `output/stress-probes/probe-500-final.json`, old event text chunks in `output/stress-probes/probe-500-event-text/`, and 100-year checkpoint profiles in `output/stress-probes/probe-500-profiles/` as `year-100.json`, `year-200.json`, `year-300.json`, `year-400.json`, and `year-500.json` when the full run completes. Worker terrain snapshots use shared buffers where practical so default parallel runs do not clone full triangle arrays once per worker, and settlement resource potentials are cached at settlement creation before annual economy drafts are dispatched.
 
 Evaluate the top generated story hooks with OpenRouter after a profile run:
 

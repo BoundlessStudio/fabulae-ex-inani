@@ -265,35 +265,23 @@ function resolveMapPath(sourceDir: string, data: any): string | undefined {
     return candidates.find(candidate => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
 }
 
-function resizePngNearest(input: PNG, width: number, height: number): PNG {
-    if (input.width === width && input.height === height) return input;
-
-    const output = new PNG({width, height});
-    for (let y = 0; y < height; y++) {
-        const sourceY = Math.min(input.height - 1, Math.floor(y * input.height / height));
-        for (let x = 0; x < width; x++) {
-            const sourceX = Math.min(input.width - 1, Math.floor(x * input.width / width));
-            const sourceIndex = (sourceY * input.width + sourceX) * 4;
-            const targetIndex = (y * width + x) * 4;
-            output.data[targetIndex] = input.data[sourceIndex];
-            output.data[targetIndex + 1] = input.data[sourceIndex + 1];
-            output.data[targetIndex + 2] = input.data[sourceIndex + 2];
-            output.data[targetIndex + 3] = input.data[sourceIndex + 3];
-        }
-    }
-    return output;
-}
-
-function writeNormalizedPngBuffer(source: Buffer, destinationPath: string): {originalWidth: number; originalHeight: number} {
+function assertPublishPngSize(source: Buffer, label: string): {width: number; height: number} {
     const image = PNG.sync.read(source);
-    const normalized = resizePngNearest(image, publishMapSize, publishMapSize);
-    fs.mkdirSync(path.dirname(destinationPath), {recursive: true});
-    fs.writeFileSync(destinationPath, PNG.sync.write(normalized));
-    return {originalWidth: image.width, originalHeight: image.height};
+    if (image.width !== publishMapSize || image.height !== publishMapSize) {
+        throw new Error(`${label} must already be ${publishMapSize}x${publishMapSize}; found ${image.width}x${image.height}. Regenerate the export with --size ${publishMapSize} instead of publishing an upscaled image.`);
+    }
+    return {width: image.width, height: image.height};
 }
 
-function writeNormalizedPng(sourcePath: string, destinationPath: string): {originalWidth: number; originalHeight: number} {
-    return writeNormalizedPngBuffer(fs.readFileSync(sourcePath), destinationPath);
+function writePublishPngBuffer(source: Buffer, destinationPath: string, label: string): {width: number; height: number} {
+    const size = assertPublishPngSize(source, label);
+    fs.mkdirSync(path.dirname(destinationPath), {recursive: true});
+    fs.writeFileSync(destinationPath, source);
+    return size;
+}
+
+function writePublishPng(sourcePath: string, destinationPath: string, label: string): {width: number; height: number} {
+    return writePublishPngBuffer(fs.readFileSync(sourcePath), destinationPath, label);
 }
 
 function findFramePaths(dir: string): string[] {
@@ -320,17 +308,17 @@ function detectFramePaths(destinationDir: string, options: PublishOptions): stri
     return [];
 }
 
-function normalizeFrames(framePaths: string[], mapPath: string, destinationDir: string): number {
+function prepareFrames(framePaths: string[], mapPath: string, destinationDir: string): number {
     const mapsDir = path.join(destinationDir, "snapshots", "maps");
     const sourceBuffers = (framePaths.length > 0 ? framePaths : [mapPath])
-        .map(framePath => fs.readFileSync(framePath));
+        .map(framePath => ({name: path.basename(framePath), buffer: fs.readFileSync(framePath)}));
 
     fs.rmSync(mapsDir, {recursive: true, force: true});
     fs.mkdirSync(mapsDir, {recursive: true});
 
     for (let index = 0; index < sourceBuffers.length; index++) {
         const framePath = path.join(mapsDir, `year-${String(index).padStart(3, "0")}.png`);
-        writeNormalizedPngBuffer(sourceBuffers[index], framePath);
+        writePublishPngBuffer(sourceBuffers[index].buffer, framePath, `Frame ${sourceBuffers[index].name}`);
     }
     return sourceBuffers.length;
 }
@@ -452,14 +440,14 @@ function runLandingHtml(metadata: RunMetadata): string {
 body { margin: 0; }
 a { color: #1f6670; text-decoration: none; }
 a:hover { text-decoration: underline; }
-.shell { max-width: 1180px; margin: 0 auto; padding: 28px; }
+.shell { max-width: 1360px; margin: 0 auto; padding: 28px; container-type: inline-size; }
 .topbar { display: flex; justify-content: space-between; gap: 16px; align-items: center; margin-bottom: 22px; }
 .back { font-size: 14px; color: #4f5c58; }
 h1 { font-size: 42px; line-height: 1.05; margin: 0; letter-spacing: 0; }
 .deck { max-width: 760px; color: #4f5c58; line-height: 1.5; margin: 10px 0 0; }
-.layout { display: grid; grid-template-columns: minmax(280px, 640px) 1fr; gap: 24px; align-items: start; margin-top: 24px; }
+.layout { display: grid; grid-template-columns: minmax(420px, 640px) minmax(320px, 1fr); gap: 24px; align-items: start; margin-top: 24px; }
 .world { margin: 0; }
-.world img { width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border: 1px solid #cbd5d0; background: #d8dfdb; display: block; }
+.world img { width: 100%; max-width: 640px; aspect-ratio: 1 / 1; object-fit: cover; border: 1px solid #cbd5d0; background: #d8dfdb; display: block; }
 .panel { border: 1px solid #cbd5d0; background: #ffffff; border-radius: 8px; padding: 16px; }
 .panel h2 { font-size: 18px; margin: 0 0 12px; }
 .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -472,7 +460,8 @@ h1 { font-size: 42px; line-height: 1.05; margin: 0; letter-spacing: 0; }
 .facts div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #e2e7e4; padding-bottom: 8px; }
 .facts div:last-child { border-bottom: 0; padding-bottom: 0; }
 .facts span { color: #60706b; }
-@media (max-width: 860px) { .layout { grid-template-columns: 1fr; } h1 { font-size: 32px; } .shell { padding: 20px; } }
+@container (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
+@media (max-width: 980px) { .layout { grid-template-columns: 1fr; } h1 { font-size: 32px; } .shell { padding: 20px; } }
 </style>
 </head>
 <body>
@@ -619,12 +608,10 @@ export function runPublishLegendsCommand(argv = process.argv.slice(2)) {
         ? path.join(destinationDir, mapRelativeToSource)
         : externalMapPath;
     const mapSourcePath = fs.existsSync(mapPath) ? mapPath : movedMapPath;
-    const mapStats = writeNormalizedPng(mapSourcePath, mapPath);
-    if (mapStats.originalWidth !== publishMapSize || mapStats.originalHeight !== publishMapSize) {
-        console.log(`Normalized map.png from ${mapStats.originalWidth}x${mapStats.originalHeight} to ${publishMapSize}x${publishMapSize}`);
-    }
+    const mapStats = writePublishPng(mapSourcePath, mapPath, "Map PNG");
+    console.log(`Verified map.png at ${mapStats.width}x${mapStats.height}`);
 
-    const frameCount = normalizeFrames(detectFramePaths(destinationDir, options), mapPath, destinationDir);
+    const frameCount = prepareFrames(detectFramePaths(destinationDir, options), mapPath, destinationDir);
     ensureGif(destinationDir, frameCount, options.gifFps);
 
     const title = options.title ?? defaultTitle(data, seed);

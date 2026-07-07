@@ -616,12 +616,13 @@ function legendsViewerHtml(data: string, dataSource?: string): string {
 :root { color-scheme: light; font-family: Inter, Segoe UI, Arial, sans-serif; background: #f4f1e8; color: #211f1a; }
 body { margin: 0; }
 .app { display: grid; grid-template-columns: minmax(280px, 360px) 1fr; height: 100vh; min-height: 100vh; }
-aside { border-right: 1px solid #c9c1ae; background: #eee8da; padding: 16px; overflow: auto; }
+aside { border-right: 1px solid #c9c1ae; background: #eee8da; padding: 16px; overflow: hidden; display: flex; flex-direction: column; gap: 12px; min-height: 0; }
 main { overflow: auto; }
 h1 { font-size: 20px; margin: 0 0 12px; }
 h2 { font-size: 30px; line-height: 1.12; margin: 0; }
 h3 { font-size: 15px; margin: 24px 0 8px; text-transform: uppercase; letter-spacing: .04em; color: #665b49; }
-.summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0 16px; }
+.sidebar-tools { display: grid; gap: 10px; flex: 0 0 auto; min-height: 0; }
+.summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; max-height: 190px; overflow: auto; padding-right: 4px; flex: 0 0 auto; }
 .metric { background: #faf7ef; border: 1px solid #d8cfbd; border-radius: 6px; padding: 8px; }
 .metric strong { display: block; font-size: 18px; }
 .sample-note { grid-column: 1 / -1; background: #fff7dc; border: 1px solid #d6ba70; border-radius: 6px; padding: 8px; font-size: 13px; color: #5d4a1b; }
@@ -630,17 +631,25 @@ input { width: 100%; box-sizing: border-box; padding: 10px 12px; border: 1px sol
 .search-all { display: inline-flex; align-items: center; gap: 5px; border: 1px solid #b8ad97; border-radius: 6px; background: #faf7ef; padding: 8px; font-size: 13px; white-space: nowrap; }
 .search-all input { width: auto; margin: 0; }
 .list-note { color: #6f6657; font-size: 13px; margin: 0 0 8px; }
-.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; max-height: 150px; overflow: auto; padding-right: 4px; }
 a { color: #245c68; text-decoration: none; }
 a:hover { text-decoration: underline; }
 button { border: 1px solid #aa9d84; border-radius: 6px; background: #faf7ef; padding: 7px 9px; cursor: pointer; }
 .tabs a { border: 1px solid #aa9d84; border-radius: 6px; background: #faf7ef; padding: 7px 9px; }
 .tabs a.active { background: #2f5e6e; color: white; border-color: #2f5e6e; text-decoration: none; }
-.list { display: grid; gap: 6px; }
+.tabs a.home-tab { font-weight: 700; }
+.list { display: grid; gap: 6px; align-content: start; overflow: auto; min-height: 160px; flex: 1 1 auto; padding-right: 4px; }
 .item { text-align: left; border: 1px solid #d1c7b4; background: #fffaf0; border-radius: 6px; padding: 9px; color: inherit; }
 .item.active { border-color: #2f5e6e; box-shadow: inset 3px 0 0 #2f5e6e; }
 .item small { display: block; color: #6f6657; margin-top: 3px; }
 .detail { max-width: 1180px; padding: 24px 32px 48px; }
+.home-dashboard { display: grid; gap: 14px; }
+.home-collection-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.home-collection { display: block; border: 1px solid #d1c7b4; background: #fffaf0; border-radius: 8px; padding: 11px 12px; color: inherit; }
+.home-collection strong { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 5px; }
+.home-collection span { color: #6f6657; font-size: 13px; line-height: 1.35; }
+.home-link-list { display: flex; flex-wrap: wrap; gap: 7px; }
+.home-link-list a { border: 1px solid #c8bca7; border-radius: 999px; background: #faf7ef; padding: 6px 9px; }
 .page-header { border-bottom: 1px solid #d3c8b5; margin-bottom: 14px; padding-bottom: 16px; }
 .breadcrumb { color: #6f6657; font-size: 13px; margin-bottom: 8px; }
 .page-title-row { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; }
@@ -682,20 +691,22 @@ button { border: 1px solid #aa9d84; border-radius: 6px; background: #faf7ef; pad
 .load-error { background: #fff2ed; border: 1px solid #d0937d; border-radius: 6px; padding: 12px; color: #5a2112; }
 .load-error code { background: #f8d8cd; border-radius: 4px; padding: 1px 4px; }
 @media (max-width: 980px) { .key-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 760px) { .app { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid #c9c1ae; max-height: 48vh; } .detail { padding: 18px; } .page-title-row { display: block; } .record-badge { display: inline-block; margin-top: 8px; } .key-facts { grid-template-columns: 1fr; } .map-context { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .app { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid #c9c1ae; max-height: 48vh; } .summary { display: none; } .detail { padding: 18px; } .page-title-row { display: block; } .record-badge { display: inline-block; margin-top: 8px; } .key-facts { grid-template-columns: 1fr; } .map-context { grid-template-columns: 1fr; } }
 </style>
 </head>
 <body>
 <div class="app">
 <aside>
 <h1>World Legends</h1>
-<div id="summary" class="summary"></div>
+<div class="sidebar-tools">
 <div class="search-row">
 <input id="search" type="search" placeholder="Search legends">
 <label class="search-all"><input id="global-search" type="checkbox"> All</label>
 </div>
 <div id="tabs" class="tabs"></div>
+</div>
 <div id="list" class="list"></div>
+<div id="summary" class="summary"></div>
 </aside>
 <main><div id="detail" class="detail"><h2>Loading legends...</h2><p class="empty">Reading the generated archive.</p></div></main>
 </div>
@@ -942,6 +953,8 @@ data.chapterCount = data.chapterCount || data.chapters.length;
 data.storyHooks = data.storyHooks || [];
 data["story-hooks"] = data.storyHooks;
 data.storyHookCount = data.storyHookCount || data.storyHooks.length;
+const homeKind = "home";
+const defaultExploreKind = data.storyHooks.length ? "story-hooks" : "people";
 const kinds = [
   ["story-hooks", "Story Hooks"],
   ["people", "People"],
@@ -1035,7 +1048,7 @@ const kinds = [
   ["civilizations", "Civs"],
   ["events", "Events"]
 ];
-const state = {kind: data.storyHooks.length ? "story-hooks" : "people", query: "", globalSearch: false};
+const state = {kind: defaultExploreKind, query: "", globalSearch: false};
 const globalSearchKinds = kinds.map(([kind]) => kind);
 const globalSearchMinimumLength = 3;
 const dataKeys = {
@@ -1463,7 +1476,7 @@ const router = {
   defaultKind: "people",
   parse(hash) {
     const rawHash = String(hash == null ? location.hash : hash).replace(/^#\\/?/, "");
-    if (!rawHash) return {kind: this.defaultKind, id: null, section: ""};
+    if (!rawHash) return {kind: homeKind, id: null, section: ""};
     const queryIndex = rawHash.indexOf("?");
     const path = queryIndex < 0 ? rawHash : rawHash.slice(0, queryIndex);
     const query = queryIndex < 0 ? "" : rawHash.slice(queryIndex + 1);
@@ -1471,6 +1484,12 @@ const router = {
       try { return decodeURIComponent(part); }
       catch { return part; }
     });
+    if (parts[0] === homeKind) {
+      let homeSection = "";
+      if (query) homeSection = new URLSearchParams(query).get("section") || "";
+      if (!homeSection && parts[1]) homeSection = parts[1] === "section" ? parts[2] || "" : parts[1];
+      return {kind: homeKind, id: null, section: normalizeRouteSection(homeSection)};
+    }
     const kind = maps[parts[0]] ? parts[0] : this.defaultKind;
     const rawId = parts[1] == null || parts[1] === "index" ? "" : parts[1];
     const numericId = rawId === "" ? null : Number(rawId);
@@ -1484,6 +1503,10 @@ const router = {
     return this.parse(location.hash);
   },
   toHash(route) {
+    if (route?.kind === homeKind) {
+      const section = normalizeRouteSection(route?.section);
+      return "#/" + homeKind + (section ? "?section=" + encodeURIComponent(section) : "");
+    }
     const kind = maps[route?.kind] ? route.kind : this.defaultKind;
     const id = route?.id == null || route.id === "" ? null : Number(route.id);
     const section = normalizeRouteSection(route?.section);
@@ -11360,6 +11383,66 @@ function renderDetail(kind, item) {
     renderSectionNav(sections) +
     '<div class="section-stack">' + sections.map(detailSection).join("") + '</div>';
 }
+const homeCollections = [
+  ["story-hooks", "Story Hooks", "Open narrative prompts generated from the current world state."],
+  ["people", "People", "Lives, relationships, reputations, and personal records."],
+  ["settlements", "Places", "Settlements, control changes, structures, and local context."],
+  ["civilizations", "Civilizations", "Kingdoms, collapse states, goals, and successor history."],
+  ["chapters", "Chapters", "Derived biography, place, artifact, road, and institution chapters."],
+  ["artifacts", "Artifacts", "Named objects, conditions, owners, and provenance."],
+  ["relationships", "Relationships", "Social bonds, unions, rivalries, claims, and milestones."],
+  ["events", "Events", "Chronological events linked across the generated archive."]
+];
+const homeCollectionCountFields = {
+  "story-hooks": "storyHookCount",
+  people: "personCount",
+  settlements: "settlementCount",
+  civilizations: "civilizationCount",
+  chapters: "chapterCount",
+  artifacts: "artifactCount",
+  relationships: "relationshipCount",
+  events: "eventCount"
+};
+function formatCount(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number.toLocaleString() : String(value || 0);
+}
+function collectionCount(kind) {
+  const countField = homeCollectionCountFields[kind];
+  if (countField && data[countField] != null) return data[countField];
+  const indexed = viewerIndex[kind];
+  if (Array.isArray(indexed) && indexed.length) return indexed.length;
+  const dataKey = dataKeys[kind] || kind;
+  const records = data[dataKey] || data[kind];
+  return Array.isArray(records) ? records.length : 0;
+}
+function homeCollectionCard(kind, label, description) {
+  return '<a class="home-collection" href="' + esc(hashFor(kind)) + '"><strong><span>' + esc(label) + '</span><span>' + esc(formatCount(collectionCount(kind))) + '</span></strong><span>' + esc(description) + '</span></a>';
+}
+function homeSampleLinks(kind, limit) {
+  const source = ((viewerIndex[kind] && viewerIndex[kind].length ? viewerIndex[kind] : data[dataKeys[kind] || kind]) || []).slice(0, limit || 8);
+  return source.map(item => '<a href="' + esc(hashFor(kind, item.id)) + '">' + esc(displayLabelFor(kind, item)) + '</a>').join("");
+}
+function renderHomeDashboard() {
+  const sampleStoryHooks = homeSampleLinks("story-hooks", 8);
+  const samplePeople = homeSampleLinks("people", 8);
+  const sampleEvents = homeSampleLinks("events", 8);
+  const sections = [
+    '<section class="detail-section"><h3>Collections</h3><div class="home-collection-grid">' + homeCollections.map(([kind, label, description]) => homeCollectionCard(kind, label, description)).join("") + '</div></section>',
+    sampleStoryHooks ? '<section class="detail-section"><h3>Story Hooks</h3><div class="home-link-list">' + sampleStoryHooks + '</div></section>' : "",
+    samplePeople ? '<section class="detail-section"><h3>People</h3><div class="home-link-list">' + samplePeople + '</div></section>' : "",
+    sampleEvents ? '<section class="detail-section"><h3>Recent Events</h3><div class="home-link-list">' + sampleEvents + '</div></section>' : ""
+  ].filter(Boolean).join("");
+  document.getElementById("detail").innerHTML =
+    '<div class="page-header"><div class="breadcrumb">Home</div><div class="page-title-row"><h2>World Legends Dashboard</h2><span class="record-badge">year ' + esc(data.year) + '</span></div>' +
+    '<p class="deck">Browse the generated archive from the left menu, search the active collection, or switch on All to search every generated legend index.</p>' +
+    '<div class="key-facts">' +
+    factText("People", formatCount(data.personCount)) +
+    factText("Places", formatCount(data.settlementCount)) +
+    factText("Civilizations", formatCount(data.civilizationCount)) +
+    factText("Events", formatCount(data.eventCount)) +
+    '</div></div><div class="home-dashboard">' + sections + '</div>';
+}
 function renderIndexOnlyDetail(kind, entry, message) {
   const title = entry?.label || (kinds.find(([k]) => k === kind)?.[1] || "Legends");
   const sublabel = entry?.sublabel || "";
@@ -11372,7 +11455,7 @@ function renderIndexOnlyDetail(kind, entry, message) {
 }
 function route() {
   const parsed = router.current();
-  state.kind = parsed.kind;
+  if (parsed.kind !== homeKind) state.kind = parsed.kind;
   return parsed;
 }
 function filteredItems() {
@@ -11410,7 +11493,9 @@ function filteredGlobalItems() {
 async function renderList() {
   const requestId = ++renderRequestId;
   const currentRoute = route();
-  const {kind, id} = currentRoute;
+  const isHome = currentRoute.kind === homeKind;
+  const kind = isHome ? state.kind : currentRoute.kind;
+  const id = isHome ? null : currentRoute.id;
   let indexLoadError = null;
   try {
     await loadIndex(kind);
@@ -11430,6 +11515,11 @@ async function renderList() {
   } else {
     const items = filteredItems();
     list.innerHTML = items.map(item => '<a class="item' + (item.id === id ? ' active' : '') + '" href="' + esc(hashFor(kind, item.id)) + '"><span>' + esc(displayLabelFor(kind, item)) + '</span><small>' + esc(displaySublabelFor(kind, item)) + '</small></a>').join("");
+  }
+  if (isHome) {
+    renderHomeDashboard();
+    scrollToRouteSection(currentRoute.section);
+    return;
   }
   let richItem = id == null ? null : maps[kind].get(id);
   const indexEntry = id == null ? null : indexMaps[kind]?.get(id);
@@ -11463,9 +11553,11 @@ async function renderList() {
   }
 }
 function renderTabs() {
-  const {kind} = route();
+  const currentRoute = route();
   const tabs = document.getElementById("tabs");
-  tabs.innerHTML = kinds.map(([tabKind, label]) => '<a href="' + esc(hashFor(tabKind)) + '"' + (tabKind === kind ? ' class="active"' : '') + '>' + esc(label) + '</a>').join("");
+  const homeClass = currentRoute.kind === homeKind ? ' class="home-tab active"' : ' class="home-tab"';
+  tabs.innerHTML = '<a href="' + esc(hashFor(homeKind)) + '"' + homeClass + '>Home</a>' +
+    kinds.map(([tabKind, label]) => '<a href="' + esc(hashFor(tabKind)) + '"' + (currentRoute.kind !== homeKind && tabKind === currentRoute.kind ? ' class="active"' : '') + '>' + esc(label) + '</a>').join("");
 }
 function scrollToRouteSection(section) {
   const detail = document.getElementById("detail");
@@ -11496,7 +11588,7 @@ function renderApp() {
   void renderList();
 }
 window.addEventListener("hashchange", renderApp);
-if (!location.hash) router.navigate({kind: data.storyHooks?.length ? "story-hooks" : "people"}, {replace: true});
+if (!location.hash) router.navigate({kind: homeKind}, {replace: true});
 renderApp();
 })();
 </script>
