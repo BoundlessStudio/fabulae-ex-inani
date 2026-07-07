@@ -210,6 +210,36 @@ npm run stress:500
 
 This uses a small 128px render target, the default parallel civilization workers, phase timing checkpoints, old-event text spilling after a 10-year hot window, and writes `output/stress-probes/probe-500-final.png`, `output/stress-probes/probe-500-final.json`, old event text chunks in `output/stress-probes/probe-500-event-text/`, and 100-year checkpoint profiles in `output/stress-probes/probe-500-profiles/` as `year-100.json`, `year-200.json`, `year-300.json`, `year-400.json`, and `year-500.json` when the full run completes. Worker terrain snapshots use shared buffers where practical so default parallel runs do not clone full triangle arrays once per worker, and settlement resource potentials are cached at settlement creation before annual economy drafts are dispatched.
 
+Evaluate the top generated story hooks with OpenRouter after a profile run:
+
+```sh
+$env:OPENROUTER_API_KEY = "..."
+npm run evaluate:story-hooks -- --input output/stress-probes/probe-500-final.json --out output/stress-probes/probe-500-story-hook-report-cards --overwrite
+```
+
+The evaluator reads `storyHookSamples` and `storyHookSamplesByKind` from the compact profile, sends each selected hook to the OpenRouter Chat Completions API, and writes one Markdown report card per hook under `cards/`, plus `summary.md`, `index.md`, and `manifest.json`. Each report card includes the hook's prompt summary, grade, scored criteria, risks, improvements, revised writing prompt, resolved seed-ref context, resolved event context, raw trace refs/ids, and a copied World Simulation Details block with the run year, civilization/agent/event counts, lifecycle diagnostics, story-hook counts by kind, and relevant record counts. The compact profile resolves sampled hook refs into readable people, artifacts, conflicts, battles, prophecies, relationships, and event headline/description text before the AI call, so the report-card model does not have to infer meaning from IDs alone. Use `OPENROUTER_MODEL` to select a model, or pass `--model <provider/model>`. For output-shape testing without API calls, pass `--provider mock`.
+
+Create story outlines from generated report cards:
+
+```sh
+$env:OPENROUTER_API_KEY = "..."
+npm run outline:stories -- --cards-dir output/stress-probes/probe-500-story-hook-report-cards/cards --out output/stress-probes/probe-500-story-outlines --overwrite
+```
+
+If no filename is supplied, the outline script reads every `.md` report card in `--cards-dir`. To outline one card, pass either an absolute path or a filename found under `--cards-dir`:
+
+```sh
+npm run outline:stories -- hook-000-character-garin-quaovars-unresolved-thread.md --cards-dir output/stress-probes/probe-500-story-hook-report-cards/cards --out output/story-outlines --overwrite
+```
+
+The outline generator defaults to `openai/gpt-5.5`, uses the same OpenRouter environment variables as the report-card evaluator, and injects the writing rules from local `writing-rules.md` into the system prompt. Override that file with `--writing-rules <md>` or `STORY_OUTLINE_WRITING_RULES`. It writes one Markdown outline per report card under `outlines/`, plus `summary.md`, `index.md`, and `manifest.json`. Use `--provider mock` to test output shape without an API call.
+
+Run the 500-year stress probe and then immediately evaluate story hooks:
+
+```sh
+npm run stress:500:review
+```
+
 Stress-test a 1000-year simulation with the same 100-year checkpoint cadence:
 
 ```sh

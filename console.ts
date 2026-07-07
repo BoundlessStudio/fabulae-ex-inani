@@ -15,13 +15,17 @@ import {renderWorldMapPng} from "./cpu-renderer.ts";
 import {
     defaultCivilizationWorkerCount,
     exportLegends,
+    legendEventDescription,
+    legendEventHeadline,
     simulateCivilizations,
     summarizeCivilizations,
     type CivilizationOptions,
     type CivilizationProgress,
     type CivilizationRunOptions,
     type CivilizationSimulation,
+    type LegendEntityRef,
     type LegendsExport,
+    type StoryHookKind,
 } from "./civilizations.ts";
 
 const defaultEventRefNameRetentionYears = 30;
@@ -13213,6 +13217,398 @@ function legendEventStats(simulation: CivilizationSimulation): {
     return {entityRefs, namedEntityRefs, refLengthBuckets, refKindCounts, namedRefKindCounts, eventTypeCounts};
 }
 
+const storyHookSampleKinds: StoryHookKind[] = [
+    "relationship",
+    "artifact",
+    "conflict",
+    "prophecy",
+    "mystery",
+    "character",
+    "legacy",
+];
+
+type ProfileLegendRecord = Record<string, unknown>;
+type ProfileRefContext = {
+    kind: LegendEntityRef["kind"];
+    id: number;
+    name?: string;
+    missing?: boolean;
+    [key: string]: unknown;
+};
+
+const profileRefCollectionKeys: Partial<Record<LegendEntityRef["kind"], keyof CivilizationSimulation>> = {
+    civilization: "civilizations",
+    settlement: "settlements",
+    "settlement-control": "settlementControls",
+    "natural-feature": "naturalFeatures",
+    person: "agents",
+    "person-allegiance": "personAllegiances",
+    preference: "preferences",
+    tradition: "traditions",
+    epithet: "epithets",
+    "reputation-milestone": "reputationMilestones",
+    artifact: "artifacts",
+    "artifact-condition": "artifactConditions",
+    chronicle: "chronicles",
+    "written-work": "writtenWorks",
+    memory: "memories",
+    thought: "thoughts",
+    "personality-shift": "personalityShifts",
+    "need-episode": "needEpisodes",
+    opinion: "opinions",
+    "social-claim": "socialClaims",
+    conversation: "conversations",
+    rumor: "rumors",
+    secret: "secrets",
+    scheme: "schemes",
+    feud: "feuds",
+    oath: "oaths",
+    ceremony: "ceremonies",
+    "ceremony-participation": "ceremonyParticipations",
+    activity: "activities",
+    teaching: "teachings",
+    project: "projects",
+    "project-participation": "projectParticipations",
+    obligation: "obligations",
+    holding: "holdings",
+    belonging: "belongings",
+    "possession-attachment": "possessionAttachments",
+    estate: "estates",
+    residence: "residences",
+    career: "careers",
+    organization: "organizations",
+    membership: "memberships",
+    "organization-rank": "organizationRanks",
+    relationship: "socialBonds",
+    "relationship-milestone": "relationshipMilestones",
+    union: "unions",
+    belief: "beliefs",
+    "belief-adherence": "beliefAdherences",
+    god: "gods",
+    commandment: "commandments",
+    destiny: "destinies",
+    miracle: "miracles",
+    myth: "myths",
+    doctrine: "doctrines",
+    "magic-role": "magicRoles",
+    prophecy: "prophecies",
+    "civilization-goal": "civilizationGoals",
+    "sacred-site": "sacredSites",
+    office: "offices",
+    "office-term": "officeTerms",
+    law: "laws",
+    case: "cases",
+    testimony: "testimonies",
+    conflict: "conflicts",
+    battle: "battles",
+    "battle-participation": "battleParticipations",
+    "military-unit": "militaryUnits",
+    "equipment-cache": "equipmentCaches",
+    "spy-network": "spyNetworks",
+    "spy-operation": "spyOperations",
+    injury: "injuries",
+    illness: "illnesses",
+    "care-record": "careRecords",
+    "wound-legacy": "woundLegacies",
+    memorial: "memorials",
+    burial: "burials",
+    "death-record": "deathRecords",
+    birth: "births",
+    "age-milestone": "ageMilestones",
+    "appearance-feature": "appearanceFeatures",
+    ambition: "ambitions",
+    apprenticeship: "apprenticeships",
+    skill: "skills",
+    structure: "structures",
+    journey: "journeys",
+    road: "roads",
+    household: "households",
+    lineage: "lineages",
+    "story-hook": "storyHooks",
+    event: "legendEvents",
+};
+
+function profileAsRecord(value: unknown): ProfileLegendRecord | undefined {
+    return value && typeof value === "object" ? value as ProfileLegendRecord : undefined;
+}
+
+function profileRecordAt(simulation: CivilizationSimulation, key: keyof CivilizationSimulation, id: number): ProfileLegendRecord | undefined {
+    const collection = (simulation as unknown as Record<string, unknown>)[String(key)];
+    if (!Array.isArray(collection)) return undefined;
+    return profileAsRecord(collection[id]);
+}
+
+function profileRecordForRef(simulation: CivilizationSimulation, ref: LegendEntityRef): ProfileLegendRecord | undefined {
+    const key = profileRefCollectionKeys[ref.kind];
+    return key === undefined ? undefined : profileRecordAt(simulation, key, ref.id);
+}
+
+function profileCompactText(value: unknown, maxLength = 420): string | undefined {
+    if (typeof value !== "string") return undefined;
+    const compact = value.replace(/\s+/g, " ").trim();
+    if (!compact) return undefined;
+    return compact.length > maxLength ? `${compact.slice(0, Math.max(0, maxLength - 3))}...` : compact;
+}
+
+function profileRound(value: unknown, digits = 3): number | undefined {
+    if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+    const scale = 10 ** digits;
+    return Math.round(value * scale) / scale;
+}
+
+function profileNumberList(value: unknown, limit = 8): number[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const ids = value.filter((item): item is number => typeof item === "number" && Number.isFinite(item)).slice(0, limit);
+    return ids.length ? ids : undefined;
+}
+
+function profileStringList(value: unknown, limit = 8): string[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const strings = value
+        .map(item => profileCompactText(item, 80))
+        .filter((item): item is string => item !== undefined)
+        .slice(0, limit);
+    return strings.length ? strings : undefined;
+}
+
+function profileRefList(value: unknown, limit = 6): Array<{kind: LegendEntityRef["kind"]; id: number; name?: string}> | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const refs = value
+        .map(item => profileAsRecord(item))
+        .filter((item): item is ProfileLegendRecord => item !== undefined)
+        .map(item => ({
+            kind: item.kind as LegendEntityRef["kind"],
+            id: typeof item.id === "number" ? item.id : -1,
+            name: profileCompactText(item.name, 120),
+        }))
+        .filter(ref => typeof ref.kind === "string" && ref.id >= 0)
+        .slice(0, limit);
+    return refs.length ? refs : undefined;
+}
+
+function profileFirstNumber(record: ProfileLegendRecord, keys: string[], digits = 3): number | undefined {
+    for (let key of keys) {
+        const value = profileRound(record[key], digits);
+        if (value !== undefined) return value;
+    }
+    return undefined;
+}
+
+function profileFirstText(record: ProfileLegendRecord, keys: string[], maxLength = 420): string | undefined {
+    for (let key of keys) {
+        const value = profileCompactText(record[key], maxLength);
+        if (value !== undefined) return value;
+    }
+    return undefined;
+}
+
+function profileMaybeSet(target: ProfileLegendRecord, key: string, value: unknown) {
+    if (value === undefined) return;
+    if (Array.isArray(value) && value.length === 0) return;
+    target[key] = value;
+}
+
+function profileEntityName(simulation: CivilizationSimulation, kind: LegendEntityRef["kind"], id: number): string | undefined {
+    if (kind === "relationship") {
+        const bond = profileRecordAt(simulation, "socialBonds", id);
+        const agentIds = profileNumberList(bond?.agentIds, 2) ?? [];
+        if (agentIds.length === 2) {
+            return `${profileEntityName(simulation, "person", agentIds[0]) ?? `Person ${agentIds[0]}`} and ${profileEntityName(simulation, "person", agentIds[1]) ?? `Person ${agentIds[1]}`}`;
+        }
+    }
+    if (kind === "road") {
+        const road = profileRecordAt(simulation, "roads", id);
+        const fromId = typeof road?.fromSettlementId === "number" ? road.fromSettlementId : undefined;
+        const toId = typeof road?.toSettlementId === "number" ? road.toSettlementId : undefined;
+        if (fromId !== undefined && toId !== undefined) {
+            return `${profileEntityName(simulation, "settlement", fromId) ?? `Settlement ${fromId}`} to ${profileEntityName(simulation, "settlement", toId) ?? `Settlement ${toId}`} road`;
+        }
+    }
+    if (kind === "event") {
+        const event = simulation.legendEvents[id];
+        return event ? `${event.year}: ${legendEventHeadline(event)}` : undefined;
+    }
+    const record = profileRecordForRef(simulation, {kind, id});
+    return profileCompactText(record?.name, 160);
+}
+
+function profileNamedIds(simulation: CivilizationSimulation, kind: LegendEntityRef["kind"], value: unknown, limit = 6): string[] | undefined {
+    const ids = profileNumberList(value, limit);
+    if (!ids) return undefined;
+    return ids.map(id => `${id}:${profileEntityName(simulation, kind, id) ?? `${kind} ${id}`}`);
+}
+
+function profileNamedLinkFields(simulation: CivilizationSimulation, record: ProfileLegendRecord) {
+    const fields: Array<[string, LegendEntityRef["kind"]]> = [
+        ["civilizationId", "civilization"],
+        ["targetCivilizationId", "civilization"],
+        ["attackerCivilizationId", "civilization"],
+        ["defenderCivilizationId", "civilization"],
+        ["settlementId", "settlement"],
+        ["originSettlementId", "settlement"],
+        ["targetSettlementId", "settlement"],
+        ["personId", "person"],
+        ["agentId", "person"],
+        ["speakerAgentId", "person"],
+        ["targetAgentId", "person"],
+        ["creatorAgentId", "person"],
+        ["ownerAgentId", "person"],
+        ["swearerAgentId", "person"],
+        ["beliefId", "belief"],
+        ["godId", "god"],
+        ["prophecyId", "prophecy"],
+        ["targetArtifactId", "artifact"],
+        ["artifactId", "artifact"],
+        ["conflictId", "conflict"],
+        ["battleId", "battle"],
+        ["relationshipId", "relationship"],
+        ["secretId", "secret"],
+        ["feudId", "feud"],
+        ["oathId", "oath"],
+    ];
+    const links: string[] = [];
+    const seen = new Set<string>();
+    for (let [field, kind] of fields) {
+        const id = record[field];
+        if (typeof id !== "number" || !Number.isFinite(id)) continue;
+        const key = `${kind}:${id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        links.push(`${field}=${key}:${profileEntityName(simulation, kind, id) ?? `${kind} ${id}`}`);
+    }
+    return links.length ? links : undefined;
+}
+
+function profileRefSummary(simulation: CivilizationSimulation, ref: LegendEntityRef, record: ProfileLegendRecord): string | undefined {
+    if (ref.kind === "person") {
+        const name = profileEntityName(simulation, "person", ref.id) ?? ref.name ?? `Person ${ref.id}`;
+        const civilization = typeof record.civilizationId === "number" ? profileEntityName(simulation, "civilization", record.civilizationId) : undefined;
+        const settlement = typeof record.settlementId === "number" ? profileEntityName(simulation, "settlement", record.settlementId) : undefined;
+        const traits = profileStringList(record.traits, 3)?.join(", ");
+        const values = profileStringList(record.values, 3)?.join(", ");
+        return `${name} is ${record.alive === false ? "dead" : "alive"}, age ${record.age ?? "unknown"}, ${record.profession ?? "unknown profession"}${civilization ? ` of ${civilization}` : ""}${settlement ? ` in ${settlement}` : ""}. Mental state ${record.mentalState ?? "unknown"}; reputation ${profileRound(record.reputation) ?? "unknown"}${traits ? `; traits ${traits}` : ""}${values ? `; values ${values}` : ""}.`;
+    }
+    if (ref.kind === "relationship") {
+        const agentIds = profileNumberList(record.agentIds, 2) ?? [];
+        const people = agentIds.map(id => profileEntityName(simulation, "person", id) ?? `Person ${id}`);
+        return `${record.kind ?? "relationship"} between ${people.join(" and ") || "unknown people"} started in ${record.startedYear ?? "unknown year"}. Strength ${profileRound(record.strength) ?? "unknown"}, trust ${profileRound(record.trust) ?? "unknown"}, tension ${profileRound(record.tension) ?? "unknown"}, active ${record.active === false ? "no" : "yes"}, milestones ${(profileNumberList(record.milestoneIds, 1000) ?? []).length}.`;
+    }
+    if (ref.kind === "artifact") {
+        const civilization = typeof record.civilizationId === "number" ? profileEntityName(simulation, "civilization", record.civilizationId) : undefined;
+        const owner = typeof record.ownerAgentId === "number" ? profileEntityName(simulation, "person", record.ownerAgentId) : undefined;
+        return `${record.name ?? ref.name ?? `Artifact ${ref.id}`} is a ${record.quality ?? "unknown-quality"} ${record.scale ?? "unknown-scale"} ${record.kind ?? "artifact"} made of ${record.material ?? "unknown material"} for ${record.purpose ?? "unknown purpose"}. Condition ${record.condition ?? "unknown"}, renown ${profileRound(record.renown) ?? "unknown"}${civilization ? `, civilization ${civilization}` : ""}${owner ? `, owner ${owner}` : ""}. ${profileCompactText(record.detail, 260) ?? profileCompactText(record.inscription, 260) ?? ""}`.trim();
+    }
+    if (ref.kind === "conflict") {
+        const attacker = typeof record.attackerCivilizationId === "number" ? profileEntityName(simulation, "civilization", record.attackerCivilizationId) : undefined;
+        const defender = typeof record.defenderCivilizationId === "number" ? profileEntityName(simulation, "civilization", record.defenderCivilizationId) : undefined;
+        return `${record.name ?? ref.name ?? `Conflict ${ref.id}`} is a ${record.status ?? "unknown"} ${record.kind ?? "conflict"} from ${record.startedYear ?? "unknown year"}${record.endedYear ? ` to ${record.endedYear}` : ""}. ${attacker ?? "Unknown attacker"} versus ${defender ?? "unknown defender"}, battles ${(profileNumberList(record.battleIds, 1000) ?? []).length}, casualties ${(profileNumberList(record.casualtyAgentIds, 1000) ?? []).length}, captured settlements ${(profileNumberList(record.capturedSettlementIds, 1000) ?? []).length}.`;
+    }
+    if (ref.kind === "battle") {
+        const attacker = typeof record.attackerCivilizationId === "number" ? profileEntityName(simulation, "civilization", record.attackerCivilizationId) : undefined;
+        const defender = typeof record.defenderCivilizationId === "number" ? profileEntityName(simulation, "civilization", record.defenderCivilizationId) : undefined;
+        return `${record.name ?? ref.name ?? `Battle ${ref.id}`} happened at ${record.battlefieldName ?? "an unnamed battlefield"} in year ${record.year ?? "unknown"}. Terrain ${record.battlefieldTerrain ?? "unknown"}, outcome ${record.outcome ?? "unknown"}, ${attacker ?? "unknown attacker"} versus ${defender ?? "unknown defender"}, casualties ${(profileNumberList(record.casualtyAgentIds, 1000) ?? []).length}.`;
+    }
+    const description = profileFirstText(record, ["description", "detail", "inscription", "principle", "demand", "effect"], 420);
+    if (description) return description;
+    const attributes = ["kind", "status", "type", "domain", "scale", "purpose", "quality", "condition", "outcome"]
+        .map(key => profileCompactText(record[key], 80))
+        .filter((item): item is string => item !== undefined);
+    const year = profileFirstNumber(record, ["year", "startedYear", "foundedYear", "createdYear", "builtYear", "openedYear", "swornYear", "givenYear"], 0);
+    if (attributes.length || year !== undefined) {
+        return `${profileEntityName(simulation, ref.kind, ref.id) ?? ref.name ?? `${ref.kind} ${ref.id}`} has ${attributes.join(", ") || "recorded context"}${year !== undefined ? ` in year ${year}` : ""}.`;
+    }
+    return undefined;
+}
+
+function profileResolvedSeedRef(simulation: CivilizationSimulation, ref: LegendEntityRef): ProfileRefContext {
+    const record = profileRecordForRef(simulation, ref);
+    const context: ProfileRefContext = {
+        kind: ref.kind,
+        id: ref.id,
+        name: ref.name ?? profileEntityName(simulation, ref.kind, ref.id),
+    };
+    if (!record) {
+        context.missing = true;
+        return context;
+    }
+    profileMaybeSet(context, "recordKind", profileCompactText(record.kind, 80) ?? profileCompactText(record.type, 80) ?? profileCompactText(record.domain, 80));
+    profileMaybeSet(context, "status", profileCompactText(record.status, 80));
+    profileMaybeSet(context, "year", profileFirstNumber(record, ["year", "startedYear", "foundedYear", "createdYear", "builtYear", "openedYear", "swornYear", "givenYear"], 0));
+    profileMaybeSet(context, "endedYear", profileFirstNumber(record, ["endedYear", "resolvedYear", "fallenYear", "settledYear", "revealedYear"], 0));
+    profileMaybeSet(context, "summary", profileRefSummary(simulation, ref, record));
+    profileMaybeSet(context, "description", profileFirstText(record, ["description", "detail", "inscription", "creationClaim", "religiousMandate"], 520));
+    profileMaybeSet(context, "eventIds", profileNumberList(record.eventIds, 8));
+    profileMaybeSet(context, "subjectRefs", profileRefList(record.subjectRefs, 6));
+    profileMaybeSet(context, "linkedEntities", profileNamedLinkFields(simulation, record));
+    if (ref.kind === "relationship") profileMaybeSet(context, "participants", profileNamedIds(simulation, "person", record.agentIds, 2));
+    if (ref.kind === "feud") {
+        profileMaybeSet(context, "sideA", profileNamedIds(simulation, "person", record.sideAAgentIds, 4));
+        profileMaybeSet(context, "sideB", profileNamedIds(simulation, "person", record.sideBAgentIds, 4));
+    }
+    if (ref.kind === "oath") profileMaybeSet(context, "witnesses", profileNamedIds(simulation, "person", record.witnessAgentIds, 4));
+    if (ref.kind === "secret") profileMaybeSet(context, "keepers", profileNamedIds(simulation, "person", record.keeperAgentIds, 5));
+    if (ref.kind === "god") profileMaybeSet(context, "controlSpheres", profileStringList(record.controlSpheres, 8));
+    if (ref.kind === "prophecy" || ref.kind === "civilization-goal" || ref.kind === "destiny" || ref.kind === "miracle") {
+        profileMaybeSet(context, "strength", profileRound(record.strength ?? record.priority ?? record.pressure));
+    }
+    return context;
+}
+
+function profileResolvedEvent(simulation: CivilizationSimulation, eventId: number) {
+    const event = simulation.legendEvents[eventId];
+    if (!event) return {id: eventId, missing: true};
+    return {
+        id: event.id,
+        year: event.year,
+        type: event.type,
+        headline: profileCompactText(legendEventHeadline(event), 220),
+        description: profileCompactText(legendEventDescription(event), 520),
+        entityRefs: profileRefList(event.entityRefs, 8),
+    };
+}
+
+function profileStoryHookSample(simulation: CivilizationSimulation, hook: CivilizationSimulation["storyHooks"][number]) {
+    const seedRefs = hook.seedRefs.slice(0, 8).map(ref => ({
+        kind: ref.kind,
+        id: ref.id,
+        name: ref.name,
+    }));
+    const eventIds = hook.eventIds.slice(0, 8);
+    return {
+        id: hook.id,
+        name: hook.name,
+        kind: hook.kind,
+        tone: hook.tone,
+        year: hook.year,
+        score: hook.score,
+        urgency: hook.urgency,
+        prompt: hook.prompt,
+        stakes: hook.stakes,
+        complication: hook.complication,
+        suggestedFocus: hook.suggestedFocus,
+        seedRefs,
+        resolvedSeedRefs: hook.seedRefs.slice(0, 8).map(ref => profileResolvedSeedRef(simulation, ref)),
+        eventIds,
+        resolvedEvents: eventIds.map(eventId => profileResolvedEvent(simulation, eventId)),
+    };
+}
+
+function storyHookCountsByKind(simulation: CivilizationSimulation): Record<StoryHookKind, number> {
+    const counts = Object.fromEntries(storyHookSampleKinds.map(kind => [kind, 0])) as Record<StoryHookKind, number>;
+    for (let hook of simulation.storyHooks) counts[hook.kind]++;
+    return counts;
+}
+
+function storyHookSamplesByKind(simulation: CivilizationSimulation, limitPerKind = 3) {
+    const samples = Object.fromEntries(storyHookSampleKinds.map(kind => [kind, []])) as Record<StoryHookKind, ReturnType<typeof profileStoryHookSample>[]>;
+    for (let hook of simulation.storyHooks) {
+        const bucket = samples[hook.kind];
+        if (bucket.length >= limitPerKind) continue;
+        bucket.push(profileStoryHookSample(simulation, hook));
+    }
+    return samples;
+}
+
 function civilizationProfile(simulation: CivilizationSimulation) {
     const counts = civilizationArrayCounts(simulation);
     const eventIdLinkStats = nestedEventIdLinkStats(simulation);
@@ -13252,25 +13648,9 @@ function civilizationProfile(simulation: CivilizationSimulation) {
         topPhaseTimings: topPhaseTimings(simulation),
         counts,
         topArrays: topCivilizationArrayCounts(counts),
-        storyHookSamples: simulation.storyHooks.slice(0, 12).map(hook => ({
-            id: hook.id,
-            name: hook.name,
-            kind: hook.kind,
-            tone: hook.tone,
-            year: hook.year,
-            score: hook.score,
-            urgency: hook.urgency,
-            prompt: hook.prompt,
-            stakes: hook.stakes,
-            complication: hook.complication,
-            suggestedFocus: hook.suggestedFocus,
-            seedRefs: hook.seedRefs.slice(0, 8).map(ref => ({
-                kind: ref.kind,
-                id: ref.id,
-                name: ref.name,
-            })),
-            eventIds: hook.eventIds.slice(0, 8),
-        })),
+        storyHookCountsByKind: storyHookCountsByKind(simulation),
+        storyHookSamples: simulation.storyHooks.slice(0, 12).map(hook => profileStoryHookSample(simulation, hook)),
+        storyHookSamplesByKind: storyHookSamplesByKind(simulation),
         memory: {
             heapUsedBytes: memory.heapUsed,
             heapTotalBytes: memory.heapTotal,

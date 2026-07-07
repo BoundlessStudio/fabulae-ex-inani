@@ -1776,7 +1776,6 @@ export type LegendEntityRef = {
 
 export type StoryHookKind =
     | "character"
-    | "place"
     | "artifact"
     | "conflict"
     | "mystery"
@@ -28897,12 +28896,7 @@ function hookCountList(entries: Array<[number, string, string?]>, fallback: stri
 }
 
 type DramaManagerIndexes = {
-    battlesBySettlement: Map<number, Battle[]>;
     battlesByCapturedArtifact: Map<number, Battle[]>;
-    secretsBySettlement: Map<number, Secret[]>;
-    activeFeudsBySettlement: Map<number, Feud[]>;
-    propheciesBySettlement: Map<number, Prophecy[]>;
-    artifactsBySettlement: Map<number, Artifact[]>;
     secretsByAgent: Map<number, Secret[]>;
     feudsByAgent: Map<number, Feud[]>;
     oathsByAgent: Map<number, Oath[]>;
@@ -28963,12 +28957,7 @@ function indexedRecordsForKeys<T extends {id: number}>(index: Map<number, T[]>, 
 
 function createDramaManagerIndexes(simulation: CivilizationSimulation): DramaManagerIndexes {
     const indexes: DramaManagerIndexes = {
-        battlesBySettlement: new Map(),
         battlesByCapturedArtifact: new Map(),
-        secretsBySettlement: new Map(),
-        activeFeudsBySettlement: new Map(),
-        propheciesBySettlement: new Map(),
-        artifactsBySettlement: new Map(),
         secretsByAgent: new Map(),
         feudsByAgent: new Map(),
         oathsByAgent: new Map(),
@@ -28981,14 +28970,12 @@ function createDramaManagerIndexes(simulation: CivilizationSimulation): DramaMan
     };
 
     for (let battle of simulation.battles) {
-        pushIndexedRecord(indexes.battlesBySettlement, battle.settlementId, battle);
         for (let artifactId of battle.capturedArtifactIds) {
             pushIndexedRecord(indexes.battlesByCapturedArtifact, artifactId, battle);
         }
     }
 
     for (let secret of simulation.secrets) {
-        pushIndexedRecord(indexes.secretsBySettlement, secret.settlementId, secret);
         for (let agentId of secret.keeperAgentIds) pushIndexedRecord(indexes.secretsByAgent, agentId, secret);
         pushSubjectRefIndexedRecord(indexes.secretsByArtifact, secret, "artifact");
     }
@@ -29000,7 +28987,6 @@ function createDramaManagerIndexes(simulation: CivilizationSimulation): DramaMan
     }
 
     for (let feud of simulation.feuds) {
-        if (feud.status === "active") pushIndexedRecord(indexes.activeFeudsBySettlement, feud.settlementId, feud);
         for (let agentId of feud.sideAAgentIds) pushIndexedRecord(indexes.feudsByAgent, agentId, feud);
         for (let agentId of feud.sideBAgentIds) pushIndexedRecord(indexes.feudsByAgent, agentId, feud);
     }
@@ -29016,15 +29002,8 @@ function createDramaManagerIndexes(simulation: CivilizationSimulation): DramaMan
     }
 
     for (let prophecy of simulation.prophecies) {
-        pushIndexedRecord(indexes.propheciesBySettlement, prophecy.settlementId, prophecy);
-        pushIndexedRecord(indexes.propheciesBySettlement, prophecy.targetSettlementId, prophecy);
         pushIndexedRecord(indexes.propheciesByArtifact, prophecy.targetArtifactId, prophecy);
         pushSubjectRefIndexedRecord(indexes.propheciesByArtifact, prophecy, "artifact");
-    }
-
-    for (let artifact of simulation.artifacts) {
-        pushIndexedRecord(indexes.artifactsBySettlement, artifact.ownerSettlementId, artifact);
-        pushIndexedRecord(indexes.artifactsBySettlement, artifact.settlementId, artifact);
     }
 
     for (let scheme of simulation.schemes) {
@@ -29151,76 +29130,6 @@ function dramaManagerCharacterHooks(simulation: CivilizationSimulation, candidat
             stakes: `Pressure around ${agent.name} can ${characterStakes} for ${civ?.name ?? "their people"}.`,
             complication: `${agent.name}'s current profile is stress ${roundedHookScore(agent.stress)} and reputation ${roundedHookScore(agent.reputation)}; linked records include ${characterSignals}.`,
             suggestedFocus: `Start with ${agent.name}, then follow ${hookRefNames(simulation, hooks.filter(ref => ref.kind !== "person"), 4)}.`,
-            eventIds: events,
-        });
-    }
-}
-
-function dramaManagerPlaceHooks(simulation: CivilizationSimulation, candidates: StoryHookCandidate[], indexes: DramaManagerIndexes) {
-    const settlements = simulation.settlements
-        .map(settlement => {
-            const battles = indexedRecordsForKey(indexes.battlesBySettlement, settlement.id);
-            const secrets = indexedRecordsForKey(indexes.secretsBySettlement, settlement.id);
-            const feuds = indexedRecordsForKey(indexes.activeFeudsBySettlement, settlement.id);
-            const prophecies = indexedRecordsForKey(indexes.propheciesBySettlement, settlement.id);
-            const artifacts = indexedRecordsForKey(indexes.artifactsBySettlement, settlement.id);
-            const controls = settlement.controlIds.map(id => simulation.settlementControls[id]).filter(Boolean);
-            const events = hookEventIds([settlement, ...battles, ...secrets, ...feuds, ...prophecies, ...artifacts, ...controls], 14);
-            const score = Math.min(3, settlement.population / 18)
-                + settlement.unrest * 1.6
-                + battles.length * 0.38
-                + secrets.length * 0.18
-                + feuds.length * 0.42
-                + prophecies.length * 0.28
-                + artifacts.length * 0.12
-                + controls.length * 0.14
-                + hookRecency(simulation, events);
-            return {settlement, battles, secrets, feuds, prophecies, artifacts, controls, events, score};
-        })
-        .filter(entry => entry.score >= 1.8)
-        .sort((a, b) => b.score - a.score || a.settlement.id - b.settlement.id)
-        .slice(0, 24);
-
-    for (let entry of settlements) {
-        const {settlement, battles, secrets, feuds, prophecies, artifacts, controls, events} = entry;
-        const civ = simulation.civilizations[settlement.civilizationId];
-        const refs = [
-            settlementRef(simulation, settlement.id),
-            civilizationRef(simulation, settlement.civilizationId),
-            ...battles.slice(0, 3).map(battle => battleRef(simulation, battle.id)),
-            ...secrets.slice(0, 2).map(secret => secretRef(simulation, secret.id)),
-            ...feuds.slice(0, 2).map(feud => feudRef(simulation, feud.id)),
-            ...prophecies.slice(0, 2).map(prophecy => prophecyRef(simulation, prophecy.id)),
-            ...artifacts.slice(0, 2).map(artifact => artifactRef(simulation, artifact.id)),
-            ...controls.slice(0, 2).map(control => settlementControlRef(simulation, control.id)),
-        ];
-        const placeSignals = hookCountList([
-            [battles.length, "battle"],
-            [secrets.length, "secret"],
-            [feuds.length, "active feud"],
-            [prophecies.length, "prophecy", "prophecies"],
-            [artifacts.length, "artifact"],
-            [controls.length, "control record"],
-        ], "population pressure without many linked records");
-        addStoryHookCandidate(candidates, {
-            name: `Trouble around ${settlement.name}`,
-            kind: "place",
-            tone: battles.length ? "war" : prophecies.length ? "religious" : secrets.length || feuds.length ? "intrigue" : "adventure",
-            year: hookLatestEventYear(simulation, events, settlement.foundedYear),
-            score: entry.score,
-            urgency: clamp(settlement.unrest * 0.55 + feuds.length * 0.1 + battles.length * 0.06 + prophecies.filter(prophecy => prophecy.status === "open").length * 0.08, 0, 1),
-            civilizationId: settlement.civilizationId,
-            settlementId: settlement.id,
-            battleId: battles[0]?.id,
-            prophecyId: prophecies[0]?.id,
-            secretId: secrets[0]?.id,
-            feudId: feuds[0]?.id,
-            eventId: events[0],
-            seedRefs: refs,
-            prompt: `${settlement.name} is a ${settlement.type} of ${civ?.name ?? "its civilization"} with population ${settlement.population}, unrest ${roundedHookScore(settlement.unrest)}, and ${placeSignals}.`,
-            stakes: `${civ?.name ?? "The local civilization"} risks losing order, sacred legitimacy, trade confidence, or memory of what really happened here.`,
-            complication: `Local records around ${settlement.name} concentrate ${placeSignals}.`,
-            suggestedFocus: `Open with ${settlement.name}, then follow ${hookRefNames(simulation, refs.slice(2), 5)}.`,
             eventIds: events,
         });
     }
@@ -29630,7 +29539,6 @@ function runDramaManager(simulation: CivilizationSimulation): StoryHook[] {
     const candidates: StoryHookCandidate[] = [];
     const indexes = createDramaManagerIndexes(simulation);
     dramaManagerCharacterHooks(simulation, candidates);
-    dramaManagerPlaceHooks(simulation, candidates, indexes);
     dramaManagerArtifactHooks(simulation, candidates, indexes);
     dramaManagerConflictHooks(simulation, candidates);
     dramaManagerMythicHooks(simulation, candidates);
@@ -33221,14 +33129,14 @@ function spilledLegendEventText(event: LegendEvent): LegendEventTextPair | undef
     return (event as SpillableLegendEvent)[legendEventTextStoreKey]?.readText(event.id);
 }
 
-function legendEventHeadline(event: LegendEvent): string {
+export function legendEventHeadline(event: LegendEvent): string {
     if (event.headline !== "") return event.headline;
     const text = spilledLegendEventText(event);
     if (!text) return event.headline;
     return text[0];
 }
 
-function legendEventDescription(event: LegendEvent): string {
+export function legendEventDescription(event: LegendEvent): string {
     if (event.description !== "") return event.description;
     const text = spilledLegendEventText(event);
     if (!text) return event.description;
