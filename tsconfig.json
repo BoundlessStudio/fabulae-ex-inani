@@ -10,6 +10,6 @@
         "skipLibCheck": true,
         "types": ["node"]
     },
-    "include": ["./*.ts", "./dual-mesh/**/*.ts"],
-    "exclude": ["node_modules", "build", "dist", "public/build"]
+    "include": ["src/**/*.ts", "dependencies/dual-mesh/**/*.ts"],
+    "exclude": ["node_modules", "build", "dist", "output", "public/build"]
 }

@@ -4,7 +4,7 @@
  */
 
 import Delaunator from "delaunator";
-import {TriangleMesh, type MeshInitializer} from "./dual-mesh/index.ts";
+import {TriangleMesh, type MeshInitializer} from "../../dependencies/dual-mesh/index.ts";
 import {choosePoints} from "./generate-points.ts";
 import TerrainMap from "./map.ts";
 import {applyControlValues, defaultControlValues, type ControlOverrides, type ControlValues} from "./map-controls.ts";

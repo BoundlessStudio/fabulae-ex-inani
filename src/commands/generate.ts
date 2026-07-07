@@ -9,9 +9,9 @@ import {
     mergeControlOverrides,
     unlockedControlKeys,
     type ControlOverrides,
-} from "./map-controls.ts";
-import {generateWorldMap} from "./node-mapgen.ts";
-import {renderWorldMapPng} from "./cpu-renderer.ts";
+} from "../mapgen/map-controls.ts";
+import {generateWorldMap} from "../mapgen/node-mapgen.ts";
+import {renderWorldMapPng} from "../rendering/cpu-renderer.ts";
 import {
     defaultCivilizationWorkerCount,
     exportLegends,
@@ -26,7 +26,7 @@ import {
     type LegendEntityRef,
     type LegendsExport,
     type StoryHookKind,
-} from "./civilizations.ts";
+} from "../simulation/civilizations.ts";
 
 const defaultEventRefNameRetentionYears = 30;
 const defaultEventRefCompactionIntervalYears = 5;
@@ -67,12 +67,23 @@ type CliOptions = {
     profileCivilizationPhases: boolean;
 };
 
-function printHelp() {
-    console.log(`World Mapgen Console
+export function printGenerateHelp() {
+    console.log(`Fabulae Ex Inani
+Stories from the Void
 
 Usage:
-  world-mapgen [options]
+  world-mapgen [command] [options]
+  world-mapgen generate [options]
   npm run generate -- [options]
+
+Commands:
+  generate                 Generate a PNG map. This is the default command.
+  serve-legends            Serve a generated Legends viewer directory.
+  verify-legends           Verify a Legends archive and optional viewer output.
+  compare-civ-profiles     Compare two civilization profile JSON files.
+  evaluate-story-hooks     Evaluate generated story hooks.
+  outline-stories          Create story outlines from story-hook report cards.
+  clean                    Remove generated build artifacts.
 
 Options:
   --out <png>                 Output PNG path. Defaults to output/mapgen4.png
@@ -136,7 +147,7 @@ Examples:
   npm run generate
   npm run generate -- --out output/seed-42.png --set elevation.seed=42
   npm run generate -- --civilizations 5 --years 300 --civ-json output/civilizations.json
-  npm run generate -- --size 1024 --controls mapgen4-controls.json
+  npm run generate -- --size 1024 --controls examples/controls/mapgen4-controls.json
 `);
 }
 
@@ -228,7 +239,7 @@ function parseArgs(argv: string[]): CliOptions {
     for (let i = 0; i < argv.length; i++) {
         const arg = argv[i];
         if (arg === "--help" || arg === "-h") {
-            printHelp();
+            printGenerateHelp();
             process.exit(0);
         } else if (arg === "--out" || arg.startsWith("--out=")) {
             const result = readValue(argv, i, "--out");
@@ -13773,8 +13784,8 @@ function writeCivilizationSnapshots(
     console.log(`Wrote civilization snapshots to ${snapshotDir}`);
 }
 
-function main() {
-    const options = parseArgs(process.argv.slice(2));
+export function runGenerateCommand(argv = process.argv.slice(2)) {
+    const options = parseArgs(argv);
     const outputPath = path.resolve(options.out);
     fs.mkdirSync(path.dirname(outputPath), {recursive: true});
 
@@ -13855,11 +13866,4 @@ function main() {
     if (options.summary) {
         summarize(world, outputPath, options.width, options.height, civilizations);
     }
-}
-
-try {
-    main();
-} catch (error) {
-    console.error(error instanceof Error ? error.message : error);
-    process.exit(1);
 }

@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import {MessageChannel, receiveMessageOnPort, Worker, type MessagePort} from "node:worker_threads";
-import type {GeneratedWorldMap} from "./node-mapgen.ts";
-import {clamp} from "./geometry.ts";
+import type {GeneratedWorldMap} from "../mapgen/node-mapgen.ts";
+import {clamp} from "../mapgen/geometry.ts";
 
 export type CivilizationOptions = {
     count: number;

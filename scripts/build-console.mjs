@@ -4,7 +4,7 @@ import {build} from "esbuild";
 fs.mkdirSync("dist", {recursive: true});
 
 await build({
-    entryPoints: ["console.ts"],
+    entryPoints: ["src/console.ts"],
     outfile: "dist/world-mapgen.cjs",
     bundle: true,
     platform: "node",
@@ -18,7 +18,7 @@ await build({
 });
 
 await build({
-    entryPoints: ["civilization-worker.ts"],
+    entryPoints: ["src/simulation/civilization-worker.ts"],
     outfile: "dist/civilization-worker.cjs",
     bundle: true,
     platform: "node",

@@ -10,6 +10,6 @@
         "checkJs": true,
         "lib": [ "es2022" ]
     },
-    "include": ["*.js", "*.ts", "dual-mesh/**/*.ts", "scripts/**/*.mjs"],
-    "exclude": ["node_modules", "build", "dist", "public/build"]
+    "include": ["src/**/*.ts", "dependencies/dual-mesh/**/*.ts", "scripts/**/*.mjs"],
+    "exclude": ["node_modules", "build", "dist", "output", "public/build"]
 }

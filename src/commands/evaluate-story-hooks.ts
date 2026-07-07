@@ -22,7 +22,7 @@ function printHelp() {
   console.log(`Evaluate Story Hooks
 
 Usage:
-  node scripts/evaluate-story-hooks.mjs [options]
+  world-mapgen evaluate-story-hooks [options]
   npm run evaluate:story-hooks -- [options]
 
 Options:
@@ -1052,8 +1052,8 @@ function writeOutputs({inputPath, outputDir, options, entries, data}) {
   return {outputDir: resolvedOutputDir, summaryPath, cardsDir};
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
+export async function runEvaluateStoryHooksCommand(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv);
   const inputPath = path.resolve(options.input);
   const data = JSON.parse(fs.readFileSync(inputPath, "utf8"));
   const hooks = selectHooks(data, options);
@@ -1070,8 +1070,3 @@ async function main() {
   console.log(`Wrote ${entries.length} story hook report card${entries.length === 1 ? "" : "s"} to ${output.outputDir}`);
   console.log(`Summary: ${output.summaryPath}`);
 }
-
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
-});

@@ -1,6 +1,10 @@
 #+title: Mapgen4
 #+date: <2018-12-24>
 
+This is the original upstream Mapgen4 README kept for attribution and historical context.
+Some commands and paths below refer to the upstream browser project, not the current Node CLI.
+Use the repository root =README.md= for current workflow instructions.
+
 [[http://unmaintained.tech/][http://unmaintained.tech/badge.svg]]
 
 [[https://www.redblobgames.com/maps/mapgen4/][Mapgen4]] is a procedural wilderness map generator I wrote during 2017 and 2018, and updated in 2023. It's written in JavaScript/TypeScript and designed to:

@@ -4,9 +4,9 @@
  */
 
 import {PNG} from "pngjs";
-import Geometry, {clamp} from "./geometry.ts";
-import type {GeneratedWorldMap} from "./node-mapgen.ts";
-import type {CivilizationSimulation} from "./civilizations.ts";
+import Geometry, {clamp} from "../mapgen/geometry.ts";
+import type {GeneratedWorldMap} from "../mapgen/node-mapgen.ts";
+import type {CivilizationSimulation} from "../simulation/civilizations.ts";
 
 type Rgba = [number, number, number, number];
 type Rgb = [number, number, number];

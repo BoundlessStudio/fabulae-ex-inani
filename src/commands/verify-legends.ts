@@ -533,7 +533,7 @@ const refKindToKey = new Map(kindSpecs.map(([, key, refKind]) => [refKind, key])
 const viewerKindToKey = new Map(kindSpecs.map(([viewerKind, key]) => [viewerKind, key]));
 
 function usage() {
-  console.error("Usage: node scripts/verify-legends.mjs <legends.json> [viewer-dir]");
+  console.error("Usage: world-mapgen verify-legends <legends.json> [viewer-dir]");
   process.exit(2);
 }
 
@@ -2081,7 +2081,12 @@ function summarize(legends, viewerDir) {
   for (let [key, value] of top) console.log(`${key}: ${value}`);
 }
 
-const [legendsPath, viewerDir] = process.argv.slice(2);
+export function runVerifyLegendsCommand(argv = process.argv.slice(2)) {
+if (argv.includes("--help") || argv.includes("-h")) {
+  console.log("Usage: world-mapgen verify-legends <legends.json> [viewer-dir]");
+  return;
+}
+const [legendsPath, viewerDir] = argv;
 if (!legendsPath) usage();
 
 const resolvedLegendsPath = path.resolve(legendsPath);
@@ -2097,3 +2102,4 @@ if (issues.length > 0) {
 }
 
 console.log("Legends verification passed.");
+}

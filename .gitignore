@@ -1,8 +1,12 @@
 /index.html
+.agent
 build/
 dist/
 public/build/
 output/
 *.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 node_modules/
 blog/

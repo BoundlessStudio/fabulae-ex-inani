@@ -26,7 +26,7 @@ function printHelp() {
   console.log(`Create Story Outlines
 
 Usage:
-  node scripts/create-story-outlines.mjs [report-card.md] [options]
+  world-mapgen outline-stories [report-card.md] [options]
   npm run outline:stories -- [report-card.md] [options]
 
 Options:
@@ -676,8 +676,8 @@ function writeOutputs({entries, options}) {
   return {outputDir, summaryPath, outlinesDir};
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
+export async function runCreateStoryOutlinesCommand(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv);
   loadWritingRules(options);
   const cardPaths = resolveCardPaths(options);
   const cards = cardPaths.map(parseReportCard);
@@ -693,8 +693,3 @@ async function main() {
   console.log(`Wrote ${entries.length} story outline${entries.length === 1 ? "" : "s"} to ${output.outputDir}`);
   console.log(`Summary: ${output.summaryPath}`);
 }
-
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : error);
-  process.exit(1);
-});

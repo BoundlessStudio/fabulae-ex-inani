@@ -1,6 +1,7 @@
 {
-    "name": "world-mapgen-base",
+    "name": "fabulae-ex-inani",
     "version": "0.1.0",
+    "description": "Fabulae Ex Inani, Stories from the Void: a Node CLI for generating world maps, civilization simulations, and Legends archives.",
     "private": true,
     "type": "module",
     "bin": {
@@ -8,17 +9,21 @@
     },
     "scripts": {
         "build": "node scripts/build-console.mjs",
-        "generate": "npm run build && node dist/world-mapgen.cjs",
+        "clean": "npm run build && node dist/world-mapgen.cjs clean",
+        "generate": "npm run build && node dist/world-mapgen.cjs generate",
         "export:png": "npm run generate --",
         "start": "node dist/world-mapgen.cjs",
-        "stress:500": "npm run build && node --expose-gc --max-old-space-size=12288 dist/world-mapgen.cjs --size 128 --controls simulation-controls.example.json --civilizations 5 --years 500 --civ-seed 77 --progress-every 100 --profile-civ-phases --gc-after-compaction --spill-event-text-dir output/stress-probes/probe-500-event-text --spill-event-text-after 10 --spill-event-text-every 5 --spill-event-text-cache-chunks 256 --civ-profile-dir output/stress-probes/probe-500-profiles --civ-profile-json output/stress-probes/probe-500-final.json --out output/stress-probes/probe-500-final.png",
+        "stress:500": "npm run build && node --expose-gc --max-old-space-size=12288 dist/world-mapgen.cjs --size 128 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 500 --civ-seed 77 --progress-every 100 --profile-civ-phases --gc-after-compaction --spill-event-text-dir output/stress-probes/probe-500-event-text --spill-event-text-after 10 --spill-event-text-every 5 --spill-event-text-cache-chunks 256 --civ-profile-dir output/stress-probes/probe-500-profiles --civ-profile-json output/stress-probes/probe-500-final.json --out output/stress-probes/probe-500-final.png",
         "stress:500:review": "npm run stress:500 && npm run evaluate:story-hooks -- --input output/stress-probes/probe-500-final.json --out output/stress-probes/probe-500-story-hook-report-cards --overwrite",
-        "stress:1000": "npm run build && node --expose-gc --max-old-space-size=12288 dist/world-mapgen.cjs --size 128 --controls simulation-controls.example.json --civilizations 5 --years 1000 --civ-seed 77 --expansion-rate 0.25 --progress-every 100 --profile-civ-phases --gc-after-compaction --spill-event-text-dir output/stress-probes/probe-1000-event-text --spill-event-text-after 10 --spill-event-text-every 5 --spill-event-text-cache-chunks 256 --civ-profile-dir output/stress-probes/probe-1000-profiles --civ-profile-json output/stress-probes/probe-1000-final.json --out output/stress-probes/probe-1000-final.png",
-        "serve:legends": "node scripts/serve-static.mjs",
-        "verify:legends": "node scripts/verify-legends.mjs",
-        "compare:civ-profiles": "node scripts/compare-civ-profiles.mjs",
-        "evaluate:story-hooks": "node scripts/evaluate-story-hooks.mjs",
-        "outline:stories": "node scripts/create-story-outlines.mjs",
+        "stress:1000": "npm run build && node --expose-gc --max-old-space-size=12288 dist/world-mapgen.cjs --size 128 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 1000 --civ-seed 77 --expansion-rate 0.25 --progress-every 100 --profile-civ-phases --gc-after-compaction --spill-event-text-dir output/stress-probes/probe-1000-event-text --spill-event-text-after 10 --spill-event-text-every 5 --spill-event-text-cache-chunks 256 --civ-profile-dir output/stress-probes/probe-1000-profiles --civ-profile-json output/stress-probes/probe-1000-final.json --out output/stress-probes/probe-1000-final.png",
+        "serve:legends": "npm run build && node dist/world-mapgen.cjs serve-legends",
+        "verify:legends": "npm run build && node dist/world-mapgen.cjs verify-legends",
+        "compare:civ-profiles": "npm run build && node dist/world-mapgen.cjs compare-civ-profiles",
+        "evaluate:story-hooks": "npm run build && node dist/world-mapgen.cjs evaluate-story-hooks",
+        "outline:stories": "npm run build && node dist/world-mapgen.cjs outline-stories",
+        "smoke": "npm run build && node dist/world-mapgen.cjs generate --size 64 --controls examples/controls/simulation-controls.example.json --civilizations 1 --years 1 --civ-workers 1 --out output/smoke/map.png --civ-json output/smoke/civilizations.json",
+        "check": "npm run typecheck && npm run build",
+        "test": "npm run check",
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
