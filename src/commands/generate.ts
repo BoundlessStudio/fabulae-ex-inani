@@ -14,7 +14,8 @@ import {generateWorldMap} from "../mapgen/node-mapgen.ts";
 import {renderWorldMapPng} from "../rendering/cpu-renderer.ts";
 import {
     defaultCivilizationWorkerCount,
-    exportLegends,
+    exportLegendsSource,
+    isLegendsCollection,
     legendEventDescription,
     legendEventHeadline,
     simulateCivilizations,
@@ -24,7 +25,8 @@ import {
     type CivilizationRunOptions,
     type CivilizationSimulation,
     type LegendEntityRef,
-    type LegendsExport,
+    type LegendsCollection,
+    type LegendsExportSource,
     type StoryHookKind,
 } from "../simulation/civilizations.ts";
 
@@ -454,6 +456,7 @@ function summarize(world: ReturnType<typeof generateWorldMap>, outputPath: strin
         width,
         height,
         seed: controls.elevation.seed,
+        meshSeed: controls.mesh.seed,
         triangles: world.mesh.numTriangles,
         regions: world.mesh.numRegions,
         landTriangles,
@@ -11671,13 +11674,39 @@ const legendsViewerNestedArrayLimits: Record<string, number> = {
 
 type LegendsViewerTrimStats = Map<string, {arrays: number; included: number; total: number; maxTotal: number}>;
 type LegendRecord = Record<string, any>;
+
+type LegendsRecordCollection = LegendsCollection<LegendRecord>;
+
+function arrayAsLegendsCollection(items: LegendRecord[]): LegendsRecordCollection {
+    return {legendsCollection: true, length: items.length, get: index => items[index]};
+}
+
+function legendsSourceCollection(source: LegendsExportSource, key: string): LegendsRecordCollection {
+    const value = (source as unknown as Record<string, unknown>)[key];
+    return isLegendsCollection(value) ? value as LegendsRecordCollection : arrayAsLegendsCollection([]);
+}
+
+// Shared per-export state for the viewer writers. The archive is consumed one
+// record at a time through lazy collections; only compact derived structures
+// (name lookups, synthetic chapters, mention entries) stay resident.
+type LegendsViewerContext = {
+    source: LegendsExportSource;
+    lookups: LegendIndexLookups;
+    chapters: LegendRecord[];
+    chapterIds: Map<string, number>;
+    kindsWithExternalText: Set<string>;
+};
+
+function viewerCollection(context: LegendsViewerContext, key: string): LegendsRecordCollection {
+    if (key === "chapters") return arrayAsLegendsCollection(context.chapters);
+    return legendsSourceCollection(context.source, key);
+}
 type LegendIndexLookups = {
     civilizations: Map<number, LegendRecord>;
     settlements: Map<number, LegendRecord>;
     people: Map<number, LegendRecord>;
     gods: Map<number, LegendRecord>;
 };
-const legendsViewerRecordSourceCache = new WeakMap<object, Record<string, LegendRecord[]>>();
 
 const legendsViewerKindSpecs = [
     {kind: "story-hooks", key: "storyHooks"},
@@ -11831,8 +11860,18 @@ function extractLegendsViewerExternalText(record: LegendRecord): {record: Legend
     return {record: compactRecord, text};
 }
 
-function makeLegendRecordMap(items: readonly LegendRecord[] | undefined) {
-    return new Map<number, LegendRecord>((items ?? []).map(item => [Number(item.id), item]));
+function makeLegendLookupMap(collection: LegendsRecordCollection, keepEpithets: boolean) {
+    const map = new Map<number, LegendRecord>();
+    for (let index = 0; index < collection.length; index++) {
+        const record = collection.get(index);
+        map.set(
+            Number(record.id),
+            keepEpithets
+                ? {id: record.id, name: record.name, epithets: record.epithets}
+                : {id: record.id, name: record.name},
+        );
+    }
+    return map;
 }
 
 function legendIndexYears(value: unknown) {
@@ -11861,12 +11900,12 @@ function legendIndexNamed(lookups: LegendIndexLookups, kind: keyof LegendIndexLo
     return String(item.name ?? `${fallback} ${numericId}`);
 }
 
-function createLegendIndexLookups(legends: LegendsExport): LegendIndexLookups {
+function createLegendIndexLookups(source: LegendsExportSource): LegendIndexLookups {
     return {
-        civilizations: makeLegendRecordMap(legends.civilizations as LegendRecord[]),
-        settlements: makeLegendRecordMap(legends.settlements as LegendRecord[]),
-        people: makeLegendRecordMap(legends.people as LegendRecord[]),
-        gods: makeLegendRecordMap(legends.gods as LegendRecord[]),
+        civilizations: makeLegendLookupMap(legendsSourceCollection(source, "civilizations"), false),
+        settlements: makeLegendLookupMap(legendsSourceCollection(source, "settlements"), false),
+        people: makeLegendLookupMap(legendsSourceCollection(source, "people"), true),
+        gods: makeLegendLookupMap(legendsSourceCollection(source, "gods"), false),
     };
 }
 
@@ -11962,19 +12001,18 @@ const legendsViewerChapterSources = [
 
 const legendsViewerChapterSourceByKind = new Map(legendsViewerChapterSources.map(source => [source.ownerKind, source]));
 
-function createLegendsViewerChapters(legends: LegendsExport): LegendRecord[] {
-    const legendRecord = legends as unknown as Record<string, LegendRecord[]>;
-    const lookups = createLegendIndexLookups(legends);
+function createLegendsViewerChapters(source: LegendsExportSource, lookups: LegendIndexLookups): LegendRecord[] {
     const chapters: LegendRecord[] = [];
 
-    for (let source of legendsViewerChapterSources) {
-        const owners = legendRecord[source.ownerKey] ?? [];
-        for (let owner of owners) {
-            const ownerChapters = Array.isArray(owner[source.chapterKey]) ? owner[source.chapterKey] as LegendRecord[] : [];
+    for (let chapterSource of legendsViewerChapterSources) {
+        const owners = legendsSourceCollection(source, chapterSource.ownerKey);
+        for (let index = 0; index < owners.length; index++) {
+            const owner = owners.get(index);
+            const ownerChapters = Array.isArray(owner[chapterSource.chapterKey]) ? owner[chapterSource.chapterKey] as LegendRecord[] : [];
             if (!ownerChapters.length) continue;
-            const ownerLabel = legendIndexLabelFor(source.ownerKind, owner, lookups);
+            const ownerLabel = legendIndexLabelFor(chapterSource.ownerKind, owner, lookups);
             for (let chapter of ownerChapters) {
-                chapters.push(createSyntheticChapterRecord(chapters.length, source.chapterType, source.ownerKind, owner, ownerLabel, chapter, source.extra(owner)));
+                chapters.push(createSyntheticChapterRecord(chapters.length, chapterSource.chapterType, chapterSource.ownerKind, owner, ownerLabel, chapter, chapterSource.extra(owner)));
             }
         }
     }
@@ -11982,9 +12020,16 @@ function createLegendsViewerChapters(legends: LegendsExport): LegendRecord[] {
     return chapters;
 }
 
-function createLegendsViewerChapterIdMap(legends: LegendsExport): Map<string, number> {
-    const source = createLegendsViewerRecordSource(legends);
-    return new Map((source.chapters ?? []).map(chapter => [syntheticChapterKey(String(chapter.ownerKind), chapter.ownerId, chapter), Number(chapter.id)]));
+function createLegendsViewerContext(source: LegendsExportSource): LegendsViewerContext {
+    const lookups = createLegendIndexLookups(source);
+    const chapters = createLegendsViewerChapters(source, lookups);
+    return {
+        source,
+        lookups,
+        chapters,
+        chapterIds: new Map(chapters.map(chapter => [syntheticChapterKey(String(chapter.ownerKind), chapter.ownerId, chapter), Number(chapter.id)])),
+        kindsWithExternalText: new Set(),
+    };
 }
 
 function decorateLegendsViewerOwnerChapters(record: LegendRecord, ownerKind: string, chapterIds: Map<string, number>): LegendRecord {
@@ -11997,18 +12042,6 @@ function decorateLegendsViewerOwnerChapters(record: LegendRecord, ownerKind: str
             return chapterId === undefined ? chapter : {...chapter, chapterId};
         }),
     };
-}
-
-function createLegendsViewerRecordSource(legends: LegendsExport): Record<string, LegendRecord[]> {
-    const cached = legendsViewerRecordSourceCache.get(legends as object);
-    if (cached) return cached;
-    const legendRecord = legends as unknown as Record<string, LegendRecord[]>;
-    const source = {
-        ...legendRecord,
-        chapters: createLegendsViewerChapters(legends),
-    };
-    legendsViewerRecordSourceCache.set(legends as object, source);
-    return source;
 }
 
 function legendIndexLabelFor(kind: string, item: LegendRecord, lookups: LegendIndexLookups) {
@@ -12171,29 +12204,24 @@ function addLegendIndexFacets(entry: Record<string, unknown>, item: LegendRecord
     if (Array.isArray(item.epithets)) entry.epithetCount = item.epithets.length;
 }
 
-function createLegendsViewerIndex(legends: LegendsExport) {
-    const legendRecord = createLegendsViewerRecordSource(legends);
-    const lookups = createLegendIndexLookups(legends);
-    const index: Record<string, Array<{id: number; label: string; sublabel: string}>> = {};
-
-    for (let spec of legendsViewerKindSpecs) {
-        const records = legendRecord[spec.key] ?? [];
-        index[spec.kind] = records.map(item => {
-            const entry: {id: number; label: string; sublabel: string; year?: number; headline?: string} = {
-                id: Number(item.id),
-                label: legendIndexLabelFor(spec.kind, item, lookups),
-                sublabel: legendIndexSublabelFor(spec.kind, item, lookups),
-            };
-            if (spec.kind === "events") {
-                entry.year = Number(item.year || 0);
-                entry.headline = compactLegendIndexText(item.headline ?? entry.label, 160);
-            }
-            addLegendIndexFacets(entry, item);
-            return entry;
-        });
+function createLegendsViewerKindIndex(context: LegendsViewerContext, spec: (typeof legendsViewerKindSpecs)[number]) {
+    const records = viewerCollection(context, spec.key);
+    const entries: Array<{id: number; label: string; sublabel: string; year?: number; headline?: string}> = [];
+    for (let index = 0; index < records.length; index++) {
+        const item = records.get(index);
+        const entry: {id: number; label: string; sublabel: string; year?: number; headline?: string} = {
+            id: Number(item.id),
+            label: legendIndexLabelFor(spec.kind, item, context.lookups),
+            sublabel: legendIndexSublabelFor(spec.kind, item, context.lookups),
+        };
+        if (spec.kind === "events") {
+            entry.year = Number(item.year || 0);
+            entry.headline = compactLegendIndexText(item.headline ?? entry.label, 160);
+        }
+        addLegendIndexFacets(entry, item);
+        entries.push(entry);
     }
-
-    return index;
+    return entries;
 }
 
 type LegendMentionEntry = {
@@ -12760,49 +12788,53 @@ function addLegendMentionEntryToTarget(
 }
 
 function addChapterTargetMentions(
-    legendRecord: Record<string, LegendRecord[]>,
-    lookups: LegendIndexLookups,
+    context: LegendsViewerContext,
     byTarget: Record<string, Map<number, Record<string, LegendMentionEntry[]>>>,
 ) {
     const specByKind = new Map<string, (typeof legendsViewerKindSpecs)[number]>(legendsViewerKindSpecs.map(spec => [spec.kind, spec]));
-    const recordsByKind = new Map<string, Map<number, LegendRecord>>();
-    const recordMapForKind = (kind: string) => {
-        let map = recordsByKind.get(kind);
-        if (map) return map;
+    // Export collections are indexed by record id, so cited owners and events
+    // can be mapped on demand instead of materializing full id maps (the events
+    // map alone used to hold every event in memory). Entries are memoized
+    // because many chapters cite the same records.
+    const entryCache = new Map<string, LegendMentionEntry | undefined>();
+    const mentionEntryFor = (kind: string, id: number): LegendMentionEntry | undefined => {
+        const cacheKey = `${kind}:${id}`;
+        if (entryCache.has(cacheKey)) return entryCache.get(cacheKey);
         const spec = specByKind.get(kind);
-        map = makeLegendRecordMap(spec ? legendRecord[spec.key] : []);
-        recordsByKind.set(kind, map);
-        return map;
+        const records = spec ? viewerCollection(context, spec.key) : undefined;
+        const item = records && Number.isInteger(id) && id >= 0 && id < records.length ? records.get(id) : undefined;
+        const entry = item && Number(item.id) === id ? createLegendMentionEntry(kind, item, context.lookups) : undefined;
+        entryCache.set(cacheKey, entry);
+        return entry;
     };
 
-    for (let chapter of legendRecord.chapters ?? []) {
+    for (let chapter of context.chapters) {
         const chapterId = Number(chapter.id);
         if (!Number.isFinite(chapterId)) continue;
 
         const ownerKind = String(chapter.ownerKind ?? "");
-        const owner = recordMapForKind(ownerKind).get(Number(chapter.ownerId));
-        if (owner) {
-            addLegendMentionEntryToTarget(byTarget, "chapters", chapterId, ownerKind, createLegendMentionEntry(ownerKind, owner, lookups));
+        const ownerEntry = mentionEntryFor(ownerKind, Number(chapter.ownerId));
+        if (ownerEntry) {
+            addLegendMentionEntryToTarget(byTarget, "chapters", chapterId, ownerKind, ownerEntry);
         }
 
         for (let eventId of chapterSourceEventIds(chapter)) {
-            const event = recordMapForKind("events").get(eventId);
-            if (event) addLegendMentionEntryToTarget(byTarget, "chapters", chapterId, "events", createLegendMentionEntry("events", event, lookups));
+            const eventEntry = mentionEntryFor("events", eventId);
+            if (eventEntry) addLegendMentionEntryToTarget(byTarget, "chapters", chapterId, "events", eventEntry);
         }
     }
 }
 
-function createLegendsMentionIndexes(legends: LegendsExport) {
-    const legendRecord = createLegendsViewerRecordSource(legends);
-    const lookups = createLegendIndexLookups(legends);
+function createLegendsMentionIndexes(context: LegendsViewerContext) {
     const byTarget = Object.fromEntries(
         legendMentionTargets.map(target => [target.kind, new Map<number, Record<string, LegendMentionEntry[]>>()]),
     ) as Record<string, Map<number, Record<string, LegendMentionEntry[]>>>;
 
     for (let spec of legendsViewerMentionSpecs) {
-        const records = legendRecord[spec.key] ?? [];
-        for (let item of records) {
-            const entry = createLegendMentionEntry(spec.kind, item, lookups);
+        const records = viewerCollection(context, spec.key);
+        for (let index = 0; index < records.length; index++) {
+            const item = records.get(index);
+            const entry = createLegendMentionEntry(spec.kind, item, context.lookups);
             for (let target of legendMentionTargets) {
                 const ids = collectLegendMentionIds(item, target);
                 if (!ids.size) continue;
@@ -12819,41 +12851,40 @@ function createLegendsMentionIndexes(legends: LegendsExport) {
         }
     }
 
-    addChapterTargetMentions(legendRecord, lookups, byTarget);
+    addChapterTargetMentions(context, byTarget);
 
     return Object.fromEntries(
         Object.entries(byTarget).map(([kind, index]) => [kind, compactLegendMentionGroups(index)]),
     ) as Record<string, Record<string, Record<string, LegendMentionEntry[]>>>;
 }
 
-function createLegendsViewerIndexMetadata(legends: LegendsExport) {
-    const legendRecord = createLegendsViewerRecordSource(legends);
+function createLegendsViewerIndexMetadata(context: LegendsViewerContext) {
     return {
         basePath: "indexes",
         kinds: Object.fromEntries(
             legendsViewerKindSpecs
-                .filter(spec => (legendRecord[spec.key] ?? []).length > 0)
+                .filter(spec => viewerCollection(context, spec.key).length > 0)
                 .map(spec => [spec.kind, true]),
         ),
     };
 }
 
-function createLegendsViewerChunkMetadata(legends: LegendsExport) {
-    const legendRecord = createLegendsViewerRecordSource(legends);
+function createLegendsViewerChunkMetadata(context: LegendsViewerContext) {
     return {
         basePath: "records",
         chunkSize: legendsViewerChunkSize,
         cacheChunks: 32,
         kinds: Object.fromEntries(
             legendsViewerKindSpecs
-                .filter(spec => (legendRecord[spec.key] ?? []).length > 0)
+                .filter(spec => viewerCollection(context, spec.key).length > 0)
                 .map(spec => [spec.kind, true]),
         ),
     };
 }
 
-function createLegendsViewerTextMetadata(legends: LegendsExport) {
-    const legendRecord = createLegendsViewerRecordSource(legends);
+function createLegendsViewerTextMetadata(context: LegendsViewerContext) {
+    // kindsWithExternalText is filled while the record chunks are written, so
+    // the chunk pass must run before this metadata is built.
     return {
         basePath: "texts",
         chunkSize: legendsViewerChunkSize,
@@ -12861,14 +12892,13 @@ function createLegendsViewerTextMetadata(legends: LegendsExport) {
         fields: legendsViewerExternalTextFields,
         kinds: Object.fromEntries(
             legendsViewerKindSpecs
-                .filter(spec => (legendRecord[spec.key] ?? []).some(recordHasLegendsViewerExternalText))
+                .filter(spec => context.kindsWithExternalText.has(spec.kind))
                 .map(spec => [spec.kind, true]),
         ),
     };
 }
 
-function createLegendsViewerMentionMetadata(legends: LegendsExport) {
-    const legendRecord = createLegendsViewerRecordSource(legends);
+function createLegendsViewerMentionMetadata(context: LegendsViewerContext) {
     return {
         basePath: "mentions",
         chunkSize: legendsViewerMentionChunkSize,
@@ -12876,34 +12906,35 @@ function createLegendsViewerMentionMetadata(legends: LegendsExport) {
         groupLimit: legendsViewerPersonMentionGroupLimit,
         kinds: Object.fromEntries(
             legendMentionTargets
-                .filter(target => (legendRecord[target.key] ?? []).length > 0)
+                .filter(target => viewerCollection(context, target.key).length > 0)
                 .map(target => [target.kind, true]),
         ),
     };
 }
 
-function createLegendsViewerArchive(legends: LegendsExport, mapImagePath?: string) {
-    const viewer = {...legends} as Record<string, unknown>;
-    const legendRecord = createLegendsViewerRecordSource(legends);
-    const chapterIds = createLegendsViewerChapterIdMap(legends);
+function createLegendsViewerArchive(context: LegendsViewerContext, mapImagePath?: string) {
+    const viewer: Record<string, unknown> = {};
     const trimStats: LegendsViewerTrimStats = new Map();
 
-    for (let [key, value] of Object.entries(legends)) {
-        if (key === "history" && Array.isArray(value)) {
-            viewer[key] = [];
-            recordViewerTrim(trimStats, key, 0, value.length);
+    for (let [key, value] of Object.entries(context.source)) {
+        if (!isLegendsCollection(value)) {
+            viewer[key] = value;
             continue;
         }
-        if (Array.isArray(value)) {
-            const limit = legendsViewerTopLevelArrayLimits[key] ?? defaultLegendsViewerTopLevelArrayLimit;
-            const selected = value.length > limit ? value.slice(0, limit) : value;
-            if (selected.length < value.length) recordViewerTrim(trimStats, key, selected.length, value.length);
-            const kind = legendsViewerKindByKey.get(key);
-            viewer[key] = selected.map(item => sanitizeLegendsViewerValue(kind ? decorateLegendsViewerOwnerChapters(item as LegendRecord, kind, chapterIds) : item, key, trimStats));
+        const collection = value as LegendsRecordCollection;
+        const limit = legendsViewerTopLevelArrayLimits[key] ?? defaultLegendsViewerTopLevelArrayLimit;
+        const included = Math.min(collection.length, limit);
+        if (included < collection.length) recordViewerTrim(trimStats, key, included, collection.length);
+        const kind = legendsViewerKindByKey.get(key);
+        const selected: unknown[] = [];
+        for (let index = 0; index < included; index++) {
+            const item = collection.get(index);
+            selected.push(sanitizeLegendsViewerValue(kind ? decorateLegendsViewerOwnerChapters(item, kind, context.chapterIds) : item, key, trimStats));
         }
+        viewer[key] = selected;
     }
 
-    const chapters = legendRecord.chapters ?? [];
+    const chapters = context.chapters;
     if (chapters.length > 0) {
         const limit = legendsViewerTopLevelArrayLimits.chapters ?? defaultLegendsViewerTopLevelArrayLimit;
         const selected = chapters.length > limit ? chapters.slice(0, limit) : chapters;
@@ -12923,10 +12954,10 @@ function createLegendsViewerArchive(legends: LegendsExport, mapImagePath?: strin
         truncations,
     };
     viewer.viewerIndex = {};
-    viewer.viewerIndexes = createLegendsViewerIndexMetadata(legends);
-    viewer.viewerChunks = createLegendsViewerChunkMetadata(legends);
-    viewer.viewerTexts = createLegendsViewerTextMetadata(legends);
-    viewer.viewerMentions = createLegendsViewerMentionMetadata(legends);
+    viewer.viewerIndexes = createLegendsViewerIndexMetadata(context);
+    viewer.viewerChunks = createLegendsViewerChunkMetadata(context);
+    viewer.viewerTexts = createLegendsViewerTextMetadata(context);
+    viewer.viewerMentions = createLegendsViewerMentionMetadata(context);
     if (mapImagePath) {
         viewer.viewerMap = {imagePath: mapImagePath};
     }
@@ -12934,30 +12965,27 @@ function createLegendsViewerArchive(legends: LegendsExport, mapImagePath?: strin
     return viewer;
 }
 
-function writeLegendsViewerIndexes(legends: LegendsExport, htmlPath: string) {
+function writeLegendsViewerIndexes(context: LegendsViewerContext, htmlPath: string) {
     const outputPath = path.resolve(htmlPath);
     const indexesDir = path.join(path.dirname(outputPath), "indexes");
-    const fullIndex = createLegendsViewerIndex(legends);
     fs.rmSync(indexesDir, {recursive: true, force: true});
 
-    for (let [kind, entries] of Object.entries(fullIndex)) {
-        writeJsonPayload(path.join(indexesDir, `${kind}.json`), entries);
+    for (let spec of legendsViewerKindSpecs) {
+        writeJsonPayload(path.join(indexesDir, `${spec.kind}.json`), createLegendsViewerKindIndex(context, spec));
     }
 
     console.log(`Wrote Legends indexes to ${indexesDir}`);
 }
 
-function writeLegendsViewerChunks(legends: LegendsExport, htmlPath: string) {
+function writeLegendsViewerChunks(context: LegendsViewerContext, htmlPath: string) {
     const outputPath = path.resolve(htmlPath);
     const recordsDir = path.join(path.dirname(outputPath), "records");
     const textsDir = path.join(path.dirname(outputPath), "texts");
-    const legendRecord = createLegendsViewerRecordSource(legends);
-    const chapterIds = createLegendsViewerChapterIdMap(legends);
     fs.rmSync(recordsDir, {recursive: true, force: true});
     fs.rmSync(textsDir, {recursive: true, force: true});
 
     for (let spec of legendsViewerKindSpecs) {
-        const records = legendRecord[spec.key] ?? [];
+        const records = viewerCollection(context, spec.key);
         if (!records.length) continue;
 
         const kindDir = path.join(recordsDir, spec.kind);
@@ -12966,14 +12994,16 @@ function writeLegendsViewerChunks(legends: LegendsExport, htmlPath: string) {
             const chunkId = Math.floor(start / legendsViewerChunkSize);
             const stats: LegendsViewerTrimStats = new Map();
             const textChunk: Record<string, LegendsViewerExternalText> = {};
-            const chunk = records
-                .slice(start, start + legendsViewerChunkSize)
-                .map(record => {
-                    const sanitized = sanitizeLegendsViewerValue(decorateLegendsViewerOwnerChapters(record, spec.kind, chapterIds), spec.key, stats) as LegendRecord;
-                    const extracted = extractLegendsViewerExternalText(sanitized);
-                    if (extracted.text) textChunk[String(extracted.record.id)] = extracted.text;
-                    return extracted.record;
-                });
+            const chunkEnd = Math.min(records.length, start + legendsViewerChunkSize);
+            const chunk: LegendRecord[] = [];
+            for (let index = start; index < chunkEnd; index++) {
+                const record = records.get(index);
+                if (recordHasLegendsViewerExternalText(record)) context.kindsWithExternalText.add(spec.kind);
+                const sanitized = sanitizeLegendsViewerValue(decorateLegendsViewerOwnerChapters(record, spec.kind, context.chapterIds), spec.key, stats) as LegendRecord;
+                const extracted = extractLegendsViewerExternalText(sanitized);
+                if (extracted.text) textChunk[String(extracted.record.id)] = extracted.text;
+                chunk.push(extracted.record);
+            }
             writeJsonPayload(path.join(kindDir, `${chunkId}.json`), chunk);
             if (Object.keys(textChunk).length > 0) {
                 writeJsonPayload(path.join(textKindDir, `${chunkId}.json`), textChunk);
@@ -12985,10 +13015,10 @@ function writeLegendsViewerChunks(legends: LegendsExport, htmlPath: string) {
     console.log(`Wrote Legends text chunks to ${textsDir}`);
 }
 
-function writeLegendsViewerMentionIndexes(legends: LegendsExport, htmlPath: string) {
+function writeLegendsViewerMentionIndexes(context: LegendsViewerContext, htmlPath: string) {
     const outputPath = path.resolve(htmlPath);
     const mentionsDir = path.join(path.dirname(outputPath), "mentions");
-    const mentionIndexes = createLegendsMentionIndexes(legends);
+    const mentionIndexes = createLegendsMentionIndexes(context);
 
     fs.rmSync(mentionsDir, {recursive: true, force: true});
 
@@ -13012,15 +13042,16 @@ function writeLegendsViewerMentionIndexes(legends: LegendsExport, htmlPath: stri
     console.log(`Wrote Legends mention indexes to ${mentionsDir}`);
 }
 
-function writeLegendsHtml(legends: LegendsExport, htmlPath: string, mapImagePath?: string) {
+function writeLegendsHtml(source: LegendsExportSource, htmlPath: string, mapImagePath?: string) {
     const outputPath = path.resolve(htmlPath);
-    writeLegendsViewerIndexes(legends, outputPath);
-    writeLegendsViewerChunks(legends, outputPath);
-    writeLegendsViewerMentionIndexes(legends, outputPath);
+    const context = createLegendsViewerContext(source);
+    writeLegendsViewerIndexes(context, outputPath);
+    writeLegendsViewerChunks(context, outputPath);
+    writeLegendsViewerMentionIndexes(context, outputPath);
     const relativeMapImagePath = mapImagePath
         ? path.relative(path.dirname(outputPath), path.resolve(mapImagePath)).replace(/\\/g, "/")
         : undefined;
-    const viewerLegends = createLegendsViewerArchive(legends, relativeMapImagePath);
+    const viewerLegends = createLegendsViewerArchive(context, relativeMapImagePath);
     const sentinel = "__WORLD_MAP_LEGENDS_JSON__";
     const html = legendsViewerHtml(sentinel);
     const [prefix, suffix] = html.split(sentinel);
@@ -13029,9 +13060,37 @@ function writeLegendsHtml(legends: LegendsExport, htmlPath: string, mapImagePath
     console.log(`Wrote ${outputPath}`);
 }
 
-function writeLegendsJson(legends: LegendsExport, jsonPath: string) {
+function writeLegendsJson(source: LegendsExportSource, jsonPath: string) {
     const outputPath = path.resolve(jsonPath);
-    writeJsonPayload(outputPath, legends);
+    fs.mkdirSync(path.dirname(outputPath), {recursive: true});
+    const fd = fs.openSync(outputPath, "w");
+    const writer: JsonStreamWriter = {fd, htmlEscape: false, buffer: ""};
+    try {
+        writeBufferedJsonChunk(writer, "{");
+        let first = true;
+        for (const [key, value] of Object.entries(source)) {
+            if (value === undefined) continue;
+            if (!first) writeBufferedJsonChunk(writer, ",");
+            first = false;
+            writeJsonPrimitive(writer, key);
+            writeBufferedJsonChunk(writer, ":");
+            if (isLegendsCollection(value)) {
+                const collection = value as LegendsRecordCollection;
+                writeBufferedJsonChunk(writer, "[");
+                for (let index = 0; index < collection.length; index++) {
+                    if (index > 0) writeBufferedJsonChunk(writer, ",");
+                    writeJsonValue(writer, collection.get(index));
+                }
+                writeBufferedJsonChunk(writer, "]");
+            } else {
+                writeJsonValue(writer, value);
+            }
+        }
+        writeBufferedJsonChunk(writer, "}");
+        if (writer.buffer) fs.writeSync(writer.fd, writer.buffer);
+    } finally {
+        fs.closeSync(fd);
+    }
     console.log(`Wrote ${outputPath}`);
 }
 
@@ -13437,7 +13496,7 @@ function profileEntityName(simulation: CivilizationSimulation, kind: LegendEntit
     }
     if (kind === "event") {
         const event = simulation.legendEvents[id];
-        return event ? `${event.year}: ${legendEventHeadline(event)}` : undefined;
+        return event ? `${event.year}: ${legendEventHeadline(event).replace(/[.!?]+$/, "")}` : undefined;
     }
     const record = profileRecordForRef(simulation, {kind, id});
     return profileCompactText(record?.name, 160);
@@ -13519,6 +13578,20 @@ function profileRefSummary(simulation: CivilizationSimulation, ref: LegendEntity
         const defender = typeof record.defenderCivilizationId === "number" ? profileEntityName(simulation, "civilization", record.defenderCivilizationId) : undefined;
         return `${record.name ?? ref.name ?? `Battle ${ref.id}`} happened at ${record.battlefieldName ?? "an unnamed battlefield"} in year ${record.year ?? "unknown"}. Terrain ${record.battlefieldTerrain ?? "unknown"}, outcome ${record.outcome ?? "unknown"}, ${attacker ?? "unknown attacker"} versus ${defender ?? "unknown defender"}, casualties ${(profileNumberList(record.casualtyAgentIds, 1000) ?? []).length}.`;
     }
+    if (ref.kind === "settlement") {
+        const civilization = typeof record.civilizationId === "number" ? profileEntityName(simulation, "civilization", record.civilizationId) : undefined;
+        const population = typeof record.population === "number" ? record.population : undefined;
+        return `${record.name ?? ref.name ?? `Settlement ${ref.id}`} is a ${record.type ?? "settlement"}${civilization ? ` of ${civilization}` : ""} founded in year ${record.foundedYear ?? "unknown"}${population !== undefined ? `, population ${population}` : ""}.`;
+    }
+    if (ref.kind === "civilization") {
+        const capital = typeof record.capitalSettlementId === "number" ? profileEntityName(simulation, "settlement", record.capitalSettlementId) : undefined;
+        const population = typeof record.population === "number" ? record.population : undefined;
+        return `${record.name ?? ref.name ?? `Civilization ${ref.id}`} is a civilization founded in year ${record.foundedYear ?? 0}${record.fallenYear ? `, fallen in year ${record.fallenYear}` : ""}, status ${record.status ?? "unknown"}${capital ? `, seat ${capital}` : ""}${population !== undefined ? `, population ${population}` : ""}.`;
+    }
+    if (ref.kind === "story-hook") {
+        const prompt = profileCompactText(record.prompt, 360);
+        if (prompt) return `Story hook: ${prompt}`;
+    }
     const description = profileFirstText(record, ["description", "detail", "inscription", "principle", "demand", "effect"], 420);
     if (description) return description;
     const attributes = ["kind", "status", "type", "domain", "scale", "purpose", "quality", "condition", "outcome"]
@@ -13592,6 +13665,7 @@ function profileStoryHookSample(simulation: CivilizationSimulation, hook: Civili
         tone: hook.tone,
         year: hook.year,
         score: hook.score,
+        rawScore: hook.rawScore,
         urgency: hook.urgency,
         prompt: hook.prompt,
         stakes: hook.stakes,
@@ -13620,7 +13694,7 @@ function storyHookSamplesByKind(simulation: CivilizationSimulation, limitPerKind
     return samples;
 }
 
-function civilizationProfile(simulation: CivilizationSimulation) {
+function civilizationProfile(simulation: CivilizationSimulation, terrainSeed?: number, meshSeed?: number) {
     const counts = civilizationArrayCounts(simulation);
     const eventIdLinkStats = nestedEventIdLinkStats(simulation);
     const eventIdLinkCounts = eventIdLinkStats.counts;
@@ -13631,6 +13705,14 @@ function civilizationProfile(simulation: CivilizationSimulation) {
     const aliveAgentScanCount = simulation.agents.reduce((sum, agent) => sum + (agent.alive ? 1 : 0), 0);
     const lifecycle = civilizationLifecycleProfile(simulation);
     return {
+        provenance: {
+            terrainSeed: terrainSeed ?? null,
+            meshSeed: meshSeed ?? null,
+            civilizationSeed: simulation.options.seed,
+            simulatedYear: simulation.year,
+            workerCount: simulation.workerCount,
+            options: {...simulation.options},
+        },
         year: simulation.year,
         civilizations: simulation.civilizations.length,
         workerCount: simulation.workerCount,
@@ -13660,6 +13742,7 @@ function civilizationProfile(simulation: CivilizationSimulation) {
         counts,
         topArrays: topCivilizationArrayCounts(counts),
         storyHookCountsByKind: storyHookCountsByKind(simulation),
+        storyHookEraYears: simulation.storyHookEras.map(era => era.year),
         storyHookSamples: simulation.storyHooks.slice(0, 12).map(hook => profileStoryHookSample(simulation, hook)),
         storyHookSamplesByKind: storyHookSamplesByKind(simulation),
         memory: {
@@ -13691,15 +13774,15 @@ function compactPhaseTimingSummary(progress: CivilizationProgress): string {
         .join("; ");
 }
 
-function writeCivilizationProfileJson(simulation: CivilizationSimulation, jsonPath: string) {
+function writeCivilizationProfileJson(simulation: CivilizationSimulation, jsonPath: string, terrainSeed?: number, meshSeed?: number) {
     const outputPath = path.resolve(jsonPath);
-    writeJsonPayload(outputPath, civilizationProfile(simulation));
+    writeJsonPayload(outputPath, civilizationProfile(simulation, terrainSeed, meshSeed));
     console.log(`Wrote ${outputPath}`);
 }
 
-function writeCivilizationCheckpointProfile(simulation: CivilizationSimulation, profileDir: string) {
+function writeCivilizationCheckpointProfile(simulation: CivilizationSimulation, profileDir: string, terrainSeed?: number, meshSeed?: number) {
     const outputPath = path.join(profileDir, `year-${paddedYear(simulation.year)}.json`);
-    writeJsonPayload(outputPath, civilizationProfile(simulation));
+    writeJsonPayload(outputPath, civilizationProfile(simulation, terrainSeed, meshSeed));
     console.log(`Wrote ${outputPath}`);
 }
 
@@ -13739,6 +13822,7 @@ function writeCivilizationSnapshots(
     const manifest = {
         generatedAt: new Date().toISOString(),
         terrainSeed: defaultControlValues(world.controls).elevation.seed,
+        meshSeed: defaultControlValues(world.controls).mesh.seed,
         civilizationSeed: options.civilizationSeed,
         years: options.civilizationYears,
         civilizationWorkers: resolvedCivilizationWorkerCount(options),
@@ -13791,6 +13875,9 @@ export function runGenerateCommand(argv = process.argv.slice(2)) {
 
     console.log("Generating map...");
     const world = generateWorldMap(options.controls);
+    const effectiveControls = defaultControlValues(world.controls);
+    const terrainSeed = effectiveControls.elevation.seed;
+    const meshSeed = effectiveControls.mesh.seed;
     let civilizations: CivilizationSimulation | undefined;
     const capturedFrameYears = new Set<number>();
     if (options.civilizations > 0) {
@@ -13814,7 +13901,7 @@ export function runGenerateCommand(argv = process.argv.slice(2)) {
         if (options.progressEvery > 0) {
             runOptions.onProgress = (progress, progressSimulation) => {
                 logCivilizationProgress(progress, progressSimulation);
-                if (checkpointProfileDir) writeCivilizationCheckpointProfile(progressSimulation, checkpointProfileDir);
+                if (checkpointProfileDir) writeCivilizationCheckpointProfile(progressSimulation, checkpointProfileDir, terrainSeed, meshSeed);
             };
         }
         if (options.snapshotDir) {
@@ -13834,7 +13921,7 @@ export function runGenerateCommand(argv = process.argv.slice(2)) {
     }
 
     if (civilizations && options.civilizationProfileJson) {
-        writeCivilizationProfileJson(civilizations, options.civilizationProfileJson);
+        writeCivilizationProfileJson(civilizations, options.civilizationProfileJson, terrainSeed, meshSeed);
     }
 
     console.log(`Rendering ${options.width}x${options.height} PNG...`);
@@ -13850,12 +13937,12 @@ export function runGenerateCommand(argv = process.argv.slice(2)) {
     }
 
     if (civilizations && (options.legendsJson || options.legendsHtml)) {
-        const legends = exportLegends(civilizations);
+        const legendsSource = exportLegendsSource(civilizations, {terrainSeed, meshSeed});
         if (options.legendsJson) {
-            writeLegendsJson(legends, options.legendsJson);
+            writeLegendsJson(legendsSource, options.legendsJson);
         }
         if (options.legendsHtml) {
-            writeLegendsHtml(legends, options.legendsHtml, options.out);
+            writeLegendsHtml(legendsSource, options.legendsHtml, options.out);
         }
     }
 

@@ -17,6 +17,7 @@ export type ControlOverrides = Partial<Record<ControlPhase, Record<string, numbe
 export const controlPhaseNames: ControlPhase[] = mapgen4ControlPhaseNames;
 
 export const unlockedControlKeys = [
+    "mesh.seed",
     "elevation.seed",
     "elevation.island",
     "biomes.wind_angle_deg",

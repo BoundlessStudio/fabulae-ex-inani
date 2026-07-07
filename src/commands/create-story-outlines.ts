@@ -152,8 +152,14 @@ function slugify(value, fallback = "story-outline") {
 
 function assertWorkspaceOutputPath(outputDir) {
   const resolved = path.resolve(outputDir);
-  const cwd = process.cwd();
-  if (!resolved.startsWith(cwd)) {
+  // path.relative is case-insensitive on win32 and never treats a sibling
+  // directory that merely shares the workspace name as a prefix match.
+  const relative = path.relative(process.cwd(), resolved);
+  const escapesWorkspace = relative === ""
+    || relative === ".."
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative);
+  if (escapesWorkspace) {
     throw new Error(`Refusing to write outside the workspace: ${resolved}`);
   }
   return resolved;
@@ -423,13 +429,38 @@ function mockStoryOutline(card) {
   }, card);
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(url, init, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let response;
+    try {
+      response = await fetch(url, init);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) throw lastError;
+      await sleep(1500 * 2 ** (attempt - 1));
+      continue;
+    }
+    if ((response.status === 429 || response.status >= 500) && attempt < attempts) {
+      await sleep(1500 * 2 ** (attempt - 1));
+      continue;
+    }
+    return response;
+  }
+  throw lastError;
+}
+
 async function openRouterStoryOutline(card, options) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
     throw new Error("OPENROUTER_API_KEY is required for --provider openrouter. Use --provider mock for local output-shape testing.");
   }
 
-  const response = await fetch(`${options.baseUrl}/chat/completions`, {
+  const response = await fetchWithRetry(`${options.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${apiKey}`,
@@ -439,6 +470,7 @@ async function openRouterStoryOutline(card, options) {
     },
     body: JSON.stringify({
       model: options.model,
+      response_format: {type: "json_object"},
       messages: [
         {
           role: "system",
@@ -565,7 +597,7 @@ ${bulletList(outline.continuationHooks)}
 `;
 }
 
-function summaryMarkdown({entries, options, outputDir}) {
+function summaryMarkdown({entries, failures = [], options, outputDir}) {
   const rows = entries
     .map(entry => `| [${markdownEscape(entry.outline.title)}](${path.relative(outputDir, entry.outlinePath).replace(/\\/g, "/")}) | ${markdownEscape(entry.card.title)} | ${markdownEscape(entry.card.metadata.Kind ?? "")} | ${markdownEscape(entry.card.metadata.Grade ?? "")} | ${markdownEscape(entry.outline.logline)} |`)
     .join("\n");
@@ -580,7 +612,7 @@ Model: ${options.provider === "mock" ? "mock" : options.model}
 Writing rules: ${options.writingRulesPath || "none"}
 
 Outlines created: ${entries.length}
-
+${failures.length ? `\nOutlines failed: ${failures.length}\n\n## Failed Outlines\n\n${failures.map(failure => `- ${markdownEscape(failure.card.title)}: ${markdownEscape(failure.error)}`).join("\n")}\n` : ""}
 | Outline | Source Report Card | Kind | Grade | Logline |
 | --- | --- | --- | --- | --- |
 ${rows}
@@ -639,22 +671,9 @@ function resolveCardPaths(options) {
   return cardPaths;
 }
 
-function writeOutputs({entries, options}) {
-  if (options.overwrite) removeExistingOutputDir(options.out);
-  const outputDir = assertWorkspaceOutputPath(options.out);
-  const outlinesDir = path.join(outputDir, "outlines");
-  fs.mkdirSync(outlinesDir, {recursive: true});
-
-  for (const entry of entries) {
-    const sourceBase = path.basename(entry.card.filename, path.extname(entry.card.filename));
-    const filename = `${slugify(sourceBase)}-outline.md`;
-    entry.outlinePath = path.join(outlinesDir, filename);
-    entry.outputDir = outputDir;
-    fs.writeFileSync(entry.outlinePath, outlineMarkdown({...entry, options, outputDir}), "utf8");
-  }
-
+function writeSummaryOutputs({entries, failures, options, outputDir}) {
   const summaryPath = path.join(outputDir, "summary.md");
-  fs.writeFileSync(summaryPath, summaryMarkdown({entries, options, outputDir}), "utf8");
+  fs.writeFileSync(summaryPath, summaryMarkdown({entries, failures, options, outputDir}), "utf8");
   fs.writeFileSync(path.join(outputDir, "index.md"), indexMarkdown(entries, summaryPath), "utf8");
   fs.writeFileSync(path.join(outputDir, "manifest.json"), JSON.stringify({
     generatedAt: new Date().toISOString(),
@@ -662,6 +681,7 @@ function writeOutputs({entries, options}) {
     model: options.provider === "mock" ? "mock" : options.model,
     writingRulesPath: options.writingRulesPath || undefined,
     outlineCount: entries.length,
+    failureCount: failures.length,
     outlines: entries.map(entry => ({
       title: entry.outline.title,
       sourceCard: entry.card.path,
@@ -671,9 +691,15 @@ function writeOutputs({entries, options}) {
       file: path.relative(outputDir, entry.outlinePath).replace(/\\/g, "/"),
       logline: entry.outline.logline,
     })),
+    errors: failures.map(failure => ({
+      sourceCard: failure.card.path,
+      sourceCardFilename: failure.card.filename,
+      title: failure.card.title,
+      error: failure.error,
+    })),
   }, null, 2), "utf8");
 
-  return {outputDir, summaryPath, outlinesDir};
+  return {outputDir, summaryPath};
 }
 
 export async function runCreateStoryOutlinesCommand(argv = process.argv.slice(2)) {
@@ -681,15 +707,38 @@ export async function runCreateStoryOutlinesCommand(argv = process.argv.slice(2)
   loadWritingRules(options);
   const cardPaths = resolveCardPaths(options);
   const cards = cardPaths.map(parseReportCard);
-  const entries = [];
 
+  if (options.overwrite) removeExistingOutputDir(options.out);
+  const outputDir = assertWorkspaceOutputPath(options.out);
+  const outlinesDir = path.join(outputDir, "outlines");
+  fs.mkdirSync(outlinesDir, {recursive: true});
+
+  const entries = [];
+  const failures = [];
   for (const card of cards) {
-    console.log(`Creating outline ${entries.length + 1}/${cards.length}: ${card.title}`);
-    const outline = await createStoryOutline(card, options);
-    entries.push({card, outline});
+    console.log(`Creating outline ${entries.length + failures.length + 1}/${cards.length}: ${card.title}`);
+    let outline;
+    try {
+      outline = await createStoryOutline(card, options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Failed to outline "${card.title}": ${message}`);
+      failures.push({card, error: message});
+      continue;
+    }
+    // Write each outline as soon as it exists so one failed API call cannot
+    // discard the completed outlines of a long paid run.
+    const sourceBase = path.basename(card.filename, path.extname(card.filename));
+    const entry = {card, outline, outputDir, outlinePath: path.join(outlinesDir, `${slugify(sourceBase)}-outline.md`)};
+    fs.writeFileSync(entry.outlinePath, outlineMarkdown({...entry, options, outputDir}), "utf8");
+    entries.push(entry);
   }
 
-  const output = writeOutputs({entries, options});
+  const output = writeSummaryOutputs({entries, failures, options, outputDir});
   console.log(`Wrote ${entries.length} story outline${entries.length === 1 ? "" : "s"} to ${output.outputDir}`);
+  if (failures.length > 0) {
+    console.error(`${failures.length} outline${failures.length === 1 ? "" : "s"} failed; details recorded in manifest.json`);
+    process.exitCode = 1;
+  }
   console.log(`Summary: ${output.summaryPath}`);
 }

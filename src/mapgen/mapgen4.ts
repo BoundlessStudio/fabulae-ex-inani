@@ -7,6 +7,15 @@
  */
 
 export const mapgen4InitialParams = {
+    // mesh.seed drives the Poisson point cloud and Delaunay triangulation that
+    // every world is built on (including the fixed menu of mountain-candidate
+    // peaks). Upstream mapgen4 hardcoded 12345 because the browser app reuses
+    // one mesh across live repaints; the console app rebuilds the mesh per run,
+    // so the seed is exposed as an unlockable control. The default preserves
+    // the skeleton of every world generated before it was unlocked.
+    mesh: [
+        ['seed', 12345, 1, 1 << 30],
+    ],
     elevation: [
         ['seed', 187, 1, 1 << 30],
         ['island', 0.5, 0, 1],

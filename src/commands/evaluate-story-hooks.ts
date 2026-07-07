@@ -30,6 +30,8 @@ Options:
   --out <dir>             Output directory. Defaults to ${defaultOutputDir}
   --top <count>           Global top hook count. Defaults to 12
   --per-kind <count>      Extra top hooks per kind. Defaults to 1
+  --era-year <year>       Evaluate the storyHookEras snapshot for this year instead
+                          of the end-of-history hooks (Legends JSON input)
   --mode <top|by-kind|both>
                           Which hooks to evaluate. Defaults to both
   --provider <openrouter|mock>
@@ -49,6 +51,7 @@ Environment:
 Examples:
   npm run stress:500
   npm run evaluate:story-hooks -- --input output/stress-probes/probe-500-final.json --out output/stress-probes/probe-500-story-hook-report-cards
+  npm run evaluate:story-hooks -- --input output/legends/legends.json --era-year 200 --out output/story-hook-report-cards-year-200 --overwrite
   npm run evaluate:story-hooks -- --input output/stress-probes/story-hook-no-place-sample.json --out output/story-hook-report-cards-smoke --provider mock --overwrite
 `);
 }
@@ -69,12 +72,21 @@ function parsePositiveInteger(value, name) {
   return parsed;
 }
 
+function parseNonNegativeInteger(value, name) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer, got "${value}"`);
+  }
+  return parsed;
+}
+
 function parseArgs(argv) {
   const options = {
     input: defaultInput,
     out: defaultOutputDir,
     top: 12,
     perKind: 1,
+    eraYear: undefined,
     mode: "both",
     provider: "openrouter",
     model: defaultModel,
@@ -102,6 +114,10 @@ function parseArgs(argv) {
     } else if (arg === "--per-kind" || arg.startsWith("--per-kind=")) {
       const result = readValue(argv, i, "--per-kind");
       options.perKind = parsePositiveInteger(result.value, "--per-kind");
+      i = result.nextIndex;
+    } else if (arg === "--era-year" || arg.startsWith("--era-year=")) {
+      const result = readValue(argv, i, "--era-year");
+      options.eraYear = parseNonNegativeInteger(result.value, "--era-year");
       i = result.nextIndex;
     } else if (arg === "--mode" || arg.startsWith("--mode=")) {
       const result = readValue(argv, i, "--mode");
@@ -149,8 +165,14 @@ function slugify(value, fallback = "hook") {
 
 function assertWorkspaceOutputPath(outputDir) {
   const resolved = path.resolve(outputDir);
-  const cwd = process.cwd();
-  if (!resolved.startsWith(cwd)) {
+  // path.relative is case-insensitive on win32 and never treats a sibling
+  // directory that merely shares the workspace name as a prefix match.
+  const relative = path.relative(process.cwd(), resolved);
+  const escapesWorkspace = relative === ""
+    || relative === ".."
+    || relative.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relative);
+  if (escapesWorkspace) {
     throw new Error(`Refusing to write outside the workspace: ${resolved}`);
   }
   return resolved;
@@ -181,6 +203,7 @@ function normalizeHook(hook) {
     tone: hook.tone ?? "unknown",
     year: hook.year,
     score: hook.score,
+    rawScore: hook.rawScore,
     urgency: hook.urgency,
     prompt: hook.prompt ?? "",
     stakes: hook.stakes ?? "",
@@ -337,7 +360,7 @@ function recordForRef(data, ref) {
 function nameForRef(data, kind, id) {
   if (kind === "event") {
     const event = recordFromCollection(data.events, id) ?? recordFromCollection(data.legendEvents, id);
-    return event ? `${event.year}: ${compactText(event.headline, 160) ?? `Event ${id}`}` : undefined;
+    return event ? `${event.year}: ${compactText(String(event.headline ?? "").replace(/[.!?]+$/, ""), 160) ?? `Event ${id}`}` : undefined;
   }
   if (kind === "relationship") {
     const record = recordForRef(data, {kind, id});
@@ -442,6 +465,20 @@ function resolvedSeedRefSummary(data, ref, record) {
     const defender = typeof record.defenderCivilizationId === "number" ? nameForRef(data, "civilization", record.defenderCivilizationId) : undefined;
     return `${record.name ?? ref.name ?? `Battle ${ref.id}`} happened at ${record.battlefieldName ?? "an unnamed battlefield"} in year ${record.year ?? "unknown"}. Terrain ${record.battlefieldTerrain ?? "unknown"}, outcome ${record.outcome ?? "unknown"}, ${attacker ?? "unknown attacker"} versus ${defender ?? "unknown defender"}, casualties ${(numberList(record.casualtyAgentIds, 1000) ?? []).length}.`;
   }
+  if (ref.kind === "settlement") {
+    const civ = typeof record.civilizationId === "number" ? nameForRef(data, "civilization", record.civilizationId) : undefined;
+    const population = typeof record.population === "number" ? record.population : undefined;
+    return `${record.name ?? ref.name ?? `Settlement ${ref.id}`} is a ${record.type ?? "settlement"}${civ ? ` of ${civ}` : ""} founded in year ${record.foundedYear ?? "unknown"}${population !== undefined ? `, population ${population}` : ""}.`;
+  }
+  if (ref.kind === "civilization") {
+    const capital = typeof record.capitalSettlementId === "number" ? nameForRef(data, "settlement", record.capitalSettlementId) : undefined;
+    const population = typeof record.population === "number" ? record.population : undefined;
+    return `${record.name ?? ref.name ?? `Civilization ${ref.id}`} is a civilization founded in year ${record.foundedYear ?? 0}${record.fallenYear ? `, fallen in year ${record.fallenYear}` : ""}, status ${record.status ?? "unknown"}${capital ? `, seat ${capital}` : ""}${population !== undefined ? `, population ${population}` : ""}.`;
+  }
+  if (ref.kind === "story-hook") {
+    const prompt = compactText(record.prompt, 360);
+    if (prompt) return `Story hook: ${prompt}`;
+  }
   const text = firstText(record, ["description", "detail", "inscription", "principle", "demand", "effect"], 500);
   if (text) return text;
   const attributes = ["kind", "status", "type", "domain", "scale", "purpose", "quality", "condition", "outcome"]
@@ -512,31 +549,46 @@ function sourceHooks(data) {
   throw new Error("Input JSON does not contain storyHooks, storyHookSamples, or storyHookSamplesByKind");
 }
 
-function byKindHooks(data, fallbackHooks) {
+function groupHooksByKind(hooks) {
   const result = new Map(storyHookKinds.map(kind => [kind, []]));
-  if (Array.isArray(data.storyHooks) && data.storyHooks.length > 0) {
-    for (const hook of data.storyHooks.map(normalizeHook).sort(scoreSort)) {
-      if (!result.has(hook.kind)) result.set(hook.kind, []);
-      result.get(hook.kind).push(hook);
-    }
-    return result;
-  }
-  if (data.storyHookSamplesByKind && typeof data.storyHookSamplesByKind === "object") {
-    for (const [kind, hooks] of Object.entries(data.storyHookSamplesByKind)) {
-      if (!Array.isArray(hooks)) continue;
-      result.set(kind, hooks.map(normalizeHook).sort(scoreSort));
-    }
-    return result;
-  }
-  for (const hook of fallbackHooks) {
+  for (const hook of hooks) {
     if (!result.has(hook.kind)) result.set(hook.kind, []);
     result.get(hook.kind).push(hook);
   }
   return result;
 }
 
+function byKindHooks(data, fallbackHooks) {
+  if (Array.isArray(data.storyHooks) && data.storyHooks.length > 0) {
+    return groupHooksByKind(data.storyHooks.map(normalizeHook).sort(scoreSort));
+  }
+  if (data.storyHookSamplesByKind && typeof data.storyHookSamplesByKind === "object") {
+    const result = new Map(storyHookKinds.map(kind => [kind, []]));
+    for (const [kind, hooks] of Object.entries(data.storyHookSamplesByKind)) {
+      if (!Array.isArray(hooks)) continue;
+      result.set(kind, hooks.map(normalizeHook).sort(scoreSort));
+    }
+    return result;
+  }
+  return groupHooksByKind(fallbackHooks);
+}
+
+function eraHooks(data, eraYear) {
+  const eras = Array.isArray(data.storyHookEras) ? data.storyHookEras : [];
+  if (eras.length === 0) {
+    throw new Error("--era-year requires a Legends JSON with storyHookEras; regenerate the archive with a current build or drop --era-year");
+  }
+  const era = eras.find(entry => entry && entry.year === eraYear && Array.isArray(entry.storyHooks));
+  if (!era) {
+    const available = eras.map(entry => entry?.year).filter(year => typeof year === "number");
+    throw new Error(`No story-hook era for year ${eraYear}; available era years: ${available.join(", ") || "none"}`);
+  }
+  return era.storyHooks.map(normalizeHook).sort(scoreSort);
+}
+
 function selectHooks(data, options) {
-  const globalHooks = sourceHooks(data);
+  const eraSelection = options.eraYear === undefined ? undefined : eraHooks(data, options.eraYear);
+  const globalHooks = eraSelection ?? sourceHooks(data);
   const selected = [];
   const seen = new Set();
 
@@ -552,7 +604,7 @@ function selectHooks(data, options) {
   }
 
   if (options.mode === "by-kind" || options.mode === "both") {
-    const grouped = byKindHooks(data, globalHooks);
+    const grouped = eraSelection ? groupHooksByKind(eraSelection) : byKindHooks(data, globalHooks);
     for (const kind of storyHookKinds) {
       for (const hook of (grouped.get(kind) ?? []).slice(0, options.perKind)) {
         add(hook, `top-${options.perKind}-${kind}`);
@@ -600,17 +652,28 @@ function selectedCounts(data) {
   return Object.fromEntries(keys.filter(key => counts[key] !== undefined).map(key => [key, counts[key]]));
 }
 
-function worldSimulationDetails(data) {
+function countOrLength(value, fallback) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  // Legends archives store full record arrays where compact profiles store
+  // counts; only the count may be embedded in prompts, never the array.
+  if (Array.isArray(value)) return value.length;
+  return fallback;
+}
+
+function worldSimulationDetails(data, eraYear) {
   return {
     year: data.year,
-    civilizations: data.civilizations,
+    storyHookEraYear: eraYear,
+    storyHookEraYears: data.storyHookEraYears
+      ?? (Array.isArray(data.storyHookEras) ? data.storyHookEras.map(entry => entry?.year) : undefined),
+    civilizations: countOrLength(data.civilizations, data.civilizationCount),
     workerCount: data.workerCount,
-    settlements: data.settlements,
-    roads: data.counts?.roads,
+    settlements: countOrLength(data.settlements, data.settlementCount),
+    roads: data.counts?.roads ?? data.roadCount,
     aliveAgents: data.aliveAgents,
-    totalAgents: data.totalAgents,
+    totalAgents: countOrLength(data.totalAgents, data.personCount),
     deadAgents: data.deadAgents,
-    legendEvents: data.legendEvents,
+    legendEvents: countOrLength(data.legendEvents, data.eventCount),
     compactedLegendEvents: data.compactedLegendEvents,
     spilledLegendEventTexts: data.spilledLegendEventTexts,
     storyHooks: data.counts?.storyHooks ?? data.storyHookCount,
@@ -638,6 +701,7 @@ function hookSimulationDetails(hook) {
     tone: hook.tone,
     year: hook.year,
     score: hook.score,
+    rawScore: hook.rawScore,
     urgency: hook.urgency,
     prompt: hook.prompt,
     stakes: hook.stakes,
@@ -650,11 +714,11 @@ function hookSimulationDetails(hook) {
   };
 }
 
-function promptForHook(hook, data) {
+function promptForHook(hook, data, options) {
   return `Evaluate this generated fantasy-world story hook as a writing prompt seed.
 
 World simulation details:
-${JSON.stringify(worldSimulationDetails(data), null, 2)}
+${JSON.stringify(worldSimulationDetails(data, options.eraYear), null, 2)}
 
 Story hook with resolved simulation context:
 ${JSON.stringify(hookSimulationDetails(hook), null, 2)}
@@ -764,13 +828,38 @@ function mockReportCard(hook) {
   }, hook);
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry(url, init, attempts = 3) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    let response;
+    try {
+      response = await fetch(url, init);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) throw lastError;
+      await sleep(1500 * 2 ** (attempt - 1));
+      continue;
+    }
+    if ((response.status === 429 || response.status >= 500) && attempt < attempts) {
+      await sleep(1500 * 2 ** (attempt - 1));
+      continue;
+    }
+    return response;
+  }
+  throw lastError;
+}
+
 async function openRouterReportCard(hook, data, options) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
     throw new Error("OPENROUTER_API_KEY is required for --provider openrouter. Use --provider mock for local output-shape testing.");
   }
 
-  const response = await fetch(`${options.baseUrl}/chat/completions`, {
+  const response = await fetchWithRetry(`${options.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${apiKey}`,
@@ -780,6 +869,7 @@ async function openRouterReportCard(hook, data, options) {
     },
     body: JSON.stringify({
       model: options.model,
+      response_format: {type: "json_object"},
       messages: [
         {
           role: "system",
@@ -787,7 +877,7 @@ async function openRouterReportCard(hook, data, options) {
         },
         {
           role: "user",
-          content: promptForHook(hook, data),
+          content: promptForHook(hook, data, options),
         },
       ],
     }),
@@ -869,6 +959,7 @@ function cardMarkdown(entry) {
 | Tone | ${markdownEscape(hook.tone)} |
 | Year | ${markdownEscape(hook.year ?? "")} |
 | Score | ${markdownEscape(hook.score ?? "")} |
+| Raw score | ${markdownEscape(hook.rawScore ?? "")} |
 | Urgency | ${markdownEscape(hook.urgency ?? "")} |
 | Selection | ${markdownEscape(hook.selectionReason)} |
 | Grade | ${markdownEscape(report.grade)} |
@@ -948,7 +1039,7 @@ ${hook.eventIds.length ? bulletList(hook.eventIds.map(id => String(id))) : "- No
 `;
 }
 
-function summaryMarkdown({inputPath, outputDir, options, entries, data}) {
+function summaryMarkdown({inputPath, outputDir, options, entries, failures = [], data}) {
   const byKind = new Map();
   for (const entry of entries) {
     const list = byKind.get(entry.hook.kind) ?? [];
@@ -978,8 +1069,10 @@ Model: ${options.provider === "mock" ? "mock" : options.model}
 
 World year: ${data.year ?? "unknown"}
 
-Hooks evaluated: ${entries.length}
+Hook era year: ${options.eraYear ?? "end of history"}
 
+Hooks evaluated: ${entries.length}
+${failures.length ? `\nHooks failed: ${failures.length}\n\n## Failed Evaluations\n\n${failures.map(failure => `- [${markdownEscape(failure.hook.kind)}] ${markdownEscape(failure.hook.name)}: ${markdownEscape(failure.error)}`).join("\n")}\n` : ""}
 ## Hook Report Cards
 
 | Hook | Kind | Grade | Overall | Selection |
@@ -1012,24 +1105,11 @@ ${rows}
 `;
 }
 
-function writeOutputs({inputPath, outputDir, options, entries, data}) {
-  if (options.overwrite) removeExistingOutputDir(outputDir);
-  const resolvedOutputDir = assertWorkspaceOutputPath(outputDir);
-  const cardsDir = path.join(resolvedOutputDir, "cards");
-  fs.mkdirSync(cardsDir, {recursive: true});
-
-  const worldDetails = worldSimulationDetails(data);
-  for (const entry of entries) {
-    entry.worldDetails = worldDetails;
-    const filename = `hook-${String(entry.hook.reportIndex).padStart(3, "0")}-${slugify(entry.hook.kind)}-${slugify(entry.hook.name)}.md`;
-    entry.cardPath = path.join(cardsDir, filename);
-    fs.writeFileSync(entry.cardPath, cardMarkdown(entry), "utf8");
-  }
-
-  const summaryPath = path.join(resolvedOutputDir, "summary.md");
-  fs.writeFileSync(summaryPath, summaryMarkdown({inputPath, outputDir: resolvedOutputDir, options, entries, data}), "utf8");
-  fs.writeFileSync(path.join(resolvedOutputDir, "index.md"), indexMarkdown(entries, summaryPath), "utf8");
-  fs.writeFileSync(path.join(resolvedOutputDir, "manifest.json"), JSON.stringify({
+function writeSummaryOutputs({inputPath, outputDir, options, entries, failures, data}) {
+  const summaryPath = path.join(outputDir, "summary.md");
+  fs.writeFileSync(summaryPath, summaryMarkdown({inputPath, outputDir, options, entries, failures, data}), "utf8");
+  fs.writeFileSync(path.join(outputDir, "index.md"), indexMarkdown(entries, summaryPath), "utf8");
+  fs.writeFileSync(path.join(outputDir, "manifest.json"), JSON.stringify({
     generatedAt: new Date().toISOString(),
     input: inputPath,
     provider: options.provider,
@@ -1037,19 +1117,28 @@ function writeOutputs({inputPath, outputDir, options, entries, data}) {
     mode: options.mode,
     top: options.top,
     perKind: options.perKind,
+    eraYear: options.eraYear,
     hookCount: entries.length,
+    failureCount: failures.length,
     cards: entries.map(entry => ({
       hookId: entry.hook.id,
       name: entry.hook.name,
       kind: entry.hook.kind,
       grade: entry.report.grade,
       overall: entry.report.scores.overall,
-      file: path.relative(resolvedOutputDir, entry.cardPath).replace(/\\/g, "/"),
+      file: path.relative(outputDir, entry.cardPath).replace(/\\/g, "/"),
       writingPromptSummary: entry.report.writingPromptSummary,
+    })),
+    errors: failures.map(failure => ({
+      hookId: failure.hook.id,
+      name: failure.hook.name,
+      kind: failure.hook.kind,
+      selectionReason: failure.hook.selectionReason,
+      error: failure.error,
     })),
   }, null, 2), "utf8");
 
-  return {outputDir: resolvedOutputDir, summaryPath, cardsDir};
+  return {outputDir, summaryPath};
 }
 
 export async function runEvaluateStoryHooksCommand(argv = process.argv.slice(2)) {
@@ -1059,14 +1148,38 @@ export async function runEvaluateStoryHooksCommand(argv = process.argv.slice(2))
   const hooks = selectHooks(data, options);
   if (hooks.length === 0) throw new Error("No story hooks were selected for evaluation");
 
+  if (options.overwrite) removeExistingOutputDir(options.out);
+  const outputDir = assertWorkspaceOutputPath(options.out);
+  const cardsDir = path.join(outputDir, "cards");
+  fs.mkdirSync(cardsDir, {recursive: true});
+
+  const worldDetails = worldSimulationDetails(data, options.eraYear);
   const entries = [];
+  const failures = [];
   for (const hook of hooks) {
     console.log(`Evaluating ${hook.reportIndex + 1}/${hooks.length}: [${hook.kind}] ${hook.name}`);
-    const report = await evaluateHook(hook, data, options);
-    entries.push({hook, report});
+    let report;
+    try {
+      report = await evaluateHook(hook, data, options);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Failed to evaluate "${hook.name}": ${message}`);
+      failures.push({hook, error: message});
+      continue;
+    }
+    // Write each card as soon as it exists so one failed API call cannot
+    // discard the completed evaluations of a long paid run.
+    const filename = `hook-${String(hook.reportIndex).padStart(3, "0")}-${slugify(hook.kind)}-${slugify(hook.name)}.md`;
+    const entry = {hook, report, worldDetails, cardPath: path.join(cardsDir, filename)};
+    fs.writeFileSync(entry.cardPath, cardMarkdown(entry), "utf8");
+    entries.push(entry);
   }
 
-  const output = writeOutputs({inputPath, outputDir: options.out, options, entries, data});
+  const output = writeSummaryOutputs({inputPath, outputDir, options, entries, failures, data});
   console.log(`Wrote ${entries.length} story hook report card${entries.length === 1 ? "" : "s"} to ${output.outputDir}`);
+  if (failures.length > 0) {
+    console.error(`${failures.length} hook${failures.length === 1 ? "" : "s"} failed; details recorded in manifest.json`);
+    process.exitCode = 1;
+  }
   console.log(`Summary: ${output.summaryPath}`);
 }

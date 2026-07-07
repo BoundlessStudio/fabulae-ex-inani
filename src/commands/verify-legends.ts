@@ -189,6 +189,7 @@ const countFields = new Map([
   ["householdCount", "households"],
   ["lineageCount", "lineages"],
   ["storyHookCount", "storyHooks"],
+  ["storyHookEraCount", "storyHookEras"],
   ["eventCount", "events"],
 ]);
 

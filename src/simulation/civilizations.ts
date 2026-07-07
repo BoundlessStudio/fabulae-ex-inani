@@ -3,6 +3,94 @@ import path from "node:path";
 import {MessageChannel, receiveMessageOnPort, Worker, type MessagePort} from "node:worker_threads";
 import type {GeneratedWorldMap} from "../mapgen/node-mapgen.ts";
 import {clamp} from "../mapgen/geometry.ts";
+import {
+    AGENT_GIVEN_NAMES,
+    AGENT_SPECIALTIES,
+    AGENT_TRAITS,
+    AGENT_VALUES,
+    NAME_PREFIXES,
+    NAME_SUFFIXES,
+    buildInitialAgentDraft,
+    buildSettlementAgentSeedPlan,
+    computeAnnualAgentProfessionDraft,
+    computeBirthCountDraft,
+    computeBirthParentDraft,
+    computeHouseholdPairDraft,
+    computeMigrationDraft,
+    computeSettlementEconomyDraft,
+    hashFloat,
+    initialAgentNeeds,
+    initialAgentResilience,
+    initialAgentSpecialties,
+    initialAgentTraits,
+    initialAgentValues,
+    makeAgentName,
+    mentalStateFor,
+    needKindForProfession,
+    needKindForValue,
+    needName,
+    pointDistance,
+    pointLineDistance,
+    roadPathLength,
+    RoadQueue,
+    settlementSiteCandidatesFromInput,
+    simplifyRoadPoints,
+    specialtiesForProfession,
+    chooseAdultProfession,
+    uniqueChoices,
+    type AgentMentalState,
+    type AgentNeedKind,
+    type AgentNeedState,
+    type AgentProfession,
+    type AgentSeedAgePlan,
+    type AgentSpecialty,
+    type AgentTrait,
+    type AgentValue,
+    type AnnualAgentProfessionDraft,
+    type AnnualAgentProfessionInput,
+    type BirthCountDraft,
+    type BirthCountWorkerSettlement,
+    type BirthParentDraft,
+    type BirthParentWorkerAgent,
+    type BirthParentWorkerSettlement,
+    type HouseholdPairDraft,
+    type HouseholdPairWorkerAgent,
+    type HouseholdPairWorkerInput,
+    type HouseholdPairWorkerSettlement,
+    type InitialAgentDraft,
+    type InternalRoadWorkerDraft,
+    type InternalRoadWorkerInput,
+    type InternalRoadWorkerSettlement,
+    type MigrationDraft,
+    type MigrationWorkerAgent,
+    type MigrationWorkerOrigin,
+    type MigrationWorkerSettlement,
+    type ProfessionCounts,
+    type RoadPoint,
+    type SettlementAgentSeedPlan,
+    type SettlementAgentSeedPlanRequest,
+    type SettlementEconomyDraft,
+    type SettlementEconomyWorkerSettlement,
+    type SettlementSiteSelectionCommonInput,
+    type SettlementSiteWorkerSettlement,
+    type TerrainAnalysisWorkerInput,
+    type TerrainAnalysisWorkerRange,
+    type TerrainAnalysisWorkerResult,
+    type TriangleTerritoryWorkerInput,
+    type TriangleTerritoryWorkerRange,
+    type TriangleTerritoryWorkerResult,
+} from "./drafts.ts";
+
+export type {
+    AgentMentalState,
+    AgentNeedKind,
+    AgentNeedState,
+    AgentProfession,
+    AgentSpecialty,
+    AgentTrait,
+    AgentValue,
+    RoadPoint,
+} from "./drafts.ts";
 
 export type CivilizationOptions = {
     count: number;
@@ -156,11 +244,6 @@ export type SettlementControl = {
     eventIds: number[];
 };
 
-export type RoadPoint = {
-    x: number;
-    y: number;
-};
-
 export type Road = {
     id: number;
     civilizationId: number;
@@ -214,34 +297,6 @@ export type Journey = {
     roadIds: number[];
     distance: number;
     eventIds: number[];
-};
-
-export type AgentProfession = "child" | "farmer" | "miner" | "artisan" | "merchant" | "guard" | "healer" | "scholar" | "elder";
-
-export type AgentTrait = "brave" | "cautious" | "ambitious" | "patient" | "restless" | "generous" | "proud" | "curious" | "stern" | "gregarious" | "melancholy" | "dutiful";
-
-export type AgentValue = "family" | "craft" | "wealth" | "faith" | "law" | "knowledge" | "honor" | "comfort" | "power" | "community";
-
-export type AgentSpecialty = "farming" | "mining" | "stonework" | "trade" | "warfare" | "medicine" | "lore" | "law" | "ritual" | "leadership" | "crafting";
-
-export type AgentMentalState = "inspired" | "steady" | "strained" | "troubled" | "haunted";
-
-export type AgentNeedKind = "social" | "rest" | "craft" | "training" | "learning" | "faith" | "family" | "justice" | "wealth" | "comfort" | "legacy" | "health" | "play";
-
-export type AgentNeedState = {
-    kind: AgentNeedKind;
-    name: string;
-    urgency: number;
-    satisfaction: number;
-    lastSatisfiedYear?: number;
-    lastActivityId?: number;
-    lastCeremonyId?: number;
-    lastThoughtId?: number;
-    sourceMemoryId?: number;
-    sourcePersonalityShiftId?: number;
-    sourcePreferenceId?: number;
-    sourceTraditionId?: number;
-    description: string;
 };
 
 export type NeedEpisodeStatus = "active" | "resolved";
@@ -1799,7 +1854,11 @@ export type StoryHook = {
     kind: StoryHookKind;
     tone: StoryHookTone;
     year: number;
+    // score is the percentile rank of the hook within its kind, in (0, 1]; it is
+    // comparable across kinds and drives selection and downstream sorting.
+    // rawScore keeps the generator's own unbounded scale for transparency.
     score: number;
+    rawScore: number;
     urgency: number;
     civilizationId?: number;
     settlementId?: number;
@@ -1821,6 +1880,11 @@ export type StoryHook = {
     complication: string;
     suggestedFocus: string;
     eventIds: number[];
+};
+
+export type StoryHookEra = {
+    year: number;
+    storyHooks: StoryHook[];
 };
 
 export type SkillRecord = {
@@ -2951,8 +3015,53 @@ export type LegendEvent = {
     entityRefs: LegendEntityRef[];
 };
 
+export type LegendsStoryHookExport = StoryHook & {
+    subjectRefs: LegendEntityRef[];
+    description: string;
+};
+
+// A lazily mapped view of one export collection. Consumers pull records one at
+// a time so a full Legends archive never has to be resident in memory; the
+// spilled event text in particular is only read back chunk-by-chunk while the
+// events collection is being written.
+export type LegendsCollection<T> = {
+    readonly legendsCollection: true;
+    readonly length: number;
+    get(index: number): T;
+};
+
+export function lazyLegendsCollection<S, T>(source: readonly S[], map: (item: S, index: number) => T): LegendsCollection<T> {
+    return {legendsCollection: true, length: source.length, get: (index: number) => map(source[index], index)};
+}
+
+export function isLegendsCollection(value: unknown): value is LegendsCollection<unknown> {
+    return typeof value === "object"
+        && value !== null
+        && (value as {legendsCollection?: unknown}).legendsCollection === true
+        && typeof (value as {get?: unknown}).get === "function";
+}
+
+export function materializeLegendsCollection<T>(collection: LegendsCollection<T>): T[] {
+    const items: T[] = new Array(collection.length);
+    for (let index = 0; index < collection.length; index++) items[index] = collection.get(index);
+    return items;
+}
+
+export type LegendsExportSource = {
+    [K in keyof LegendsExport]: LegendsExport[K] extends Array<infer T> ? LegendsCollection<T> : LegendsExport[K];
+};
+
+export type LegendsProvenance = {
+    terrainSeed: number | null;
+    meshSeed: number | null;
+    civilizationSeed: number;
+    simulatedYear: number;
+    options: Required<CivilizationOptions>;
+};
+
 export type LegendsExport = {
     schema: "world-map-legends-v1";
+    provenance: LegendsProvenance;
     year: number;
     civilizationCount: number;
     settlementCount: number;
@@ -3044,9 +3153,11 @@ export type LegendsExport = {
     lineageCount: number;
     eventCount: number;
     storyHookCount: number;
-    storyHooks: Array<StoryHook & {
-        subjectRefs: LegendEntityRef[];
-        description: string;
+    storyHookEraCount: number;
+    storyHooks: LegendsStoryHookExport[];
+    storyHookEras: Array<{
+        year: number;
+        storyHooks: LegendsStoryHookExport[];
     }>;
     civilizations: Array<{
         id: number;
@@ -4993,12 +5104,14 @@ export type CivilizationSimulation = {
     careers: CareerRecord[];
     roads: Road[];
     storyHooks: StoryHook[];
+    storyHookEras: StoryHookEra[];
     history: CivilizationYearSnapshot[];
     events: YearEvent[];
     legendEvents: LegendEvent[];
     aliveAgentIds: number[];
     legendRefCache: Map<string, LegendEntityRef>;
     lineageIndex: Map<string, number>;
+    agentNameCounts: Map<string, number>;
     compactedLegendEventRefCursor: number;
     spilledLegendEventTextCursor: number;
     legendEventTextSpillStore?: LegendEventTextSpillStore;
@@ -6715,115 +6828,9 @@ export function defaultCivilizationWorkerCount(civilizationCount: number): numbe
     return count;
 }
 
-type AgentSeedAgePlan = {
-    age: number;
-    index: number;
-};
-
-type InitialAgentDraft = {
-    id: number;
-    name: string;
-    profession: AgentProfession;
-    health: number;
-    morale: number;
-    stress: number;
-    resilience: number;
-    mentalState: AgentMentalState;
-    needStates: AgentNeedState[];
-    wealth: number;
-    skill: number;
-    traits: AgentTrait[];
-    values: AgentValue[];
-    specialties: AgentSpecialty[];
-    reputation: number;
-};
-
-type ProfessionCounts = Record<AgentProfession, number>;
-
-type AnnualAgentProfessionInput = {
-    agentId: number;
-    age: number;
-    profession: AgentProfession;
-    settlementId: number;
-    settlementType: "capital" | "town";
-    suitability: number;
-};
-
-type AnnualAgentProfessionDraft = {
-    agentId: number;
-    age: number;
-    profession: AgentProfession;
-};
-
-type SettlementAgentSeedPlanRequest = {
-    settlementId: number;
-    targetPopulation: number;
-    firstAgentId: number;
-    civilizationId: number;
-    type: "capital" | "town";
-    suitability: number;
-    prosperity: number;
-    unrest: number;
-};
-
-type SettlementAgentSeedPlan = {
-    settlementId: number;
-    adultPlans: AgentSeedAgePlan[];
-    childPlans: AgentSeedAgePlan[];
-    adultDrafts: InitialAgentDraft[];
-    childDrafts: InitialAgentDraft[];
-};
-
-type SettlementSiteWorkerSettlement = {
-    civilizationId: number;
-    x: number;
-    y: number;
-};
-
-type SettlementSiteSelectionCommonInput = {
-    year: number;
-    seed: number;
-    minSettlementDistance: number;
-    expansionSearchRadius: number;
-    settlementClaimRadius: number;
-    topCandidateLimit: number;
-    candidateTriangles: Int32Array;
-    candidateX: Float32Array;
-    candidateY: Float32Array;
-    suitability: Float32Array;
-    siteBonus: Float32Array;
-    territory: Int16Array;
-    settlements: SettlementSiteWorkerSettlement[];
-};
-
 type SettlementSiteSelectionWorkerResult = {
     civilizationId: number;
     candidates: number[];
-};
-
-type TerrainAnalysisWorkerInput = {
-    numTriangles: number;
-    numSolidTriangles: number;
-    numSides: number;
-    minFlow: number;
-    triangleNeighbors: Int32Array;
-    sideOpposites: Int32Array;
-    isBoundaryTriangle: Int8Array;
-    elevation: Float32Array;
-    moisture: Float32Array;
-    flowSides: Float32Array;
-};
-
-type TerrainAnalysisWorkerRange = {
-    start: number;
-    end: number;
-};
-
-type TerrainAnalysisWorkerResult = {
-    start: number;
-    suitability: Float32Array;
-    siteBonus: Float32Array;
-    candidateTriangles: number[];
 };
 
 type CivilizationTerrainAnalysis = {
@@ -6832,184 +6839,9 @@ type CivilizationTerrainAnalysis = {
     settlementSiteBonus: Float32Array;
 };
 
-type InternalRoadWorkerSettlement = {
-    id: number;
-    civilizationId: number;
-    type: "capital" | "town";
-    triangle: number;
-    x: number;
-    y: number;
-    foundedYear: number;
-    controlledSinceYear: number;
-    population: number;
-};
-
-type InternalRoadWorkerInput = {
-    year: number;
-    seed: number;
-    roadMinSettlementAge: number;
-    roadMaturationYears: number;
-    numTriangles: number;
-    numSolidTriangles: number;
-    triangleNeighbors: Int32Array;
-    triangleX: Float32Array;
-    triangleY: Float32Array;
-    isBoundaryTriangle: Int8Array;
-    elevation: Float32Array;
-    suitability: Float32Array;
-    territory: Int16Array;
-    settlements: InternalRoadWorkerSettlement[];
-};
-
-type InternalRoadWorkerDraft = {
-    civilizationId: number;
-    fromSettlementId: number;
-    toSettlementId: number;
-    openedYear: number;
-    strength: number;
-    length: number;
-    cost: number;
-    triangles: number[];
-    points: RoadPoint[];
-};
-
 type InternalRoadWorkerResult = {
     civilizationId: number;
     roads: InternalRoadWorkerDraft[];
-};
-
-type TriangleTerritoryWorkerInput = {
-    numRegions: number;
-    numTriangles: number;
-    numSolidTriangles: number;
-    triangleRegions: Int32Array;
-    isBoundaryTriangle: Int8Array;
-    elevation: Float32Array;
-    territory: Int16Array;
-};
-
-type TriangleTerritoryWorkerRange = {
-    start: number;
-    end: number;
-};
-
-type TriangleTerritoryWorkerResult = {
-    start: number;
-    territory: Int16Array;
-};
-
-type SettlementEconomyWorkerSettlement = {
-    id: number;
-    civilizationId: number;
-    food: number;
-    materials: number;
-    prosperity: number;
-    unrest: number;
-    agentCount: number;
-    foodPotential: number;
-    materialPotential: number;
-    professions: ProfessionCounts;
-};
-
-type SettlementEconomyDraft = {
-    settlementId: number;
-    food: number;
-    materials: number;
-    prosperity: number;
-    unrest: number;
-    shortage: boolean;
-    materialShortage: boolean;
-    eventType?: "shortage" | "prosperity";
-    eventSeverity?: number;
-};
-
-type MigrationWorkerSettlement = {
-    id: number;
-    civilizationId: number;
-    prosperity: number;
-    food: number;
-    population: number;
-    unrest: number;
-};
-
-type MigrationWorkerAgent = {
-    id: number;
-    age: number;
-    morale: number;
-};
-
-type MigrationWorkerOrigin = {
-    settlement: MigrationWorkerSettlement;
-    agents: MigrationWorkerAgent[];
-};
-
-type MigrationDraft = {
-    settlementId: number;
-    destinationSettlementId?: number;
-    agentIds: number[];
-};
-
-type BirthCountWorkerSettlement = {
-    id: number;
-    type: "capital" | "town";
-    population: number;
-    suitability: number;
-    prosperity: number;
-    unrest: number;
-    adultCount: number;
-};
-
-type BirthCountDraft = {
-    settlementId: number;
-    count: number;
-};
-
-type BirthParentWorkerAgent = {
-    id: number;
-    civilizationId: number;
-    settlementId: number;
-    age: number;
-    spouseId?: number;
-    alive: boolean;
-    childCount: number;
-};
-
-type BirthParentWorkerSettlement = {
-    id: number;
-    civilizationId: number;
-    count: number;
-    agents: BirthParentWorkerAgent[];
-};
-
-type BirthParentDraft = {
-    settlementId: number;
-    parentIds: number[][];
-};
-
-type HouseholdPairWorkerAgent = {
-    id: number;
-    civilizationId: number;
-    settlementId: number;
-    age: number;
-    spouseId?: number;
-    alive: boolean;
-};
-
-type HouseholdPairWorkerSettlement = {
-    id: number;
-    civilizationId: number;
-    prosperity: number;
-    unrest: number;
-};
-
-type HouseholdPairWorkerInput = {
-    settlement: HouseholdPairWorkerSettlement;
-    agents: HouseholdPairWorkerAgent[];
-};
-
-type HouseholdPairDraft = {
-    settlementId: number;
-    pairs: Array<[number, number]>;
 };
 
 type CivilizationWorkerResponse = {
@@ -7154,11 +6986,6 @@ type TerritoryQueueItem = {
     maxCost: number;
 };
 
-type RoadQueueItem = {
-    triangle: number;
-    cost: number;
-};
-
 class TerritoryQueue {
     private readonly items: TerritoryQueueItem[] = [];
 
@@ -7207,54 +7034,6 @@ class TerritoryQueue {
     }
 }
 
-class RoadQueue {
-    private readonly items: RoadQueueItem[] = [];
-
-    get length(): number {
-        return this.items.length;
-    }
-
-    push(item: RoadQueueItem) {
-        this.items.push(item);
-        this.bubbleUp(this.items.length - 1);
-    }
-
-    pop(): RoadQueueItem | undefined {
-        if (this.items.length === 0) return undefined;
-        const first = this.items[0];
-        const last = this.items.pop()!;
-        if (this.items.length > 0) {
-            this.items[0] = last;
-            this.sinkDown(0);
-        }
-        return first;
-    }
-
-    private bubbleUp(index: number) {
-        while (index > 0) {
-            const parent = Math.floor((index - 1) / 2);
-            if (this.items[parent].cost <= this.items[index].cost) break;
-            [this.items[parent], this.items[index]] = [this.items[index], this.items[parent]];
-            index = parent;
-        }
-    }
-
-    private sinkDown(index: number) {
-        while (true) {
-            const left = index * 2 + 1;
-            const right = left + 1;
-            let smallest = index;
-
-            if (left < this.items.length && this.items[left].cost < this.items[smallest].cost) smallest = left;
-            if (right < this.items.length && this.items[right].cost < this.items[smallest].cost) smallest = right;
-            if (smallest === index) break;
-
-            [this.items[index], this.items[smallest]] = [this.items[smallest], this.items[index]];
-            index = smallest;
-        }
-    }
-}
-
 const CIVILIZATION_COLORS = [
     "#c44e52",
     "#4c72b0",
@@ -7268,8 +7047,6 @@ const CIVILIZATION_COLORS = [
     "#8c8c8c",
 ];
 
-const NAME_PREFIXES = ["Ar", "Bel", "Cor", "Dor", "El", "Fen", "Gal", "Har", "Il", "Jun", "Kel", "Lor", "Mar", "Nor", "Or", "Pel", "Qua", "Riv", "Sar", "Tor", "Ul", "Val"];
-const NAME_SUFFIXES = ["adia", "ara", "drim", "dun", "eria", "helm", "ia", "mere", "ora", "ovar", "port", "reach", "stead", "ton", "vale", "watch"];
 const NATURAL_FEATURE_NOUNS: Record<NaturalFeatureKind, string[]> = {
     mountain: ["Peak", "Spire", "Crown", "Horn", "Highstone"],
     river: ["River", "Run", "Current", "Waterway", "Bluecourse"],
@@ -7278,11 +7055,7 @@ const NATURAL_FEATURE_NOUNS: Record<NaturalFeatureKind, string[]> = {
     cave: ["Cave", "Hollow", "Grotto", "Deep", "Rootmouth"],
     coast: ["Coast", "Shore", "Reach", "Strand", "Sea Edge"],
 };
-const AGENT_GIVEN_NAMES = ["Adan", "Bera", "Corin", "Dala", "Eris", "Fenn", "Garin", "Hara", "Ilan", "Jora", "Kell", "Lysa", "Mara", "Nerin", "Orin", "Pela", "Quin", "Riva", "Saren", "Tovin", "Una", "Vara"];
 const PROFESSIONS: AgentProfession[] = ["child", "farmer", "miner", "artisan", "merchant", "guard", "healer", "scholar", "elder"];
-const AGENT_TRAITS: AgentTrait[] = ["brave", "cautious", "ambitious", "patient", "restless", "generous", "proud", "curious", "stern", "gregarious", "melancholy", "dutiful"];
-const AGENT_VALUES: AgentValue[] = ["family", "craft", "wealth", "faith", "law", "knowledge", "honor", "comfort", "power", "community"];
-const AGENT_SPECIALTIES: AgentSpecialty[] = ["farming", "mining", "stonework", "trade", "warfare", "medicine", "lore", "law", "ritual", "leadership", "crafting"];
 const ORGANIZATION_KINDS: OrganizationKind[] = ["guild", "temple", "militia", "college", "trade-house", "clan"];
 const ORGANIZATION_NOUNS: Record<OrganizationKind, string[]> = {
     guild: ["Guild", "Circle", "Society", "Hall"],
@@ -7617,155 +7390,6 @@ function makeRandom(seed: number): () => number {
         t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
         return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
     };
-}
-
-function hashFloat(seed: number, a: number, b: number, c: number): number {
-    let h = seed >>> 0;
-    h = Math.imul(h ^ a, 2246822519);
-    h = Math.imul(h ^ b, 3266489917);
-    h = Math.imul(h ^ c, 668265263);
-    h ^= h >>> 16;
-    return (h >>> 0) / 4294967296;
-}
-
-function buildInitialAgentDraft(
-    seed: number,
-    settlement: Pick<Settlement, "id" | "type" | "suitability" | "prosperity" | "unrest">,
-    id: number,
-    age: number,
-    profession?: AgentProfession,
-): InitialAgentDraft {
-    const assignedProfession = profession
-        ?? (age < 15 ? "child" : age >= 65 ? "elder" : chooseAdultProfession(seed, id, settlement, settlement.suitability));
-    const traits = initialAgentTraits(seed, id);
-    const values = initialAgentValues(seed, id, assignedProfession);
-    const morale = clamp(0.58 + settlement.suitability * 0.25 + hashFloat(seed, id, 307, 2) * 0.17, 0, 1);
-    const stress = clamp(
-        0.12
-        + (traits.includes("melancholy") ? 0.08 : 0)
-        + (traits.includes("restless") ? 0.04 : 0)
-        - (traits.includes("patient") ? 0.03 : 0)
-        - settlement.prosperity * 0.04
-        + settlement.unrest * 0.08,
-        0,
-        1,
-    );
-    const resilience = initialAgentResilience(traits, values, seed, id);
-    return {
-        id,
-        name: makeAgentName(seed, id),
-        profession: assignedProfession,
-        health: clamp(0.72 + hashFloat(seed, id, 307, 1) * 0.28, 0, 1),
-        morale,
-        stress,
-        resilience,
-        mentalState: mentalStateFor(stress, morale),
-        needStates: initialAgentNeeds(seed, id, assignedProfession, traits, values),
-        wealth: Math.round((6 + hashFloat(seed, id, 307, 3) * 16) * 100) / 100,
-        skill: clamp(0.2 + age / 90 + hashFloat(seed, id, 307, 4) * 0.25, 0, 1),
-        traits,
-        values,
-        specialties: initialAgentSpecialties(seed, id, assignedProfession),
-        reputation: Math.round(clamp(0.03 + (age >= 18 ? age / 120 : 0) + hashFloat(seed, id, 307, 5) * 0.08, 0, 1) * 1000) / 1000,
-    };
-}
-
-function buildSettlementAgentSeedPlan(seed: number, request: SettlementAgentSeedPlanRequest): SettlementAgentSeedPlan {
-    const adultPlans: AgentSeedAgePlan[] = [];
-    const childPlans: AgentSeedAgePlan[] = [];
-    for (let i = 0; i < request.targetPopulation; i++) {
-        const roll = hashFloat(seed, request.settlementId, i, 419);
-        let age: number;
-        if (roll < 0.24) age = Math.floor(hashFloat(seed, request.settlementId, i, 421) * 15);
-        else if (roll < 0.82) age = 15 + Math.floor(hashFloat(seed, request.settlementId, i, 422) * 35);
-        else age = 50 + Math.floor(hashFloat(seed, request.settlementId, i, 423) * 35);
-        if (age < 15) childPlans.push({age, index: i});
-        else adultPlans.push({age, index: i});
-    }
-
-    adultPlans.sort((a, b) => b.age - a.age || a.index - b.index);
-    childPlans.sort((a, b) => b.age - a.age || a.index - b.index);
-    const settlement = {
-        id: request.settlementId,
-        type: request.type,
-        suitability: request.suitability,
-        prosperity: request.prosperity,
-        unrest: request.unrest,
-    };
-    const adultDrafts = adultPlans.map((plan, index) => buildInitialAgentDraft(
-        seed,
-        settlement,
-        request.firstAgentId + index,
-        plan.age,
-    ));
-    const firstChildAgentId = request.firstAgentId + adultPlans.length;
-    const childDrafts = childPlans.map((plan, index) => buildInitialAgentDraft(
-        seed,
-        settlement,
-        firstChildAgentId + index,
-        plan.age,
-        "child",
-    ));
-    return {settlementId: request.settlementId, adultPlans, childPlans, adultDrafts, childDrafts};
-}
-
-function insertTopSettlementCandidate(top: Array<{triangle: number; score: number}>, candidate: {triangle: number; score: number}, limit: number) {
-    if (limit <= 0) return;
-    if (top.length < limit) {
-        top.push(candidate);
-    } else if (candidate.score <= top[top.length - 1].score) {
-        return;
-    } else {
-        top[top.length - 1] = candidate;
-    }
-    top.sort((a, b) => b.score - a.score || a.triangle - b.triangle);
-}
-
-function settlementSiteCandidatesFromInput(input: SettlementSiteSelectionCommonInput, civilizationId: number): number[] {
-    const settlements = input.settlements.filter(settlement => settlement.civilizationId === civilizationId);
-    if (settlements.length === 0) return [];
-
-    const minDistance2 = input.minSettlementDistance * input.minSettlementDistance;
-    const maxDistance2 = input.expansionSearchRadius * input.expansionSearchRadius;
-    const closeEnemyDistance2 = input.minSettlementDistance * input.minSettlementDistance * 2.25;
-    const claimDistance2 = input.settlementClaimRadius * input.settlementClaimRadius;
-    const idealDistance = input.settlementClaimRadius + input.minSettlementDistance * 0.85;
-    const top: Array<{triangle: number; score: number}> = [];
-
-    for (let i = 0; i < input.candidateTriangles.length; i++) {
-        const triangle = input.candidateTriangles[i];
-        const owner = input.territory[triangle] ?? -1;
-        if (owner >= 0 && owner !== civilizationId) continue;
-
-        const x = input.candidateX[i];
-        const y = input.candidateY[i];
-        let nearestSameDistance2 = Number.POSITIVE_INFINITY;
-        for (let settlement of settlements) {
-            const dx = settlement.x - x;
-            const dy = settlement.y - y;
-            nearestSameDistance2 = Math.min(nearestSameDistance2, dx*dx + dy*dy);
-        }
-        if (nearestSameDistance2 < minDistance2 || nearestSameDistance2 > maxDistance2) continue;
-
-        let enemyPressure = 0;
-        for (let settlement of input.settlements) {
-            if (settlement.civilizationId === civilizationId) continue;
-            const dx = settlement.x - x;
-            const dy = settlement.y - y;
-            const distance2 = dx*dx + dy*dy;
-            if (distance2 < closeEnemyDistance2) enemyPressure += 0.35;
-            else if (distance2 < claimDistance2) enemyPressure += 0.12;
-        }
-
-        const distance = Math.sqrt(nearestSameDistance2);
-        const distanceScore = 1 - clamp(Math.abs(distance - idealDistance) / Math.max(1, idealDistance), 0, 1);
-        const frontierBonus = owner < 0 ? 0.18 : 0.04;
-        const jitter = hashFloat(input.seed, civilizationId, input.year, triangle) * 0.04;
-        const score = input.suitability[triangle] * 1.25 + input.siteBonus[triangle] + distanceScore * 0.26 + frontierBonus - enemyPressure + jitter;
-        insertTopSettlementCandidate(top, {triangle, score}, input.topCandidateLimit);
-    }
-
-    return top.map(candidate => candidate.triangle);
 }
 
 function civilizationWorkerScriptPath(): string {
@@ -8481,120 +8105,35 @@ function seedNaturalFeatures(world: GeneratedWorldMap, simulation: CivilizationS
     }
 }
 
+const AGENT_NAME_ORDINAL_PATTERN = /\s+the\s+\d+(?:st|nd|rd|th)$/;
+
+function agentBaseName(name: string): string {
+    return name.replace(AGENT_NAME_ORDINAL_PATTERN, "");
+}
+
 function agentFamilyName(name: string): string {
-    const parts = name.trim().split(/\s+/);
+    const parts = agentBaseName(name).trim().split(/\s+/);
     return parts.length <= 1 ? name : parts.slice(1).join(" ");
 }
 
-function makeAgentName(seed: number, index: number, familyName?: string): string {
-    const given = AGENT_GIVEN_NAMES[Math.floor(hashFloat(seed, index, 211, 1) * AGENT_GIVEN_NAMES.length)];
-    const family = familyName ?? NAME_PREFIXES[Math.floor(hashFloat(seed, index, 211, 2) * NAME_PREFIXES.length)]
-        + NAME_SUFFIXES[Math.floor(hashFloat(seed, index, 211, 3) * NAME_SUFFIXES.length)];
-    return `${given} ${family}`;
+function ordinalLabel(value: number): string {
+    const mod100 = value % 100;
+    if (mod100 >= 11 && mod100 <= 13) return `${value}th`;
+    const mod10 = value % 10;
+    if (mod10 === 1) return `${value}st`;
+    if (mod10 === 2) return `${value}nd`;
+    if (mod10 === 3) return `${value}rd`;
+    return `${value}th`;
 }
 
-function uniqueChoices<T>(choices: T[], seed: number, id: number, salt: number, count: number): T[] {
-    const ranked = choices
-        .map((choice, index) => ({choice, score: hashFloat(seed, id, salt, index)}))
-        .sort((a, b) => a.score - b.score);
-    return ranked.slice(0, Math.min(count, ranked.length)).map(entry => entry.choice);
-}
-
-function specialtiesForProfession(profession: AgentProfession): AgentSpecialty[] {
-    if (profession === "farmer") return ["farming"];
-    if (profession === "miner") return ["mining", "stonework"];
-    if (profession === "artisan") return ["crafting", "stonework"];
-    if (profession === "merchant") return ["trade"];
-    if (profession === "guard") return ["warfare"];
-    if (profession === "healer") return ["medicine", "ritual"];
-    if (profession === "scholar") return ["lore", "law"];
-    if (profession === "elder") return ["leadership"];
-    return [];
-}
-
-function initialAgentTraits(seed: number, id: number): AgentTrait[] {
-    return uniqueChoices(AGENT_TRAITS, seed, id, 227, 2 + Math.floor(hashFloat(seed, id, 227, 99) * 2));
-}
-
-function initialAgentValues(seed: number, id: number, profession: AgentProfession): AgentValue[] {
-    const values = uniqueChoices(AGENT_VALUES, seed, id, 229, 2);
-    if ((profession === "healer" || profession === "scholar") && !values.includes("knowledge")) values[values.length - 1] = "knowledge";
-    if (profession === "merchant" && !values.includes("wealth")) values[values.length - 1] = "wealth";
-    if (profession === "guard" && !values.includes("honor")) values[values.length - 1] = "honor";
-    if (profession === "child" && !values.includes("family")) values[values.length - 1] = "family";
-    return values;
-}
-
-function initialAgentSpecialties(seed: number, id: number, profession: AgentProfession): AgentSpecialty[] {
-    const professionSpecialties = specialtiesForProfession(profession);
-    const fallback = uniqueChoices(AGENT_SPECIALTIES, seed, id, 233, 1);
-    const combined = [...professionSpecialties, ...fallback];
-    return combined.filter((specialty, index) => combined.indexOf(specialty) === index).slice(0, 3);
-}
-
-function needName(kind: AgentNeedKind): string {
-    if (kind === "social") return "companionship";
-    if (kind === "rest") return "rest";
-    if (kind === "craft") return "craft";
-    if (kind === "training") return "training";
-    if (kind === "learning") return "learning";
-    if (kind === "faith") return "faith";
-    if (kind === "family") return "family";
-    if (kind === "justice") return "justice";
-    if (kind === "wealth") return "wealth";
-    if (kind === "comfort") return "comfort";
-    if (kind === "legacy") return "legacy";
-    if (kind === "health") return "health";
-    return "play";
-}
-
-function needKindForValue(value: AgentValue): AgentNeedKind {
-    if (value === "family") return "family";
-    if (value === "craft") return "craft";
-    if (value === "wealth") return "wealth";
-    if (value === "faith") return "faith";
-    if (value === "law") return "justice";
-    if (value === "knowledge") return "learning";
-    if (value === "honor") return "legacy";
-    if (value === "comfort") return "comfort";
-    if (value === "power") return "legacy";
-    return "social";
-}
-
-function needKindForProfession(profession: AgentProfession): AgentNeedKind {
-    if (profession === "artisan" || profession === "miner" || profession === "farmer") return "craft";
-    if (profession === "merchant") return "wealth";
-    if (profession === "guard") return "training";
-    if (profession === "healer") return "health";
-    if (profession === "scholar") return "learning";
-    if (profession === "elder") return "legacy";
-    return "play";
-}
-
-function initialAgentNeeds(seed: number, id: number, profession: AgentProfession, traits: AgentTrait[], values: AgentValue[]): AgentNeedState[] {
-    const kinds: AgentNeedKind[] = profession === "child"
-        ? ["play", "family", "learning"]
-        : [
-            needKindForProfession(profession),
-            ...values.map(needKindForValue),
-            ...(traits.includes("gregarious") ? ["social" as AgentNeedKind] : []),
-            ...(traits.includes("restless") ? ["training" as AgentNeedKind] : []),
-            ...(traits.includes("melancholy") ? ["comfort" as AgentNeedKind] : []),
-            ...(traits.includes("dutiful") ? ["justice" as AgentNeedKind] : []),
-            "rest",
-        ];
-    const uniqueKinds = kinds.filter((kind, index) => kinds.indexOf(kind) === index).slice(0, 4);
-    return uniqueKinds.map((kind, index) => {
-        const urgency = Math.round((0.18 + hashFloat(seed, id, 361 + index, 1) * 0.34) * 1000) / 1000;
-        const satisfaction = Math.round((0.46 + hashFloat(seed, id, 361 + index, 2) * 0.32) * 1000) / 1000;
-        return {
-            kind,
-            name: needName(kind),
-            urgency,
-            satisfaction,
-            description: `${needName(kind)} matters to this person.`,
-        };
-    });
+// Name pools are small relative to large worlds, so exact full-name repeats are
+// expected. Each repeat deterministically receives an ordinal postfix ("the 2nd",
+// "the 3rd", ...) in agent-creation order, which is identical across worker counts
+// because agents are only ever created serially on the main thread.
+function uniqueAgentName(simulation: CivilizationSimulation, baseName: string): string {
+    const count = (simulation.agentNameCounts.get(baseName) ?? 0) + 1;
+    simulation.agentNameCounts.set(baseName, count);
+    return count === 1 ? baseName : `${baseName} the ${ordinalLabel(count)}`;
 }
 
 function awakenNeedFromPersonalityShift(agent: Agent, value: AgentValue, shift: PersonalityShift, memory: Memory) {
@@ -8620,30 +8159,6 @@ function awakenNeedFromPersonalityShift(agent: Agent, value: AgentValue, shift: 
         sourcePersonalityShiftId: shift.id,
         description: `${needName(kind)} began to matter to ${agent.name} after ${shift.name}.`,
     });
-}
-
-function initialAgentResilience(traits: AgentTrait[], values: AgentValue[], seed: number, id: number): number {
-    let resilience = 0.42 + hashFloat(seed, id, 239, 1) * 0.28;
-    if (traits.includes("brave")) resilience += 0.08;
-    if (traits.includes("patient")) resilience += 0.07;
-    if (traits.includes("dutiful")) resilience += 0.05;
-    if (traits.includes("gregarious")) resilience += 0.04;
-    if (traits.includes("cautious")) resilience += 0.03;
-    if (traits.includes("melancholy")) resilience -= 0.08;
-    if (traits.includes("restless")) resilience -= 0.04;
-    if (values.includes("family")) resilience += 0.03;
-    if (values.includes("faith")) resilience += 0.03;
-    if (values.includes("community")) resilience += 0.03;
-    if (values.includes("comfort")) resilience += 0.02;
-    return Math.round(clamp(resilience, 0.12, 0.92) * 1000) / 1000;
-}
-
-function mentalStateFor(stress: number, morale: number): AgentMentalState {
-    if (stress <= 0.22 && morale >= 0.72) return "inspired";
-    if (stress < 0.42) return "steady";
-    if (stress < 0.64) return "strained";
-    if (stress < 0.82) return "troubled";
-    return "haunted";
 }
 
 function makeArtifactName(seed: number, index: number, kind: ArtifactKind, material: string): string {
@@ -9292,7 +8807,7 @@ function makeStructureName(seed: number, index: number, kind: StructureKind, set
 }
 
 function makeHouseholdName(seed: number, index: number, founders: Agent[], settlement: Settlement): string {
-    const founderFamily = founders[0]?.name.split(" ").slice(-1)[0];
+    const founderFamily = founders[0] ? agentFamilyName(founders[0].name) : undefined;
     if (founderFamily) return `${founderFamily} Household`;
     const prefix = NAME_PREFIXES[Math.floor(hashFloat(seed, index, 1229, 1) * NAME_PREFIXES.length)];
     const suffix = NAME_SUFFIXES[Math.floor(hashFloat(seed, index, 1229, 2) * NAME_SUFFIXES.length)];
@@ -9425,26 +8940,6 @@ function emptyProfessionCounts(): ProfessionCounts {
         scholar: 0,
         elder: 0,
     };
-}
-
-function chooseAdultProfession(seed: number, agentId: number, settlement: Pick<Settlement, "id" | "type">, terrainScore: number): AgentProfession {
-    const roll = hashFloat(seed, agentId, settlement.id, 503);
-    const mountainBias = clamp((terrainScore - 0.35) / 0.45, 0, 1);
-    const capitalBias = settlement.type === "capital" ? 0.08 : 0;
-    const farmerCutoff = 0.42 - mountainBias * 0.16;
-    const minerCutoff = farmerCutoff + 0.12 + mountainBias * 0.16;
-    const artisanCutoff = minerCutoff + 0.15 + capitalBias;
-    const merchantCutoff = artisanCutoff + 0.08 + capitalBias;
-    const guardCutoff = merchantCutoff + 0.08;
-    const healerCutoff = guardCutoff + 0.04;
-
-    if (roll < farmerCutoff) return "farmer";
-    if (roll < minerCutoff) return "miner";
-    if (roll < artisanCutoff) return "artisan";
-    if (roll < merchantCutoff) return "merchant";
-    if (roll < guardCutoff) return "guard";
-    if (roll < healerCutoff) return "healer";
-    return "scholar";
 }
 
 function addAgeMilestoneIdToAgent(agent: Agent | undefined, id: number) {
@@ -9673,19 +9168,6 @@ function annualAgentProfessionInput(simulation: CivilizationSimulation, agent: A
         settlementType: settlement.type,
         suitability: settlement.suitability,
     };
-}
-
-function computeAnnualAgentProfessionDraft(seed: number, input: AnnualAgentProfessionInput): AnnualAgentProfessionDraft {
-    const age = input.age + 1;
-    let profession = input.profession;
-    if (age < 15) {
-        profession = "child";
-    } else if (age >= 65) {
-        profession = "elder";
-    } else if (profession === "child" || profession === "elder") {
-        profession = chooseAdultProfession(seed, input.agentId, {id: input.settlementId, type: input.settlementType}, input.suitability);
-    }
-    return {agentId: input.agentId, age, profession};
 }
 
 function annualAgentProfessionDrafts(
@@ -10032,45 +9514,6 @@ function householdPairWorkerInput(settlement: Settlement, agents: Agent[]): Hous
         },
         agents: agents.map(householdPairWorkerAgent),
     };
-}
-
-function computeHouseholdPairDraft(seed: number, year: number, input: HouseholdPairWorkerInput): HouseholdPairDraft {
-    if (year <= 0) return {settlementId: input.settlement.id, pairs: []};
-    const adultCount = input.agents.filter(agent =>
-        agent.alive
-        && agent.spouseId === undefined
-        && agent.age >= 18
-        && agent.age <= 42
-    ).length;
-    if (adultCount < 2) return {settlementId: input.settlement.id, pairs: []};
-
-    const chance = clamp(0.02 + input.settlement.prosperity * 0.05 - input.settlement.unrest * 0.035, 0.005, 0.08);
-    const maxPairs = Math.max(0, Math.floor(adultCount * (0.003 + input.settlement.prosperity * 0.004)));
-    if (maxPairs <= 0 || chance <= 0) return {settlementId: input.settlement.id, pairs: []};
-
-    const candidates = input.agents
-        .filter(agent =>
-            agent.alive
-            && agent.spouseId === undefined
-            && agent.civilizationId === input.settlement.civilizationId
-            && agent.settlementId === input.settlement.id
-            && agent.age >= 18
-            && agent.age <= 42
-        )
-        .sort((a, b) =>
-            hashFloat(seed, year, input.settlement.id, a.id)
-            - hashFloat(seed, year, input.settlement.id, b.id)
-            || a.id - b.id
-        );
-
-    const pairs: Array<[number, number]> = [];
-    for (let i = 0; i + 1 < candidates.length && pairs.length < maxPairs; i += 2) {
-        const a = candidates[i];
-        const b = candidates[i + 1];
-        if (hashFloat(seed, year + 823, a.id, b.id) > chance) continue;
-        pairs.push([a.id, b.id]);
-    }
-    return {settlementId: input.settlement.id, pairs};
 }
 
 function householdPairDrafts(
@@ -10639,7 +10082,7 @@ function createAgent(
     const resilience = draft?.resilience ?? initialAgentResilience(traits, values, simulation.options.seed, id);
     const agent: Agent = {
         id,
-        name: draft && familyName === undefined ? draft.name : makeAgentName(simulation.options.seed, id, familyName),
+        name: uniqueAgentName(simulation, draft && familyName === undefined ? draft.name : makeAgentName(simulation.options.seed, id, familyName)),
         civilizationId,
         settlementId,
         bornYear,
@@ -10986,7 +10429,7 @@ function careRecordRef(simulation: CivilizationSimulation, id: number): LegendEn
 
 function eventRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
     const event = simulation.legendEvents[id];
-    return {kind: "event", id, name: event ? `${event.year}: ${legendEventHeadline(event)}` : `Event ${id}`};
+    return {kind: "event", id, name: event ? `${event.year}: ${sentenceFragment(legendEventHeadline(event))}` : `Event ${id}`};
 }
 
 function skillRef(simulation: CivilizationSimulation, id: number): LegendEntityRef {
@@ -11299,7 +10742,7 @@ function legendRefName(simulation: CivilizationSimulation, ref: LegendEntityRef)
     if (ref.kind === "story-hook") return simulation.storyHooks[ref.id]?.name ?? `Story Hook ${ref.id}`;
     if (ref.kind === "event") {
         const event = simulation.legendEvents[ref.id];
-        return event ? `${event.year}: ${legendEventHeadline(event)}` : `Event ${ref.id}`;
+        return event ? `${event.year}: ${sentenceFragment(legendEventHeadline(event))}` : `Event ${ref.id}`;
     }
     return `${ref.kind} ${ref.id}`;
 }
@@ -12047,7 +11490,7 @@ function createOpinionForMemory(simulation: CivilizationSimulation, memory: Memo
             existing.sourceMemoryId = memory.id;
             existing.intensity = Math.round(memory.intensity * 1000) / 1000;
             existing.valence = Math.round(opinionValence(kind) * memory.intensity * 1000) / 1000;
-            existing.description = `${agent.name}'s ${kind} toward ${targetName} was strengthened by ${legendEventHeadline(event)}.`;
+            existing.description = `${agent.name}'s ${kind} toward ${targetName} was strengthened by ${legendEventClause(event)}.`;
             createSocialClaimForOpinion(simulation, memory, event, agent, existing);
         }
         return;
@@ -12079,7 +11522,7 @@ function createOpinionForMemory(simulation: CivilizationSimulation, memory: Memo
         intensity,
         valence,
         subjectRefs,
-        description: `${agent.name} formed ${kind} toward ${targetName} after remembering ${legendEventHeadline(event)}.`,
+        description: `${agent.name} formed ${kind} toward ${targetName} after remembering ${legendEventClause(event)}.`,
         eventIds: [],
     };
     simulation.opinions.push(opinion);
@@ -12216,7 +11659,7 @@ function createSocialClaimForOpinion(simulation: CivilizationSimulation, memory:
                 eventRef(simulation, event.id),
                 ...memory.subjectRefs,
             ], 24);
-            existing.description = `${agent.name}'s ${kind} toward ${target.name} was renewed by ${legendEventHeadline(event)}.`;
+            existing.description = `${agent.name}'s ${kind} toward ${target.name} was renewed by ${legendEventClause(event)}.`;
             adjustSocialBondForClaim(simulation, simulation.socialBonds[existing.relationshipId ?? -1] ?? activeSocialBondBetween(simulation, agent.id, target.id), kind, existing.intensity, memory.year);
         }
         return;
@@ -12553,7 +11996,7 @@ function createPersonalityShiftForMemory(simulation: CivilizationSimulation, mem
     const changeLabel = candidate.trait
         ? `became more ${candidate.trait}`
         : `embraced ${candidate.value}`;
-    const sourceHeadline = legendEventHeadline(event).replace(/[.!?]+$/, "");
+    const sourceHeadline = legendEventClause(event);
     const subjectRefs = uniqueLegendRefs([
         {kind: "personality-shift", id, name},
         personRef(simulation, agent.id),
@@ -12611,7 +12054,7 @@ function createPersonalityShiftForMemory(simulation: CivilizationSimulation, mem
 
 function memoryName(emotion: MemoryEmotion, event: LegendEvent): string {
     const label = emotion[0].toUpperCase() + emotion.slice(1);
-    return `${label} memory of ${legendEventHeadline(event)}`;
+    return `${label} memory of ${sentenceFragment(legendEventHeadline(event))}`;
 }
 
 function createMemoryForEvent(simulation: CivilizationSimulation, event: LegendEvent, agent: Agent): Memory | undefined {
@@ -13688,7 +13131,7 @@ function awardAgentEpithet(simulation: CivilizationSimulation, agent: Agent, can
         sourceEventId: candidate.sourceEventId,
         subjectRefs: [],
         description: sourceEvent
-            ? `${agent.name} earned the name ${candidate.name} ${candidate.reason}; chroniclers tied it to ${legendEventHeadline(sourceEvent)}.`
+            ? `${agent.name} earned the name ${candidate.name} ${candidate.reason}; chroniclers tied it to ${legendEventClause(sourceEvent)}.`
             : `${agent.name} earned the name ${candidate.name} ${candidate.reason}.`,
         eventIds: [],
     };
@@ -14317,7 +13760,7 @@ function createSecret(simulation: CivilizationSimulation, settlement: Settlement
         severity,
         keeperAgentIds: keepers.map(agent => agent.id),
         subjectRefs: uniqueLegendRefs([...subjectRefs, eventRef(simulation, sourceEvent.id)], 14),
-        description: `${keepers.map(agent => agent.name).join(", ")} kept quiet about ${legendEventHeadline(sourceEvent)}`,
+        description: `${keepers.map(agent => agent.name).join(", ")} kept quiet about ${legendEventClause(sourceEvent)}.`,
         eventIds: [],
     };
     simulation.secrets.push(secret);
@@ -15987,7 +15430,7 @@ function createBelonging(
         value: Math.round((1.2 + owner.wealth * 0.018 + owner.skill * 2.4 + hashFloat(simulation.options.seed, id, owner.id, 2451) * 4.2) * 10) / 10,
         sentiment: Math.round(clamp(0.18 + owner.reputation * 0.18 + sourceEvent.entityRefs.length * 0.012 + hashFloat(simulation.options.seed, id, owner.id, 2453) * 0.55, 0, 1) * 1000) / 1000,
         subjectRefs,
-        description: `${owner.name} acquired a ${material} ${belongingKindLabel(kind)} after ${legendEventHeadline(sourceEvent)}`,
+        description: `${owner.name} acquired a ${material} ${belongingKindLabel(kind)} after ${legendEventClause(sourceEvent)}.`,
         eventIds: [],
     };
     simulation.belongings.push(belonging);
@@ -16127,7 +15570,7 @@ function createPossessionAttachment(
         memoryIds: [],
         intensity,
         subjectRefs,
-        description: `${agent.name} formed ${possessionAttachmentKindLabel(kind)} around ${targetName} after ${legendEventHeadline(sourceEvent)}`,
+        description: `${agent.name} formed ${possessionAttachmentKindLabel(kind)} around ${targetName} after ${legendEventClause(sourceEvent)}.`,
         eventIds: [],
     };
     simulation.possessionAttachments.push(attachment);
@@ -17920,7 +17363,7 @@ function createArtifactConditionRecord(
         civilizationRef(simulation, civilizationId),
     ], 18);
     const description = options.description
-        ?? `${artifact.name} was recorded as ${condition} after ${legendEventHeadlineOr(sourceEvent, "an unknown event")}.`;
+        ?? `${artifact.name} was recorded as ${condition} after ${legendEventClauseOr(sourceEvent, "an unknown event")}.`;
     const record: ArtifactConditionRecord = {
         id,
         name,
@@ -20179,7 +19622,7 @@ function resolveProphecy(simulation: CivilizationSimulation, prophecy: Prophecy,
         type: status === "fulfilled" ? "prophecy-fulfilled" : "prophecy-failed",
         headline: `${prophecy.name} was ${status}.`,
         description: status === "fulfilled"
-            ? `${prophecy.name} was judged fulfilled in ${settlement?.name ?? "the realm"}${resolvedEvent ? ` after ${legendEventHeadline(resolvedEvent)}` : ""}.`
+            ? `${prophecy.name} was judged fulfilled in ${settlement?.name ?? "the realm"}${resolvedEvent ? ` after ${legendEventClause(resolvedEvent)}` : ""}.`
             : `${prophecy.name} failed to come to pass in ${settlement?.name ?? "the realm"}.`,
         civilizationId: prophecy.civilizationId,
         settlementId: prophecy.settlementId,
@@ -20566,8 +20009,8 @@ function resolveCivilizationGoal(
         type: status === "fulfilled" ? "civilization-goal-fulfilled" : "civilization-goal-failed",
         headline: `${goal.name} was ${status}.`,
         description: status === "fulfilled"
-            ? `${goal.name} was fulfilled${resolvedEvent ? ` after ${legendEventHeadline(resolvedEvent)}` : ""}.`
-            : `${goal.name} failed to guide the realm to its intended end${resolvedEvent ? ` after ${legendEventHeadline(resolvedEvent)}` : ""}.`,
+            ? `${goal.name} was fulfilled${resolvedEvent ? ` after ${legendEventClause(resolvedEvent)}` : ""}.`
+            : `${goal.name} failed to guide the realm to its intended end${resolvedEvent ? ` after ${legendEventClause(resolvedEvent)}` : ""}.`,
         civilizationId: goal.civilizationId,
         settlementId: goal.settlementId ?? goal.targetSettlementId,
         beliefId: goal.beliefId,
@@ -24042,7 +23485,7 @@ function recordRelationshipMilestone(
         settlementRef(simulation, milestone.settlementId),
         civilizationRef(simulation, bond.civilizationId),
     ], 18);
-    milestone.description = `${name} was recorded in year ${milestone.year} after ${legendEventHeadline(sourceEvent)}. Status ${status}; affinity ${milestone.affinity}; trust ${milestone.trust}; tension ${milestone.tension}; familiarity ${milestone.familiarity}.${options.note ? ` ${options.note}` : ""}`;
+    milestone.description = `${name} was recorded in year ${milestone.year} after ${legendEventClause(sourceEvent)}. Status ${status}; affinity ${milestone.affinity}; trust ${milestone.trust}; tension ${milestone.tension}; familiarity ${milestone.familiarity}.${options.note ? ` ${options.note}` : ""}`;
     sourceEvent.relationshipMilestoneId = id;
     sourceEvent.entityRefs = internLegendRefs(simulation, uniqueLegendRefs([...sourceEvent.entityRefs, relationshipMilestoneRef(simulation, id)], 24));
     return milestone;
@@ -24575,7 +24018,7 @@ function maintainSocialClaims(simulation: CivilizationSimulation) {
                     claim,
                     "repaid",
                     relationship,
-                    `${target.name} repaid the favor ${agent.name} remembered from ${legendEventHeadlineOr(simulation.legendEvents[claim.sourceEventId], "an earlier event")}.`,
+                    `${target.name} repaid the favor ${agent.name} remembered from ${legendEventClauseOr(simulation.legendEvents[claim.sourceEventId], "an earlier event")}.`,
                 );
             }
         } else {
@@ -24588,7 +24031,7 @@ function maintainSocialClaims(simulation: CivilizationSimulation) {
                     claim,
                     "settled",
                     relationship,
-                    `${agent.name} set aside the grudge against ${target.name} that began with ${legendEventHeadlineOr(simulation.legendEvents[claim.sourceEventId], "an earlier event")}.`,
+                    `${agent.name} set aside the grudge against ${target.name} that began with ${legendEventClauseOr(simulation.legendEvents[claim.sourceEventId], "an earlier event")}.`,
                 );
             }
         }
@@ -28825,9 +28268,16 @@ function uniqueLegendRefs(refs: LegendEntityRef[], limit = 12): LegendEntityRef[
     return unique;
 }
 
-type StoryHookCandidate = Omit<StoryHook, "id">;
+type StoryHookCandidate = Omit<StoryHook, "id" | "rawScore">;
 
 const maxStoryHooks = 120;
+// Every kind with candidates is guaranteed this many slots in the cap so a
+// high-volume kind cannot crowd sparse kinds (conflict, prophecy) out entirely,
+// and no kind may take more than a third of the cap while other kinds still
+// have candidates (the ceiling is ignored only if slots would otherwise go
+// unused).
+const storyHookKindFloor = 8;
+const storyHookKindCeiling = 40;
 
 function roundedHookScore(value: number): number {
     return Math.round(value * 1000) / 1000;
@@ -29018,11 +28468,12 @@ function createDramaManagerIndexes(simulation: CivilizationSimulation): DramaMan
     return indexes;
 }
 
-function hookFromCandidate(candidate: StoryHookCandidate, id: number): StoryHook {
+function hookFromCandidate(candidate: StoryHookCandidate, id: number, normalizedScore: number): StoryHook {
     return {
         ...candidate,
         id,
-        score: roundedHookScore(candidate.score),
+        score: roundedHookScore(normalizedScore),
+        rawScore: roundedHookScore(candidate.score),
         urgency: roundedHookScore(clamp(candidate.urgency, 0, 1)),
         eventIds: uniqueNumberList(candidate.eventIds, 14),
         seedRefs: uniqueLegendRefs(candidate.seedRefs, 18),
@@ -29114,11 +28565,13 @@ function dramaManagerCharacterHooks(simulation: CivilizationSimulation, candidat
             agent.oathIds.length ? "test a sworn obligation" : undefined,
             agent.battleIds.length ? "bring old battlefield claims back into view" : undefined,
         ]);
+        const placeName = settlement?.name ?? "an unsettled place";
+        const followFocus = hookRefNames(simulation, hooks.filter(ref => ref.kind !== "person"), 4);
         addStoryHookCandidate(candidates, {
-            name: `${agent.name}'s unresolved thread`,
-            kind: "character",
-            tone: agent.secretIds.length || agent.schemeIds.length ? "intrigue" : agent.battleIds.length ? "war" : agent.stress > 0.7 ? "tragedy" : "domestic",
-            year: hookLatestEventYear(simulation, events, simulation.year),
+            name: agent.alive ? `${agent.name}'s unresolved thread` : `${agent.name}'s unfinished legacy`,
+            kind: agent.alive ? "character" : "legacy",
+            tone: agent.secretIds.length || agent.schemeIds.length ? "intrigue" : agent.battleIds.length ? "war" : !agent.alive || agent.stress > 0.7 ? "tragedy" : "domestic",
+            year: hookLatestEventYear(simulation, events, 0),
             score: entry.score,
             urgency: clamp(agent.stress * 0.55 + (agent.alive ? 0.25 : 0.05) + agent.schemeIds.length * 0.08 + agent.feudIds.length * 0.07, 0, 1),
             civilizationId: agent.civilizationId,
@@ -29126,10 +28579,18 @@ function dramaManagerCharacterHooks(simulation: CivilizationSimulation, candidat
             personId: agent.id,
             eventId: events[0],
             seedRefs: hooks,
-            prompt: `${agent.name} is ${hookArticle(agent.profession)} ${agent.profession} of ${settlement?.name ?? "an unsettled place"} with ${characterSignals}.${hiddenThread}`,
-            stakes: `Pressure around ${agent.name} can ${characterStakes} for ${civ?.name ?? "their people"}.`,
-            complication: `${agent.name}'s current profile is stress ${roundedHookScore(agent.stress)} and reputation ${roundedHookScore(agent.reputation)}; linked records include ${characterSignals}.`,
-            suggestedFocus: `Start with ${agent.name}, then follow ${hookRefNames(simulation, hooks.filter(ref => ref.kind !== "person"), 4)}.`,
+            prompt: agent.alive
+                ? `${agent.name} is ${hookArticle(agent.profession)} ${agent.profession} of ${placeName} with ${characterSignals}.${hiddenThread}`
+                : `${agent.name} was ${hookArticle(agent.profession)} ${agent.profession} of ${placeName} and is dead; the archive keeps ${characterSignals} left behind.${hiddenThread}`,
+            stakes: agent.alive
+                ? `Pressure around ${agent.name} can ${characterStakes} for ${civ?.name ?? "their people"}.`
+                : `What ${agent.name} left behind can still ${characterStakes} for ${civ?.name ?? "their people"}.`,
+            complication: agent.alive
+                ? `${agent.name}'s current profile is stress ${roundedHookScore(agent.stress)} and reputation ${roundedHookScore(agent.reputation)}; linked records include ${characterSignals}.`
+                : `${agent.name} died with reputation ${roundedHookScore(agent.reputation)}; the surviving records include ${characterSignals}.`,
+            suggestedFocus: agent.alive
+                ? `Start with ${agent.name}, then follow ${followFocus}.`
+                : `Start with what ${agent.name} left behind, then follow ${followFocus}.`,
             eventIds: events,
         });
     }
@@ -29507,6 +28968,7 @@ function dramaManagerMysteryHooks(simulation: CivilizationSimulation, candidates
             ...feud.subjectRefs.slice(0, 6),
         ];
         const score = feud.severity * 2 + (feud.status === "active" ? 0.9 : 0.2) + (feud.sideAAgentIds.length + feud.sideBAgentIds.length) * 0.08 + relatedOaths.length * 0.28 + hookRecency(simulation, events);
+        if (score < 1.2) continue;
         const feudSignals = hookList([
             `${hookCount(feud.sideAAgentIds.length, "person", "people")} on one side`,
             `${hookCount(feud.sideBAgentIds.length, "person", "people")} on the other`,
@@ -29535,6 +28997,23 @@ function dramaManagerMysteryHooks(simulation: CivilizationSimulation, candidates
     }
 }
 
+type RankedStoryHookCandidate = {
+    candidate: StoryHookCandidate;
+    normalizedScore: number;
+};
+
+function storyHookCandidateSort(a: StoryHookCandidate, b: StoryHookCandidate): number {
+    return b.score - a.score || b.urgency - a.urgency || b.year - a.year || a.name.localeCompare(b.name);
+}
+
+function rankedStoryHookSort(a: RankedStoryHookCandidate, b: RankedStoryHookCandidate): number {
+    return b.normalizedScore - a.normalizedScore
+        || b.candidate.urgency - a.candidate.urgency
+        || b.candidate.year - a.candidate.year
+        || a.candidate.name.localeCompare(b.candidate.name)
+        || a.candidate.kind.localeCompare(b.candidate.kind);
+}
+
 function runDramaManager(simulation: CivilizationSimulation): StoryHook[] {
     const candidates: StoryHookCandidate[] = [];
     const indexes = createDramaManagerIndexes(simulation);
@@ -29554,10 +29033,53 @@ function runDramaManager(simulation: CivilizationSimulation): StoryHook[] {
         }
     }
 
-    const sorted = [...bestByKey.values()]
-        .sort((a, b) => b.score - a.score || b.urgency - a.urgency || b.year - a.year || a.name.localeCompare(b.name))
+    // Raw scores use per-generator scales that are not comparable across kinds,
+    // so ranking happens within each kind: a hook's selection score is its
+    // percentile among candidates of the same kind, in (0, 1].
+    const byKind = new Map<StoryHookKind, StoryHookCandidate[]>();
+    for (let candidate of bestByKey.values()) {
+        const bucket = byKind.get(candidate.kind);
+        if (bucket) bucket.push(candidate);
+        else byKind.set(candidate.kind, [candidate]);
+    }
+
+    const ranked: RankedStoryHookCandidate[] = [];
+    const rankedByKind: RankedStoryHookCandidate[][] = [];
+    for (let [, kindCandidates] of [...byKind.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+        kindCandidates.sort(storyHookCandidateSort);
+        const kindRanked = kindCandidates.map((candidate, index) => ({
+            candidate,
+            normalizedScore: (kindCandidates.length - index) / kindCandidates.length,
+        }));
+        rankedByKind.push(kindRanked);
+        ranked.push(...kindRanked);
+    }
+
+    const selected = new Set<RankedStoryHookCandidate>();
+    const selectedByKind = new Map<StoryHookKind, number>();
+    const countSelection = (entry: RankedStoryHookCandidate) => {
+        if (selected.has(entry)) return;
+        selected.add(entry);
+        selectedByKind.set(entry.candidate.kind, (selectedByKind.get(entry.candidate.kind) ?? 0) + 1);
+    };
+    for (let kindRanked of rankedByKind) {
+        for (let entry of kindRanked.slice(0, storyHookKindFloor)) countSelection(entry);
+    }
+    const fillOrder = ranked.sort(rankedStoryHookSort);
+    for (let entry of fillOrder) {
+        if (selected.size >= maxStoryHooks) break;
+        if ((selectedByKind.get(entry.candidate.kind) ?? 0) >= storyHookKindCeiling) continue;
+        countSelection(entry);
+    }
+    for (let entry of fillOrder) {
+        if (selected.size >= maxStoryHooks) break;
+        countSelection(entry);
+    }
+
+    const sorted = [...selected]
+        .sort(rankedStoryHookSort)
         .slice(0, maxStoryHooks)
-        .map((candidate, id) => hookFromCandidate(candidate, id));
+        .map((entry, id) => hookFromCandidate(entry.candidate, id, entry.normalizedScore));
 
     return sorted.map(hook => ({
         ...hook,
@@ -29657,7 +29179,7 @@ function createChronicle(simulation: CivilizationSimulation, settlement: Settlem
         year: simulation.year,
         type: "chronicle-written",
         headline: `${name} was written.`,
-        description: `${author.name} wrote ${name} in ${settlement.name}, preserving an account of ${legendEventHeadline(sourceEvent)}`,
+        description: `${author.name} wrote ${name} in ${settlement.name}, preserving an account of ${legendEventClause(sourceEvent)}.`,
         civilizationId: settlement.civilizationId,
         settlementId: settlement.id,
         personId: author.id,
@@ -30045,56 +29567,11 @@ function refreshTerritoryClaims(world: GeneratedWorldMap, simulation: Civilizati
         : computeTriangleTerritoryFromRegions(world, simulation.territory_r);
 }
 
-function pointDistance(a: RoadPoint, b: RoadPoint): number {
-    return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
 function trianglePoint(world: GeneratedWorldMap, triangle: number): RoadPoint {
     return {
         x: world.mesh.x_of_t(triangle),
         y: world.mesh.y_of_t(triangle),
     };
-}
-
-function roadPathLength(points: RoadPoint[]): number {
-    let length = 0;
-    for (let i = 1; i < points.length; i++) {
-        length += pointDistance(points[i - 1], points[i]);
-    }
-    return length;
-}
-
-function pointLineDistance(point: RoadPoint, start: RoadPoint, end: RoadPoint): number {
-    const dx = end.x - start.x;
-    const dy = end.y - start.y;
-    const length2 = dx*dx + dy*dy;
-    if (length2 === 0) return pointDistance(point, start);
-
-    const t = clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / length2, 0, 1);
-    return pointDistance(point, {x: start.x + dx * t, y: start.y + dy * t});
-}
-
-function simplifyRoadPoints(points: RoadPoint[], tolerance: number): RoadPoint[] {
-    if (points.length <= 2) return points;
-
-    let maxDistance = -1;
-    let splitIndex = -1;
-    const start = points[0];
-    const end = points[points.length - 1];
-
-    for (let i = 1; i < points.length - 1; i++) {
-        const distance = pointLineDistance(points[i], start, end);
-        if (distance > maxDistance) {
-            maxDistance = distance;
-            splitIndex = i;
-        }
-    }
-
-    if (maxDistance <= tolerance || splitIndex < 0) return [start, end];
-
-    const left = simplifyRoadPoints(points.slice(0, splitIndex + 1), tolerance);
-    const right = simplifyRoadPoints(points.slice(splitIndex), tolerance);
-    return left.slice(0, -1).concat(right);
 }
 
 function roadPassableTriangle(world: GeneratedWorldMap, simulation: CivilizationSimulation, civId: number, triangle: number, endpointTriangles: Set<number>): boolean {
@@ -30517,7 +29994,7 @@ function recordSkillPractice(
                 year: simulation.year,
                 type: "skill-ranked",
                 headline: `${agent.name} became ${existing.rank} at ${specialtyLabel(specialty)}.`,
-                description: `${agent.name}'s ${specialtyLabel(specialty)} skill rose from ${previousRank} to ${existing.rank} after ${legendEventHeadline(sourceEvent)}.`,
+                description: `${agent.name}'s ${specialtyLabel(specialty)} skill rose from ${previousRank} to ${existing.rank} after ${legendEventClause(sourceEvent)}.`,
                 civilizationId: agent.civilizationId,
                 settlementId: settlement.id,
                 personId: agent.id,
@@ -30565,7 +30042,7 @@ function recordSkillPractice(
         projectIds: sourceEvent.projectId === undefined ? [] : [sourceEvent.projectId],
         apprenticeshipIds: sourceEvent.apprenticeshipId === undefined ? [] : [sourceEvent.apprenticeshipId],
         subjectRefs,
-        description: `${agent.name} first entered the record as ${rank} at ${specialtyLabel(specialty)} after ${legendEventHeadline(sourceEvent)}.`,
+        description: `${agent.name} first entered the record as ${rank} at ${specialtyLabel(specialty)} after ${legendEventClause(sourceEvent)}.`,
         eventIds: [],
     };
     simulation.skills.push(record);
@@ -31231,7 +30708,7 @@ function maybeCreateTrinketArtifactForEvent(
             eventRef(simulation, sourceEvent.id),
             ...extraRefs,
         ],
-        description: `${agent.name} made ${kind === "timepiece" ? "a precise" : "a remembered"} ${artifactKindLabel(kind)} after ${legendEventHeadline(sourceEvent)}`,
+        description: `${agent.name} made ${kind === "timepiece" ? "a precise" : "a remembered"} ${artifactKindLabel(kind)} after ${legendEventClause(sourceEvent)}.`,
     });
 }
 
@@ -31810,7 +31287,7 @@ function createObligation(simulation: CivilizationSimulation, settlement: Settle
         projectId: sourceEvent.projectId,
         oathId: sourceEvent.oathId,
         subjectRefs,
-        description: `${parties.debtor.name} owed ${parties.creditor.name} a ${obligationKindLabel(kind)} after ${legendEventHeadline(sourceEvent)}`,
+        description: `${parties.debtor.name} owed ${parties.creditor.name} a ${obligationKindLabel(kind)} after ${legendEventClause(sourceEvent)}.`,
         eventIds: [],
     };
     simulation.obligations.push(obligation);
@@ -32117,64 +31594,6 @@ function settlementEconomyWorkerSettlement(
     };
 }
 
-function computeSettlementEconomyDraft(seed: number, year: number, input: SettlementEconomyWorkerSettlement): SettlementEconomyDraft {
-    const professions = input.professions;
-    const workers = Math.max(1, input.agentCount - professions.child - professions.elder);
-    const foodProduced = Math.round(
-        (professions.farmer * 2.95 + professions.merchant * 0.45 + professions.child * 0.12)
-        * input.foodPotential,
-    );
-    const materialsProduced = Math.round(
-        (professions.miner * 1.65 + professions.artisan * 0.65 + professions.farmer * 0.08)
-        * input.materialPotential,
-    );
-    const tradeProduced = professions.merchant * 0.85 + professions.artisan * 0.38 + professions.scholar * 0.18;
-    const foodNeeded = Math.round(input.agentCount * 0.54);
-    const materialNeeded = Math.round(workers * 0.11 + input.agentCount * 0.015);
-    const foodDelta = foodProduced - foodNeeded;
-    const materialDelta = materialsProduced - materialNeeded;
-    const food = clamp(input.food + foodDelta, 0, Math.max(650, input.agentCount * 4));
-    const materials = clamp(input.materials + materialDelta, 0, Math.max(200, input.agentCount * 2));
-    const shortage = foodDelta < 0 && food < input.agentCount * 0.24;
-    const materialShortage = materialDelta < 0 && materials < input.agentCount * 0.15;
-    const prosperity = clamp(
-        input.prosperity
-        + tradeProduced / Math.max(80, input.agentCount * 8)
-        + (foodDelta > 0 ? 0.01 : -0.012)
-        + (materialDelta > 0 ? 0.006 : -0.006),
-        0,
-        1,
-    );
-    const unrest = clamp(
-        input.unrest
-        + (shortage ? 0.045 : -0.024)
-        + (materialShortage ? 0.025 : -0.006)
-        - prosperity * 0.01,
-        0,
-        1,
-    );
-    const eventType = shortage
-        ? "shortage"
-        : prosperity > 0.78 && hashFloat(seed, year, input.id, 601) > 0.88
-            ? "prosperity"
-            : undefined;
-    return {
-        settlementId: input.id,
-        food,
-        materials,
-        prosperity,
-        unrest,
-        shortage,
-        materialShortage,
-        eventType,
-        eventSeverity: eventType === "shortage"
-            ? clamp(0.35 + unrest, 0, 1)
-            : eventType === "prosperity"
-                ? prosperity
-                : undefined,
-    };
-}
-
 function settlementEconomyDrafts(
     world: GeneratedWorldMap,
     simulation: CivilizationSimulation,
@@ -32377,23 +31796,6 @@ function birthCountWorkerSettlement(settlement: Settlement, agents: Agent[]): Bi
     };
 }
 
-function computeBirthCountDraft(seed: number, year: number, input: BirthCountWorkerSettlement): BirthCountDraft {
-    if (input.adultCount === 0) return {settlementId: input.id, count: 0};
-    const base = input.type === "capital" ? 850 : 180;
-    const multiplier = 0.7 + input.suitability * 0.5 + input.prosperity * 0.2 - input.unrest * 0.2;
-    const capacity = Math.max(18, Math.round(base * clamp(multiplier, 0.35, 1.35)));
-    const recovery = clamp((capacity - input.population) / capacity, 0, 1);
-    const crowding = clamp((input.population - capacity) / capacity, 0, 1);
-    const fertility = 0.032 + input.prosperity * 0.018 + input.suitability * 0.012 - input.unrest * 0.018 + recovery * 0.025 - crowding * 0.05;
-    const expected = Math.max(0, input.adultCount * fertility);
-    const whole = Math.floor(expected);
-    const fractional = expected - whole;
-    return {
-        settlementId: input.id,
-        count: whole + (hashFloat(seed, year, input.id, 613) < fractional ? 1 : 0),
-    };
-}
-
 function birthCountDrafts(
     simulation: CivilizationSimulation,
     aliveAgentsBySettlement: Agent[][],
@@ -32445,58 +31847,6 @@ function birthParentWorkerSettlement(
     };
 }
 
-function computeBirthParentDraft(seed: number, year: number, input: BirthParentWorkerSettlement): BirthParentDraft {
-    const childCounts = new Map(input.agents.map(agent => [agent.id, agent.childCount]));
-    const parentIds: number[][] = [];
-
-    for (let ordinal = 0; ordinal < input.count; ordinal++) {
-        const adults = input.agents
-            .filter(agent =>
-                agent.alive
-                && agent.civilizationId === input.civilizationId
-                && agent.settlementId === input.id
-                && agent.age >= 18
-                && agent.age <= 52
-            );
-        if (adults.length === 0) {
-            parentIds.push([]);
-            continue;
-        }
-
-        const adultIds = new Set(adults.map(agent => agent.id));
-        const pairs = adults
-            .filter(agent => agent.spouseId !== undefined && agent.id < agent.spouseId && adultIds.has(agent.spouseId))
-            .sort((a, b) =>
-                ((childCounts.get(a.id) ?? 0) + (childCounts.get(a.spouseId!) ?? 0))
-                - ((childCounts.get(b.id) ?? 0) + (childCounts.get(b.spouseId!) ?? 0))
-                || hashFloat(seed, year + ordinal * 997, input.id, a.id)
-                - hashFloat(seed, year + ordinal * 997, input.id, b.id)
-            );
-
-        let chosen: number[];
-        if (pairs.length > 0) {
-            const pair = pairs[Math.floor(hashFloat(seed, year, input.id, ordinal + 811) * Math.min(4, pairs.length))];
-            chosen = [pair.id, pair.spouseId!];
-        } else {
-            chosen = adults
-                .sort((a, b) =>
-                    (childCounts.get(a.id) ?? 0) - (childCounts.get(b.id) ?? 0)
-                    || hashFloat(seed, year + ordinal * 997, input.id, a.id)
-                    - hashFloat(seed, year + ordinal * 997, input.id, b.id)
-                )
-                .slice(0, Math.min(2, adults.length))
-                .map(agent => agent.id);
-        }
-
-        parentIds.push(chosen);
-        for (let parentId of chosen) {
-            childCounts.set(parentId, (childCounts.get(parentId) ?? 0) + 1);
-        }
-    }
-
-    return {settlementId: input.id, parentIds};
-}
-
 function birthParentDrafts(
     simulation: CivilizationSimulation,
     aliveAgentsBySettlement: Agent[][],
@@ -32533,34 +31883,6 @@ function migrationWorkerAgent(agent: Agent): MigrationWorkerAgent {
         id: agent.id,
         age: agent.age,
         morale: agent.morale,
-    };
-}
-
-function computeMigrationDraft(settlements: MigrationWorkerSettlement[], origin: MigrationWorkerOrigin): MigrationDraft {
-    const settlement = origin.settlement;
-    if (settlement.unrest < 0.32 && settlement.food > settlement.population * 0.45) {
-        return {settlementId: settlement.id, agentIds: []};
-    }
-
-    const destinations = settlements
-        .filter(candidate =>
-            candidate.civilizationId === settlement.civilizationId
-            && candidate.id !== settlement.id
-            && candidate.prosperity > settlement.prosperity
-            && candidate.food > candidate.population * 0.6
-        )
-        .sort((a, b) => b.prosperity - a.prosperity || a.id - b.id);
-    if (destinations.length === 0) return {settlementId: settlement.id, agentIds: []};
-
-    const destination = destinations[0];
-    const candidates = origin.agents
-        .filter(agent => agent.age >= 16 && agent.age <= 46)
-        .sort((a, b) => a.morale - b.morale || a.id - b.id);
-    const moveCount = Math.min(candidates.length, Math.max(0, Math.floor(settlement.population * (0.004 + settlement.unrest * 0.018))));
-    return {
-        settlementId: settlement.id,
-        destinationSettlementId: moveCount > 0 ? destination.id : undefined,
-        agentIds: candidates.slice(0, moveCount).map(agent => agent.id),
     };
 }
 
@@ -33147,6 +32469,14 @@ function legendEventHeadlineOr(event: LegendEvent | undefined, fallback: string)
     return event ? legendEventHeadline(event) : fallback;
 }
 
+function legendEventClause(event: LegendEvent): string {
+    return `"${sentenceFragment(legendEventHeadline(event))}"`;
+}
+
+function legendEventClauseOr(event: LegendEvent | undefined, fallback: string): string {
+    return event ? legendEventClause(event) : fallback;
+}
+
 function spillLegendEventText(simulation: CivilizationSimulation, event: LegendEvent): boolean {
     const store = simulation.legendEventTextSpillStore;
     if (!store) return false;
@@ -33353,12 +32683,14 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
         careers: [],
         roads: [],
         storyHooks: [],
+        storyHookEras: [],
         history: [],
         events: [],
         legendEvents: [],
         aliveAgentIds: [],
         legendRefCache: new Map(),
         lineageIndex: new Map(),
+        agentNameCounts: new Map(),
         compactedLegendEventRefCursor: 0,
         spilledLegendEventTextCursor: 0,
         legendEventTextSpillStore,
@@ -33406,6 +32738,7 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
         }
 
         let refreshedYear = snapshotEvery > 0 || shouldCaptureYear(0) ? 0 : -1;
+        let dramaManagerYear = -1;
         for (let i = 0; i < options.years; i++) {
             const stats = advanceOneYear(world, simulation, workerPool);
             const shouldCompactEventRefs = compactEventRefNamesAfter > 0
@@ -33433,6 +32766,11 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
             const shouldRefreshForProgress = shouldProgress;
             if (shouldSnapshot || shouldCapture || shouldRefreshForProgress) {
                 refreshDerivedCivilizationState(world, simulation, workerPool);
+                if (shouldRefreshForProgress) {
+                    simulation.storyHooks = timedPhase(simulation, "drama-manager", () => runDramaManager(simulation));
+                    simulation.storyHookEras.push({year: simulation.year, storyHooks: simulation.storyHooks});
+                    dramaManagerYear = simulation.year;
+                }
                 if (shouldSnapshot) simulation.history.push(createYearSnapshot(simulation, stats));
                 if (shouldCapture) runOptions.onCapture?.(simulation);
                 refreshedYear = simulation.year;
@@ -33463,7 +32801,10 @@ export function simulateCivilizations(world: GeneratedWorldMap, inputOptions: Ci
             }
         }
         if (refreshedYear !== simulation.year) refreshDerivedCivilizationState(world, simulation, workerPool);
-        simulation.storyHooks = timedPhase(simulation, "drama-manager", () => runDramaManager(simulation));
+        if (dramaManagerYear !== simulation.year) {
+            simulation.storyHooks = timedPhase(simulation, "drama-manager", () => runDramaManager(simulation));
+            simulation.storyHookEras.push({year: simulation.year, storyHooks: simulation.storyHooks});
+        }
         simulation.legendEventTextSpillStore?.flush();
     } finally {
         workerPool?.shutdown();
@@ -38691,11 +38032,56 @@ function buildMythsAndMagicRecords(simulation: CivilizationSimulation): MythsAnd
     return simulation.civilizations.map(civilization => mythicRecordsForCivilization(simulation, civilization));
 }
 
-export function exportLegends(simulation: CivilizationSimulation): LegendsExport {
+function exportStoryHook(hook: StoryHook): LegendsStoryHookExport {
+    return {
+        id: hook.id,
+        name: hook.name,
+        kind: hook.kind,
+        tone: hook.tone,
+        year: hook.year,
+        score: hook.score,
+        rawScore: hook.rawScore,
+        urgency: hook.urgency,
+        civilizationId: hook.civilizationId,
+        settlementId: hook.settlementId,
+        personId: hook.personId,
+        artifactId: hook.artifactId,
+        battleId: hook.battleId,
+        conflictId: hook.conflictId,
+        beliefId: hook.beliefId,
+        godId: hook.godId,
+        prophecyId: hook.prophecyId,
+        relationshipId: hook.relationshipId,
+        secretId: hook.secretId,
+        feudId: hook.feudId,
+        oathId: hook.oathId,
+        eventId: hook.eventId,
+        seedRefs: hook.seedRefs.map(ref => ({...ref})),
+        // subjectRefs intentionally mirrors seedRefs: the viewer's subject lists and
+        // the mentions/backlink indexer only read subjectRefs, while the story tools
+        // read seedRefs. Keep both populated.
+        subjectRefs: hook.seedRefs.map(ref => ({...ref})),
+        prompt: hook.prompt,
+        stakes: hook.stakes,
+        complication: hook.complication,
+        suggestedFocus: hook.suggestedFocus,
+        description: `${hook.prompt} ${hook.stakes} ${hook.complication}`,
+        eventIds: hook.eventIds,
+    };
+}
+
+export function exportLegendsSource(simulation: CivilizationSimulation, provenance?: {terrainSeed?: number; meshSeed?: number}): LegendsExportSource {
     const eventIds = buildExportEventIdIndex(simulation);
     const mythsAndMagic = buildMythsAndMagicRecords(simulation);
     return {
         schema: "world-map-legends-v1",
+        provenance: {
+            terrainSeed: provenance?.terrainSeed ?? null,
+            meshSeed: provenance?.meshSeed ?? null,
+            civilizationSeed: simulation.options.seed,
+            simulatedYear: simulation.year,
+            options: {...simulation.options},
+        },
         year: simulation.year,
         civilizationCount: simulation.civilizations.length,
         settlementCount: simulation.settlements.length,
@@ -38787,7 +38173,8 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
         lineageCount: simulation.lineages.length,
         eventCount: simulation.legendEvents.length,
         storyHookCount: simulation.storyHooks.length,
-        civilizations: simulation.civilizations.map(civ => ({
+        storyHookEraCount: simulation.storyHookEras.length,
+        civilizations: lazyLegendsCollection(simulation.civilizations, civ => ({
             id: civ.id,
             name: civ.name,
             color: civ.color,
@@ -38821,7 +38208,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             civilizationChapters: buildCivilizationChapters(simulation, civ),
             eventIds: exportEventIds(eventIds, "civilization", civ.id, civ.eventIds),
         })),
-        settlements: simulation.settlements.map(settlement => ({
+        settlements: lazyLegendsCollection(simulation.settlements, settlement => ({
             id: settlement.id,
             name: settlement.name,
             civilizationId: settlement.civilizationId,
@@ -38838,7 +38225,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             placeChapters: buildSettlementPlaceChapters(simulation, settlement),
             eventIds: exportEventIds(eventIds, "settlement", settlement.id, settlement.eventIds),
         })),
-        settlementControls: simulation.settlementControls.map(control => ({
+        settlementControls: lazyLegendsCollection(simulation.settlementControls, control => ({
             id: control.id,
             name: control.name,
             status: control.status,
@@ -38857,7 +38244,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: control.description,
             eventIds: exportEventIds(eventIds, "settlement-control", control.id, control.eventIds),
         })),
-        naturalFeatures: simulation.naturalFeatures.map(feature => ({
+        naturalFeatures: lazyLegendsCollection(simulation.naturalFeatures, feature => ({
             id: feature.id,
             name: feature.name,
             kind: feature.kind,
@@ -38876,7 +38263,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: feature.description,
             eventIds: exportEventIds(eventIds, "natural-feature", feature.id, feature.eventIds),
         })),
-        people: simulation.agents.map(agent => ({
+        people: lazyLegendsCollection(simulation.agents, agent => ({
             id: agent.id,
             name: agent.name,
             civilizationId: agent.civilizationId,
@@ -38962,7 +38349,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             lifeChapters: buildPersonLifeChapters(simulation, agent),
             eventIds: exportEventIds(eventIds, "person", agent.id, agent.eventIds),
         })),
-        ageMilestones: simulation.ageMilestones.map(milestone => ({
+        ageMilestones: lazyLegendsCollection(simulation.ageMilestones, milestone => ({
             id: milestone.id,
             name: milestone.name,
             kind: milestone.kind,
@@ -38982,7 +38369,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: milestone.description,
             eventIds: exportEventIds(eventIds, "age-milestone", milestone.id, milestone.eventIds),
         })),
-        appearanceFeatures: simulation.appearanceFeatures.map(feature => ({
+        appearanceFeatures: lazyLegendsCollection(simulation.appearanceFeatures, feature => ({
             id: feature.id,
             name: feature.name,
             kind: feature.kind,
@@ -39002,7 +38389,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: feature.description,
             eventIds: exportEventIds(eventIds, "appearance-feature", feature.id, feature.eventIds),
         })),
-        births: simulation.births.map(birth => ({
+        births: lazyLegendsCollection(simulation.births, birth => ({
             id: birth.id,
             name: birth.name,
             kind: birth.kind,
@@ -39021,7 +38408,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: birth.description,
             eventIds: exportEventIds(eventIds, "birth", birth.id, birth.eventIds),
         })),
-        epithets: simulation.epithets.map(epithet => ({
+        epithets: lazyLegendsCollection(simulation.epithets, epithet => ({
             id: epithet.id,
             name: epithet.name,
             epithet: epithet.epithet,
@@ -39037,7 +38424,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: epithet.description,
             eventIds: exportEventIds(eventIds, "epithet", epithet.id, epithet.eventIds),
         })),
-        reputationMilestones: simulation.reputationMilestones.map(milestone => ({
+        reputationMilestones: lazyLegendsCollection(simulation.reputationMilestones, milestone => ({
             id: milestone.id,
             name: milestone.name,
             kind: milestone.kind,
@@ -39056,7 +38443,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: milestone.description,
             eventIds: exportEventIds(eventIds, "reputation-milestone", milestone.id, milestone.eventIds),
         })),
-        preferences: simulation.preferences.map(preference => ({
+        preferences: lazyLegendsCollection(simulation.preferences, preference => ({
             id: preference.id,
             name: preference.name,
             kind: preference.kind,
@@ -39074,7 +38461,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: preference.description,
             eventIds: exportEventIds(eventIds, "preference", preference.id, preference.eventIds),
         })),
-        traditions: simulation.traditions.map(tradition => ({
+        traditions: lazyLegendsCollection(simulation.traditions, tradition => ({
             id: tradition.id,
             name: tradition.name,
             kind: tradition.kind,
@@ -39096,7 +38483,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: tradition.description,
             eventIds: exportEventIds(eventIds, "tradition", tradition.id, tradition.eventIds),
         })),
-        personAllegiances: simulation.personAllegiances.map(allegiance => ({
+        personAllegiances: lazyLegendsCollection(simulation.personAllegiances, allegiance => ({
             id: allegiance.id,
             name: allegiance.name,
             status: allegiance.status,
@@ -39116,7 +38503,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: allegiance.description,
             eventIds: exportEventIds(eventIds, "person-allegiance", allegiance.id, allegiance.eventIds),
         })),
-        organizations: simulation.organizations.map(organization => ({
+        organizations: lazyLegendsCollection(simulation.organizations, organization => ({
             id: organization.id,
             name: organization.name,
             kind: organization.kind,
@@ -39132,7 +38519,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             organizationChapters: buildOrganizationChapters(simulation, organization),
             eventIds: exportEventIds(eventIds, "organization", organization.id, organization.eventIds),
         })),
-        memberships: simulation.memberships.map(membership => ({
+        memberships: lazyLegendsCollection(simulation.memberships, membership => ({
             id: membership.id,
             name: membership.name,
             role: membership.role,
@@ -39153,7 +38540,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: membership.description,
             eventIds: exportEventIds(eventIds, "membership", membership.id, membership.eventIds),
         })),
-        organizationRanks: simulation.organizationRanks.map(rank => ({
+        organizationRanks: lazyLegendsCollection(simulation.organizationRanks, rank => ({
             id: rank.id,
             name: rank.name,
             kind: rank.kind,
@@ -39176,7 +38563,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: rank.description,
             eventIds: exportEventIds(eventIds, "organization-rank", rank.id, rank.eventIds),
         })),
-        relationships: simulation.socialBonds.map(bond => ({
+        relationships: lazyLegendsCollection(simulation.socialBonds, bond => ({
             id: bond.id,
             kind: bond.kind,
             agentIds: [...bond.agentIds],
@@ -39198,7 +38585,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             relationshipChapters: buildRelationshipChapters(simulation, bond),
             eventIds: exportEventIds(eventIds, "relationship", bond.id, bond.eventIds),
         })),
-        relationshipMilestones: simulation.relationshipMilestones.map(milestone => ({
+        relationshipMilestones: lazyLegendsCollection(simulation.relationshipMilestones, milestone => ({
             id: milestone.id,
             name: milestone.name,
             kind: milestone.kind,
@@ -39221,7 +38608,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: milestone.description,
             eventIds: exportEventIds(eventIds, "relationship-milestone", milestone.id, milestone.eventIds),
         })),
-        unions: simulation.unions.map(union => ({
+        unions: lazyLegendsCollection(simulation.unions, union => ({
             id: union.id,
             name: union.name,
             status: union.status,
@@ -39240,7 +38627,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: union.description,
             eventIds: exportEventIds(eventIds, "union", union.id, union.eventIds),
         })),
-        beliefs: simulation.beliefs.map(belief => ({
+        beliefs: lazyLegendsCollection(simulation.beliefs, belief => ({
             id: belief.id,
             name: belief.name,
             domain: belief.domain,
@@ -39264,7 +38651,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             civilizationGoalIds: [...belief.civilizationGoalIds],
             eventIds: exportEventIds(eventIds, "belief", belief.id, belief.eventIds),
         })),
-        mythsAndMagic: mythsAndMagic.map(record => ({
+        mythsAndMagic: lazyLegendsCollection(mythsAndMagic, record => ({
             ...record,
             beliefIds: [...record.beliefIds],
             godIds: [...record.godIds],
@@ -39285,7 +38672,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             subjectRefs: record.subjectRefs.map(ref => ({...ref})),
             eventIds: [...record.eventIds],
         })),
-        gods: simulation.gods.map(god => ({
+        gods: lazyLegendsCollection(simulation.gods, god => ({
             ...god,
             controlSpheres: [...god.controlSpheres],
             mythIds: [...god.mythIds],
@@ -39300,23 +38687,23 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             subjectRefs: god.subjectRefs.map(ref => ({...ref})),
             eventIds: exportEventIds(eventIds, "god", god.id, god.eventIds),
         })),
-        commandments: simulation.commandments.map(commandment => ({
+        commandments: lazyLegendsCollection(simulation.commandments, commandment => ({
             ...commandment,
             civilizationGoalIds: [...commandment.civilizationGoalIds],
             subjectRefs: commandment.subjectRefs.map(ref => ({...ref})),
             eventIds: exportEventIds(eventIds, "commandment", commandment.id, commandment.eventIds),
         })),
-        destinies: simulation.destinies.map(destiny => ({
+        destinies: lazyLegendsCollection(simulation.destinies, destiny => ({
             ...destiny,
             subjectRefs: destiny.subjectRefs.map(ref => ({...ref})),
             eventIds: exportEventIds(eventIds, "destiny", destiny.id, destiny.eventIds),
         })),
-        miracles: simulation.miracles.map(miracle => ({
+        miracles: lazyLegendsCollection(simulation.miracles, miracle => ({
             ...miracle,
             subjectRefs: miracle.subjectRefs.map(ref => ({...ref})),
             eventIds: exportEventIds(eventIds, "miracle", miracle.id, miracle.eventIds),
         })),
-        myths: simulation.myths.map(myth => ({
+        myths: lazyLegendsCollection(simulation.myths, myth => ({
             id: myth.id,
             name: myth.name,
             kind: myth.kind,
@@ -39331,7 +38718,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: myth.description,
             eventIds: exportEventIds(eventIds, "myth", myth.id, myth.eventIds),
         })),
-        doctrines: simulation.doctrines.map(doctrine => ({
+        doctrines: lazyLegendsCollection(simulation.doctrines, doctrine => ({
             id: doctrine.id,
             name: doctrine.name,
             kind: doctrine.kind,
@@ -39351,7 +38738,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: doctrine.description,
             eventIds: exportEventIds(eventIds, "doctrine", doctrine.id, doctrine.eventIds),
         })),
-        magicRoles: simulation.magicRoles.map(role => ({
+        magicRoles: lazyLegendsCollection(simulation.magicRoles, role => ({
             id: role.id,
             name: role.name,
             kind: role.kind,
@@ -39371,7 +38758,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: role.description,
             eventIds: exportEventIds(eventIds, "magic-role", role.id, role.eventIds),
         })),
-        prophecies: simulation.prophecies.map(prophecy => ({
+        prophecies: lazyLegendsCollection(simulation.prophecies, prophecy => ({
             id: prophecy.id,
             name: prophecy.name,
             kind: prophecy.kind,
@@ -39398,7 +38785,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: prophecy.description,
             eventIds: exportEventIds(eventIds, "prophecy", prophecy.id, prophecy.eventIds),
         })),
-        civilizationGoals: simulation.civilizationGoals.map(goal => ({
+        civilizationGoals: lazyLegendsCollection(simulation.civilizationGoals, goal => ({
             id: goal.id,
             name: goal.name,
             kind: goal.kind,
@@ -39425,7 +38812,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: goal.description,
             eventIds: exportEventIds(eventIds, "civilization-goal", goal.id, goal.eventIds),
         })),
-        sacredSites: simulation.sacredSites.map(site => ({
+        sacredSites: lazyLegendsCollection(simulation.sacredSites, site => ({
             id: site.id,
             name: site.name,
             kind: site.kind,
@@ -39447,7 +38834,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: site.description,
             eventIds: exportEventIds(eventIds, "sacred-site", site.id, site.eventIds),
         })),
-        beliefAdherences: simulation.beliefAdherences.map(adherence => ({
+        beliefAdherences: lazyLegendsCollection(simulation.beliefAdherences, adherence => ({
             id: adherence.id,
             name: adherence.name,
             status: adherence.status,
@@ -39464,7 +38851,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: adherence.description,
             eventIds: exportEventIds(eventIds, "belief-adherence", adherence.id, adherence.eventIds),
         })),
-        offices: simulation.offices.map(office => ({
+        offices: lazyLegendsCollection(simulation.offices, office => ({
             id: office.id,
             name: office.name,
             kind: office.kind,
@@ -39476,7 +38863,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             termIds: [...office.termIds],
             eventIds: exportEventIds(eventIds, "office", office.id, office.eventIds),
         })),
-        officeTerms: simulation.officeTerms.map(term => ({
+        officeTerms: lazyLegendsCollection(simulation.officeTerms, term => ({
             id: term.id,
             name: term.name,
             status: term.status,
@@ -39495,7 +38882,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: term.description,
             eventIds: exportEventIds(eventIds, "office-term", term.id, term.eventIds),
         })),
-        laws: simulation.laws.map(law => ({
+        laws: lazyLegendsCollection(simulation.laws, law => ({
             id: law.id,
             name: law.name,
             domain: law.domain,
@@ -39507,7 +38894,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             strictness: law.strictness,
             eventIds: exportEventIds(eventIds, "law", law.id, law.eventIds),
         })),
-        cases: simulation.cases.map(legalCase => ({
+        cases: lazyLegendsCollection(simulation.cases, legalCase => ({
             id: legalCase.id,
             name: legalCase.name,
             kind: legalCase.kind,
@@ -39526,7 +38913,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             verdict: legalCase.verdict,
             eventIds: exportEventIds(eventIds, "case", legalCase.id, legalCase.eventIds),
         })),
-        testimonies: simulation.testimonies.map(testimony => ({
+        testimonies: lazyLegendsCollection(simulation.testimonies, testimony => ({
             id: testimony.id,
             name: testimony.name,
             kind: testimony.kind,
@@ -39552,7 +38939,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: testimony.description,
             eventIds: exportEventIds(eventIds, "testimony", testimony.id, testimony.eventIds),
         })),
-        conflicts: simulation.conflicts.map(conflict => ({
+        conflicts: lazyLegendsCollection(simulation.conflicts, conflict => ({
             id: conflict.id,
             name: conflict.name,
             kind: conflict.kind,
@@ -39575,7 +38962,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             conflictChapters: buildConflictChapters(simulation, conflict),
             eventIds: exportEventIds(eventIds, "conflict", conflict.id, conflict.eventIds),
         })),
-        battles: simulation.battles.map(battle => ({
+        battles: lazyLegendsCollection(simulation.battles, battle => ({
             id: battle.id,
             name: battle.name,
             kind: battle.kind,
@@ -39606,7 +38993,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             battleChapters: buildBattleChapters(simulation, battle),
             eventIds: exportEventIds(eventIds, "battle", battle.id, battle.eventIds),
         })),
-        battleParticipations: simulation.battleParticipations.map(participation => ({
+        battleParticipations: lazyLegendsCollection(simulation.battleParticipations, participation => ({
             id: participation.id,
             name: participation.name,
             side: participation.side,
@@ -39626,7 +39013,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: participation.description,
             eventIds: exportEventIds(eventIds, "battle-participation", participation.id, participation.eventIds),
         })),
-        militaryUnits: simulation.militaryUnits.map(unit => ({
+        militaryUnits: lazyLegendsCollection(simulation.militaryUnits, unit => ({
             id: unit.id,
             name: unit.name,
             kind: unit.kind,
@@ -39654,7 +39041,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: unit.description,
             eventIds: exportEventIds(eventIds, "military-unit", unit.id, unit.eventIds),
         })),
-        equipmentCaches: simulation.equipmentCaches.map(cache => ({
+        equipmentCaches: lazyLegendsCollection(simulation.equipmentCaches, cache => ({
             id: cache.id,
             name: cache.name,
             kind: cache.kind,
@@ -39672,7 +39059,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: cache.description,
             eventIds: exportEventIds(eventIds, "equipment-cache", cache.id, cache.eventIds),
         })),
-        spyNetworks: simulation.spyNetworks.map(network => ({
+        spyNetworks: lazyLegendsCollection(simulation.spyNetworks, network => ({
             id: network.id,
             name: network.name,
             status: network.status,
@@ -39695,7 +39082,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: network.description,
             eventIds: exportEventIds(eventIds, "spy-network", network.id, network.eventIds),
         })),
-        spyOperations: simulation.spyOperations.map(operation => ({
+        spyOperations: lazyLegendsCollection(simulation.spyOperations, operation => ({
             id: operation.id,
             name: operation.name,
             kind: operation.kind,
@@ -39716,7 +39103,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: operation.description,
             eventIds: exportEventIds(eventIds, "spy-operation", operation.id, operation.eventIds),
         })),
-        injuries: simulation.injuries.map(injury => ({
+        injuries: lazyLegendsCollection(simulation.injuries, injury => ({
             id: injury.id,
             name: injury.name,
             kind: injury.kind,
@@ -39735,7 +39122,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             careRecordIds: [...injury.careRecordIds],
             eventIds: exportEventIds(eventIds, "injury", injury.id, injury.eventIds),
         })),
-        illnesses: simulation.illnesses.map(illness => ({
+        illnesses: lazyLegendsCollection(simulation.illnesses, illness => ({
             id: illness.id,
             name: illness.name,
             kind: illness.kind,
@@ -39758,7 +39145,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: illness.description,
             eventIds: exportEventIds(eventIds, "illness", illness.id, illness.eventIds),
         })),
-        careRecords: simulation.careRecords.map(care => ({
+        careRecords: lazyLegendsCollection(simulation.careRecords, care => ({
             id: care.id,
             name: care.name,
             kind: care.kind,
@@ -39780,7 +39167,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: care.description,
             eventIds: exportEventIds(eventIds, "care-record", care.id, care.eventIds),
         })),
-        woundLegacies: simulation.woundLegacies.map(legacy => ({
+        woundLegacies: lazyLegendsCollection(simulation.woundLegacies, legacy => ({
             id: legacy.id,
             name: legacy.name,
             kind: legacy.kind,
@@ -39805,7 +39192,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: legacy.description,
             eventIds: exportEventIds(eventIds, "wound-legacy", legacy.id, legacy.eventIds),
         })),
-        memorials: simulation.memorials.map(memorial => ({
+        memorials: lazyLegendsCollection(simulation.memorials, memorial => ({
             id: memorial.id,
             name: memorial.name,
             kind: memorial.kind,
@@ -39820,7 +39207,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             inscription: memorial.inscription,
             eventIds: exportEventIds(eventIds, "memorial", memorial.id, memorial.eventIds),
         })),
-        burials: simulation.burials.map(burial => ({
+        burials: lazyLegendsCollection(simulation.burials, burial => ({
             id: burial.id,
             name: burial.name,
             kind: burial.kind,
@@ -39842,7 +39229,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: burial.description,
             eventIds: exportEventIds(eventIds, "burial", burial.id, burial.eventIds),
         })),
-        deathRecords: simulation.deathRecords.map(record => ({
+        deathRecords: lazyLegendsCollection(simulation.deathRecords, record => ({
             id: record.id,
             name: record.name,
             kind: record.kind,
@@ -39866,7 +39253,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: record.description,
             eventIds: exportEventIds(eventIds, "death-record", record.id, record.eventIds),
         })),
-        ambitions: simulation.ambitions.map(ambition => ({
+        ambitions: lazyLegendsCollection(simulation.ambitions, ambition => ({
             id: ambition.id,
             name: ambition.name,
             kind: ambition.kind,
@@ -39894,7 +39281,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: ambition.description,
             eventIds: exportEventIds(eventIds, "ambition", ambition.id, ambition.eventIds),
         })),
-        apprenticeships: simulation.apprenticeships.map(apprenticeship => ({
+        apprenticeships: lazyLegendsCollection(simulation.apprenticeships, apprenticeship => ({
             id: apprenticeship.id,
             name: apprenticeship.name,
             status: apprenticeship.status,
@@ -39911,7 +39298,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             lineageId: apprenticeship.lineageId,
             eventIds: exportEventIds(eventIds, "apprenticeship", apprenticeship.id, apprenticeship.eventIds),
         })),
-        skills: simulation.skills.map(skill => ({
+        skills: lazyLegendsCollection(simulation.skills, skill => ({
             id: skill.id,
             name: skill.name,
             specialty: skill.specialty,
@@ -39930,7 +39317,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: skill.description,
             eventIds: exportEventIds(eventIds, "skill", skill.id, skill.eventIds),
         })),
-        residences: simulation.residences.map(residence => ({
+        residences: lazyLegendsCollection(simulation.residences, residence => ({
             id: residence.id,
             name: residence.name,
             status: residence.status,
@@ -39948,7 +39335,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: residence.description,
             eventIds: exportEventIds(eventIds, "residence", residence.id, residence.eventIds),
         })),
-        careers: simulation.careers.map(career => ({
+        careers: lazyLegendsCollection(simulation.careers, career => ({
             id: career.id,
             name: career.name,
             profession: career.profession,
@@ -39970,7 +39357,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: career.description,
             eventIds: exportEventIds(eventIds, "career", career.id, career.eventIds),
         })),
-        journeys: simulation.journeys.map(journey => ({
+        journeys: lazyLegendsCollection(simulation.journeys, journey => ({
             id: journey.id,
             name: journey.name,
             kind: journey.kind,
@@ -39989,7 +39376,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             distance: Math.round(journey.distance * 100) / 100,
             eventIds: exportEventIds(eventIds, "journey", journey.id, journey.eventIds),
         })),
-        roads: simulation.roads.map(road => ({
+        roads: lazyLegendsCollection(simulation.roads, road => ({
             id: road.id,
             civilizationId: road.civilizationId,
             type: road.type,
@@ -40007,7 +39394,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             roadChapters: buildRoadChapters(simulation, road),
             eventIds: roadTimelineEventIds(eventIds, simulation, road),
         })),
-        households: simulation.households.map(household => ({
+        households: lazyLegendsCollection(simulation.households, household => ({
             id: household.id,
             name: household.name,
             civilizationId: household.civilizationId,
@@ -40021,7 +39408,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             householdChapters: buildHouseholdChapters(simulation, household),
             eventIds: exportEventIds(eventIds, "household", household.id, household.eventIds),
         })),
-        lineages: simulation.lineages.map(lineage => ({
+        lineages: lazyLegendsCollection(simulation.lineages, lineage => ({
             id: lineage.id,
             name: lineage.name,
             familyName: lineage.familyName,
@@ -40034,7 +39421,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             lineageChapters: buildLineageChapters(simulation, lineage),
             eventIds: exportEventIds(eventIds, "lineage", lineage.id, lineage.eventIds),
         })),
-        structures: simulation.structures.map(structure => ({
+        structures: lazyLegendsCollection(simulation.structures, structure => ({
             id: structure.id,
             name: structure.name,
             kind: structure.kind,
@@ -40052,7 +39439,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             structureChapters: buildStructureChapters(simulation, structure),
             eventIds: exportEventIds(eventIds, "structure", structure.id, structure.eventIds),
         })),
-        artifacts: simulation.artifacts.map(artifact => ({
+        artifacts: lazyLegendsCollection(simulation.artifacts, artifact => ({
             id: artifact.id,
             name: artifact.name,
             kind: artifact.kind,
@@ -40081,7 +39468,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             artifactChapters: buildArtifactChapters(simulation, artifact),
             eventIds: exportEventIds(eventIds, "artifact", artifact.id, artifact.eventIds),
         })),
-        artifactConditions: simulation.artifactConditions.map(record => ({
+        artifactConditions: lazyLegendsCollection(simulation.artifactConditions, record => ({
             id: record.id,
             name: record.name,
             kind: record.kind,
@@ -40100,7 +39487,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: record.description,
             eventIds: exportEventIds(eventIds, "artifact-condition", record.id, record.eventIds),
         })),
-        chronicles: simulation.chronicles.map(chronicle => ({
+        chronicles: lazyLegendsCollection(simulation.chronicles, chronicle => ({
             id: chronicle.id,
             name: chronicle.name,
             kind: chronicle.kind,
@@ -40114,7 +39501,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             subjectRefs: chronicle.subjectRefs.map(ref => ({...ref})),
             eventIds: exportEventIds(eventIds, "chronicle", chronicle.id, chronicle.eventIds),
         })),
-        writtenWorks: simulation.writtenWorks.map(work => ({
+        writtenWorks: lazyLegendsCollection(simulation.writtenWorks, work => ({
             id: work.id,
             name: work.name,
             kind: work.kind,
@@ -40133,7 +39520,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: work.description,
             eventIds: exportEventIds(eventIds, "written-work", work.id, work.eventIds),
         })),
-        memories: simulation.memories.map(memory => ({
+        memories: lazyLegendsCollection(simulation.memories, memory => ({
             id: memory.id,
             name: memory.name,
             year: memory.year,
@@ -40148,7 +39535,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: memory.description,
             eventIds: exportEventIds(eventIds, "memory", memory.id, memory.eventIds),
         })),
-        thoughts: simulation.thoughts.map(thought => ({
+        thoughts: lazyLegendsCollection(simulation.thoughts, thought => ({
             id: thought.id,
             name: thought.name,
             kind: thought.kind,
@@ -40170,7 +39557,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: thought.description,
             eventIds: exportEventIds(eventIds, "thought", thought.id, thought.eventIds),
         })),
-        personalityShifts: simulation.personalityShifts.map(shift => ({
+        personalityShifts: lazyLegendsCollection(simulation.personalityShifts, shift => ({
             id: shift.id,
             name: shift.name,
             kind: shift.kind,
@@ -40187,7 +39574,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: shift.description,
             eventIds: exportEventIds(eventIds, "personality-shift", shift.id, shift.eventIds),
         })),
-        needEpisodes: simulation.needEpisodes.map(episode => ({
+        needEpisodes: lazyLegendsCollection(simulation.needEpisodes, episode => ({
             id: episode.id,
             name: episode.name,
             kind: episode.kind,
@@ -40216,7 +39603,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: episode.description,
             eventIds: exportEventIds(eventIds, "need-episode", episode.id, episode.eventIds),
         })),
-        opinions: simulation.opinions.map(opinion => ({
+        opinions: lazyLegendsCollection(simulation.opinions, opinion => ({
             id: opinion.id,
             name: opinion.name,
             kind: opinion.kind,
@@ -40234,7 +39621,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: opinion.description,
             eventIds: exportEventIds(eventIds, "opinion", opinion.id, opinion.eventIds),
         })),
-        socialClaims: simulation.socialClaims.map(claim => ({
+        socialClaims: lazyLegendsCollection(simulation.socialClaims, claim => ({
             id: claim.id,
             name: claim.name,
             kind: claim.kind,
@@ -40254,7 +39641,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: claim.description,
             eventIds: exportEventIds(eventIds, "social-claim", claim.id, claim.eventIds),
         })),
-        conversations: simulation.conversations.map(conversation => ({
+        conversations: lazyLegendsCollection(simulation.conversations, conversation => ({
             id: conversation.id,
             name: conversation.name,
             kind: conversation.kind,
@@ -40278,7 +39665,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: conversation.description,
             eventIds: exportEventIds(eventIds, "conversation", conversation.id, conversation.eventIds),
         })),
-        rumors: simulation.rumors.map(rumor => ({
+        rumors: lazyLegendsCollection(simulation.rumors, rumor => ({
             id: rumor.id,
             name: rumor.name,
             kind: rumor.kind,
@@ -40295,7 +39682,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: rumor.description,
             eventIds: exportEventIds(eventIds, "rumor", rumor.id, rumor.eventIds),
         })),
-        secrets: simulation.secrets.map(secret => ({
+        secrets: lazyLegendsCollection(simulation.secrets, secret => ({
             id: secret.id,
             name: secret.name,
             kind: secret.kind,
@@ -40312,7 +39699,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: secret.description,
             eventIds: exportEventIds(eventIds, "secret", secret.id, secret.eventIds),
         })),
-        schemes: simulation.schemes.map(scheme => ({
+        schemes: lazyLegendsCollection(simulation.schemes, scheme => ({
             id: scheme.id,
             name: scheme.name,
             kind: scheme.kind,
@@ -40340,7 +39727,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: scheme.description,
             eventIds: exportEventIds(eventIds, "scheme", scheme.id, scheme.eventIds),
         })),
-        feuds: simulation.feuds.map(feud => ({
+        feuds: lazyLegendsCollection(simulation.feuds, feud => ({
             id: feud.id,
             name: feud.name,
             kind: feud.kind,
@@ -40360,7 +39747,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: feud.description,
             eventIds: exportEventIds(eventIds, "feud", feud.id, feud.eventIds),
         })),
-        oaths: simulation.oaths.map(oath => ({
+        oaths: lazyLegendsCollection(simulation.oaths, oath => ({
             id: oath.id,
             name: oath.name,
             kind: oath.kind,
@@ -40386,7 +39773,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: oath.description,
             eventIds: exportEventIds(eventIds, "oath", oath.id, oath.eventIds),
         })),
-        ceremonies: simulation.ceremonies.map(ceremony => ({
+        ceremonies: lazyLegendsCollection(simulation.ceremonies, ceremony => ({
             id: ceremony.id,
             name: ceremony.name,
             kind: ceremony.kind,
@@ -40406,7 +39793,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: ceremony.description,
             eventIds: exportEventIds(eventIds, "ceremony", ceremony.id, ceremony.eventIds),
         })),
-        ceremonyParticipations: simulation.ceremonyParticipations.map(participation => ({
+        ceremonyParticipations: lazyLegendsCollection(simulation.ceremonyParticipations, participation => ({
             id: participation.id,
             name: participation.name,
             role: participation.role,
@@ -40427,7 +39814,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: participation.description,
             eventIds: exportEventIds(eventIds, "ceremony-participation", participation.id, participation.eventIds),
         })),
-        activities: simulation.activities.map(activity => ({
+        activities: lazyLegendsCollection(simulation.activities, activity => ({
             id: activity.id,
             name: activity.name,
             kind: activity.kind,
@@ -40446,7 +39833,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: activity.description,
             eventIds: exportEventIds(eventIds, "activity", activity.id, activity.eventIds),
         })),
-        teachings: simulation.teachings.map(teaching => ({
+        teachings: lazyLegendsCollection(simulation.teachings, teaching => ({
             id: teaching.id,
             name: teaching.name,
             kind: teaching.kind,
@@ -40470,7 +39857,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: teaching.description,
             eventIds: exportEventIds(eventIds, "teaching", teaching.id, teaching.eventIds),
         })),
-        projects: simulation.projects.map(project => ({
+        projects: lazyLegendsCollection(simulation.projects, project => ({
             id: project.id,
             name: project.name,
             kind: project.kind,
@@ -40499,7 +39886,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: project.description,
             eventIds: exportEventIds(eventIds, "project", project.id, project.eventIds),
         })),
-        projectParticipations: simulation.projectParticipations.map(participation => ({
+        projectParticipations: lazyLegendsCollection(simulation.projectParticipations, participation => ({
             id: participation.id,
             name: participation.name,
             role: participation.role,
@@ -40524,7 +39911,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: participation.description,
             eventIds: exportEventIds(eventIds, "project-participation", participation.id, participation.eventIds),
         })),
-        obligations: simulation.obligations.map(obligation => ({
+        obligations: lazyLegendsCollection(simulation.obligations, obligation => ({
             id: obligation.id,
             name: obligation.name,
             kind: obligation.kind,
@@ -40548,7 +39935,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: obligation.description,
             eventIds: exportEventIds(eventIds, "obligation", obligation.id, obligation.eventIds),
         })),
-        holdings: simulation.holdings.map(holding => ({
+        holdings: lazyLegendsCollection(simulation.holdings, holding => ({
             id: holding.id,
             name: holding.name,
             kind: holding.kind,
@@ -40569,7 +39956,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: holding.description,
             eventIds: exportEventIds(eventIds, "holding", holding.id, holding.eventIds),
         })),
-        belongings: simulation.belongings.map(belonging => ({
+        belongings: lazyLegendsCollection(simulation.belongings, belonging => ({
             id: belonging.id,
             name: belonging.name,
             kind: belonging.kind,
@@ -40592,7 +39979,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: belonging.description,
             eventIds: exportEventIds(eventIds, "belonging", belonging.id, belonging.eventIds),
         })),
-        possessionAttachments: simulation.possessionAttachments.map(attachment => ({
+        possessionAttachments: lazyLegendsCollection(simulation.possessionAttachments, attachment => ({
             id: attachment.id,
             name: attachment.name,
             kind: attachment.kind,
@@ -40611,7 +39998,7 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
             description: attachment.description,
             eventIds: exportEventIds(eventIds, "possession-attachment", attachment.id, attachment.eventIds),
         })),
-        estates: simulation.estates.map(estate => ({
+        estates: lazyLegendsCollection(simulation.estates, estate => ({
             id: estate.id,
             name: estate.name,
             year: estate.year,
@@ -40643,42 +40030,25 @@ export function exportLegends(simulation: CivilizationSimulation): LegendsExport
                 ...exportEventIds(eventIds, "estate", estate.id, estate.eventIds),
             ], 32),
         })),
-        storyHooks: simulation.storyHooks.map(hook => ({
-            id: hook.id,
-            name: hook.name,
-            kind: hook.kind,
-            tone: hook.tone,
-            year: hook.year,
-            score: hook.score,
-            urgency: hook.urgency,
-            civilizationId: hook.civilizationId,
-            settlementId: hook.settlementId,
-            personId: hook.personId,
-            artifactId: hook.artifactId,
-            battleId: hook.battleId,
-            conflictId: hook.conflictId,
-            beliefId: hook.beliefId,
-            godId: hook.godId,
-            prophecyId: hook.prophecyId,
-            relationshipId: hook.relationshipId,
-            secretId: hook.secretId,
-            feudId: hook.feudId,
-            oathId: hook.oathId,
-            eventId: hook.eventId,
-            seedRefs: hook.seedRefs.map(ref => ({...ref})),
-            subjectRefs: hook.seedRefs.map(ref => ({...ref})),
-            prompt: hook.prompt,
-            stakes: hook.stakes,
-            complication: hook.complication,
-            suggestedFocus: hook.suggestedFocus,
-            description: `${hook.prompt} ${hook.stakes} ${hook.complication}`,
-            eventIds: hook.eventIds,
+        storyHooks: lazyLegendsCollection(simulation.storyHooks, exportStoryHook),
+        storyHookEras: lazyLegendsCollection(simulation.storyHookEras, era => ({
+            year: era.year,
+            storyHooks: era.storyHooks.map(exportStoryHook),
         })),
-        events: simulation.legendEvents.map(event => ({
+        events: lazyLegendsCollection(simulation.legendEvents, event => ({
             ...event,
             headline: legendEventHeadline(event),
             description: legendEventDescription(event),
             entityRefs: eventEntityRefsForExport(simulation, event),
         })),
     };
+}
+
+export function exportLegends(simulation: CivilizationSimulation, provenance?: {terrainSeed?: number; meshSeed?: number}): LegendsExport {
+    const source = exportLegendsSource(simulation, provenance);
+    const legends: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(source)) {
+        legends[key] = isLegendsCollection(value) ? materializeLegendsCollection(value as LegendsCollection<unknown>) : value;
+    }
+    return legends as unknown as LegendsExport;
 }

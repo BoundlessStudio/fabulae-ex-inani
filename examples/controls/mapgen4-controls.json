@@ -1,4 +1,7 @@
 {
+  "mesh": {
+    "seed": 12345
+  },
   "elevation": {
     "seed": 187,
     "island": 0.5,

@@ -23,7 +23,8 @@
         "outline:stories": "npm run build && node dist/world-mapgen.cjs outline-stories",
         "smoke": "npm run build && node dist/world-mapgen.cjs generate --size 64 --controls examples/controls/simulation-controls.example.json --civilizations 1 --years 1 --civ-workers 1 --out output/smoke/map.png --civ-json output/smoke/civilizations.json",
         "check": "npm run typecheck && npm run build",
-        "test": "npm run check",
+        "test": "npm run check && npm run test:determinism",
+        "test:determinism": "node dist/world-mapgen.cjs generate --size 64 --controls examples/controls/simulation-controls.example.json --civilizations 2 --years 40 --civ-seed 77 --civ-profile-json output/determinism/default.json --out output/determinism/default.png && node dist/world-mapgen.cjs generate --size 64 --controls examples/controls/simulation-controls.example.json --civilizations 2 --years 40 --civ-seed 77 --civ-workers 1 --civ-profile-json output/determinism/one-worker.json --out output/determinism/one-worker.png && node dist/world-mapgen.cjs compare-civ-profiles output/determinism/default.json output/determinism/one-worker.json",
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {

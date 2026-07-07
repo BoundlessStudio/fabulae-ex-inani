@@ -4,12 +4,15 @@
         "module": "ESNext",
         "moduleResolution": "Bundler",
         "allowImportingTsExtensions": true,
+        "allowSyntheticDefaultImports": true,
+        "allowJs": true,
+        "checkJs": true,
         "noEmit": true,
         "strict": false,
         "lib": ["ES2022"],
         "skipLibCheck": true,
         "types": ["node"]
     },
-    "include": ["src/**/*.ts", "dependencies/dual-mesh/**/*.ts"],
+    "include": ["src/**/*.ts", "dependencies/dual-mesh/**/*.ts", "scripts/**/*.mjs"],
     "exclude": ["node_modules", "build", "dist", "output", "public/build"]
 }
