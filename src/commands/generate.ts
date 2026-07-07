@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
-import {spawnSync} from "node:child_process";
 import {PNG} from "pngjs";
 import {
+    assertValidControlOverrides,
     defaultControlValues,
     isKnownControl,
     isUnlockedControl,
@@ -29,6 +29,7 @@ import {
     type LegendsExportSource,
     type StoryHookKind,
 } from "../simulation/civilizations.ts";
+import {writeSnapshotGif} from "./snapshot-gif.ts";
 
 const defaultEventRefNameRetentionYears = 30;
 const defaultEventRefCompactionIntervalYears = 5;
@@ -80,6 +81,7 @@ Usage:
 
 Commands:
   generate                 Generate a PNG map. This is the default command.
+  publish-legends          Move or copy the latest Legends output into published/.
   serve-legends            Serve a generated Legends viewer directory.
   verify-legends           Verify a Legends archive and optional viewer output.
   compare-civ-profiles     Compare two civilization profile JSON files.
@@ -209,6 +211,13 @@ function setControlOverride(overrides: ControlOverrides, assignment: string) {
     overrides[phase]![name] = value;
 }
 
+function readControlOverridesFile(filePath: string): ControlOverrides {
+    const controlsPath = path.resolve(filePath);
+    const parsed = JSON.parse(fs.readFileSync(controlsPath, "utf8"));
+    assertValidControlOverrides(parsed, controlsPath);
+    return parsed;
+}
+
 function parseArgs(argv: string[]): CliOptions {
     let options: CliOptions = {
         out: "output/mapgen4.png",
@@ -261,10 +270,9 @@ function parseArgs(argv: string[]): CliOptions {
             i = result.nextIndex;
         } else if (arg === "--controls" || arg.startsWith("--controls=")) {
             const result = readValue(argv, i, "--controls");
-            const controlsPath = path.resolve(result.value);
             options.controls = mergeControlOverrides(
                 options.controls,
-                JSON.parse(fs.readFileSync(controlsPath, "utf8")) as ControlOverrides,
+                readControlOverridesFile(result.value),
             );
             i = result.nextIndex;
         } else if (arg === "--civilizations" || arg === "--civs" || arg.startsWith("--civilizations=") || arg.startsWith("--civs=")) {
@@ -396,7 +404,7 @@ function parseArgs(argv: string[]): CliOptions {
         } else if (arg.toLowerCase().endsWith(".json")) {
             options.controls = mergeControlOverrides(
                 options.controls,
-                JSON.parse(fs.readFileSync(path.resolve(arg), "utf8")) as ControlOverrides,
+                readControlOverridesFile(arg),
             );
         } else if (/^\d+$/.test(arg)) {
             options.width = options.height = parsePositiveInteger(arg, "size");
@@ -505,63 +513,6 @@ function civilizationOptions(options: CliOptions, years = options.civilizationYe
 
 function resolvedCivilizationWorkerCount(options: CliOptions): number {
     return options.civilizationWorkers ?? defaultCivilizationWorkerCount(options.civilizations);
-}
-
-function commandExists(command: string): boolean {
-    const result = process.platform === "win32"
-        ? spawnSync("where.exe", [command], {stdio: "ignore"})
-        : spawnSync("sh", ["-lc", `command -v ${command}`], {stdio: "ignore"});
-    return result.status === 0;
-}
-
-function writeSnapshotGif(mapsDir: string, gifPath: string, fps: number) {
-    const outputPath = path.resolve(gifPath);
-    fs.mkdirSync(path.dirname(outputPath), {recursive: true});
-
-    if (commandExists("ffmpeg")) {
-        const inputPattern = path.join(mapsDir, "year-%03d.png");
-        const result = spawnSync("ffmpeg", [
-            "-y",
-            "-framerate",
-            String(fps),
-            "-i",
-            inputPattern,
-            "-vf",
-            "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3",
-            outputPath,
-        ], {stdio: "inherit"});
-        if (result.status !== 0) {
-            throw new Error(`ffmpeg failed to write ${outputPath}`);
-        }
-        console.log(`Wrote ${outputPath}`);
-        return;
-    }
-
-    if (commandExists("magick")) {
-        const framePaths = fs.readdirSync(mapsDir)
-            .filter(name => /^year-\d+\.png$/.test(name))
-            .sort()
-            .map(name => path.join(mapsDir, name));
-        if (framePaths.length === 0) {
-            throw new Error(`No snapshot PNG frames found in ${mapsDir}`);
-        }
-        const delay = Math.max(1, Math.round(100 / fps));
-        const result = spawnSync("magick", [
-            "-delay",
-            String(delay),
-            "-loop",
-            "0",
-            ...framePaths,
-            outputPath,
-        ], {stdio: "inherit"});
-        if (result.status !== 0) {
-            throw new Error(`ImageMagick failed to write ${outputPath}`);
-        }
-        console.log(`Wrote ${outputPath}`);
-        return;
-    }
-
-    throw new Error("Cannot write --snapshot-gif because neither ffmpeg nor ImageMagick magick is available on PATH");
 }
 
 function escapeJsonForHtml(json: string): string {

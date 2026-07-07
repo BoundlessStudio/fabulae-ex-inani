@@ -34,13 +34,14 @@ npm run clean
 
 - `npm run build`: bundles `src/console.ts` to `dist/world-mapgen.cjs`.
 - `npm run check`: runs TypeScript checking and a production bundle.
-- `npm test`: aliases `npm run check`.
+- `npm test`: runs `npm run check`, compact profile determinism, and Legends archive/chunk determinism.
 - `npm run clean`: removes generated build artifacts. Pass `-- --output` to also remove generated output files.
 
 After `npm run build`, the bundled console owns the runtime tools:
 
 ```sh
 node dist/world-mapgen.cjs verify-legends output/legends/legends.json output/legends
+node dist/world-mapgen.cjs publish-legends output/legends
 node dist/world-mapgen.cjs compare-civ-profiles output/default.json output/one-worker.json
 node dist/world-mapgen.cjs evaluate-story-hooks --input output/stress-probes/probe-500-final.json
 node dist/world-mapgen.cjs outline-stories --cards-dir output/story-hook-report-cards/cards
@@ -77,6 +78,15 @@ Verify a generated Legends archive:
 ```sh
 node dist/world-mapgen.cjs verify-legends output/legends/legends.json output/legends
 ```
+
+Publish a run for GitHub Pages:
+
+```sh
+npm run generate -- --size 640 --controls examples/controls/simulation-controls.example.json --civilizations 5 --years 100 --civ-seed 77 --out output/legends/map.png --legends-json output/legends/legends.json --legends-html output/legends/index.html --snapshot-dir output/legends/snapshots --snapshot-every 1 --snapshot-render-every 1 --snapshot-gif output/legends/map.gif
+node dist/world-mapgen.cjs publish-legends output/legends
+```
+
+`publish-legends` moves the generated output into `published/sim-YY-MM-DD-HH-MM-seed-###`, normalizes `map.png` to `640x640`, creates `map.gif` and `world.gif`, turns the run root `index.html` into a summary landing page, keeps the wiki viewer at `legends.html`, and regenerates `published/index.html`.
 
 ## Repository Layout
 

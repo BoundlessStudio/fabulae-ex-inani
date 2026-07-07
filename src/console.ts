@@ -3,6 +3,7 @@ import {runCompareCivProfilesCommand} from "./commands/compare-civ-profiles.ts";
 import {runCreateStoryOutlinesCommand} from "./commands/create-story-outlines.ts";
 import {runEvaluateStoryHooksCommand} from "./commands/evaluate-story-hooks.ts";
 import {printGenerateHelp, runGenerateCommand} from "./commands/generate.ts";
+import {runPublishLegendsCommand} from "./commands/publish-legends.ts";
 import {runServeStaticCommand} from "./commands/serve-static.ts";
 import {runVerifyLegendsCommand} from "./commands/verify-legends.ts";
 
@@ -32,6 +33,10 @@ async function main(argv = process.argv.slice(2)) {
         case "outline-stories":
         case "create-story-outlines":
             await runCreateStoryOutlinesCommand(rest);
+            return;
+        case "publish-legends":
+        case "publish-run":
+            runPublishLegendsCommand(rest);
             return;
         case "clean":
             runCleanCommand(rest);

@@ -13,6 +13,10 @@ export type ControlSpec = {
 
 export type ControlValues = Record<ControlPhase, Record<string, number>>;
 export type ControlOverrides = Partial<Record<ControlPhase, Record<string, number>>>;
+export type ControlOverrideIssue = {
+    key: string;
+    reason: string;
+};
 
 export const controlPhaseNames: ControlPhase[] = mapgen4ControlPhaseNames;
 
@@ -104,6 +108,54 @@ export function mergeControlOverrides(...overrides: ControlOverrides[]): Control
         }
     }
     return merged;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function validateControlOverrides(overrides: unknown): ControlOverrideIssue[] {
+    const issues: ControlOverrideIssue[] = [];
+    if (!isRecord(overrides)) {
+        return [{key: "<root>", reason: "expected a JSON object with phase objects"}];
+    }
+
+    for (let [phase, phaseValue] of Object.entries(overrides)) {
+        if (!controlPhaseNames.includes(phase as ControlPhase)) {
+            issues.push({key: phase, reason: "unknown control phase"});
+            continue;
+        }
+        if (!isRecord(phaseValue)) {
+            issues.push({key: phase, reason: "expected a JSON object of control values"});
+            continue;
+        }
+        for (let [name, value] of Object.entries(phaseValue)) {
+            const key = `${phase}.${name}`;
+            if (!isKnownControl(phase, name)) {
+                issues.push({key, reason: "unknown control"});
+                continue;
+            }
+            if (!isUnlockedControl(phase, name)) {
+                issues.push({key, reason: `locked control; allowed controls: ${unlockedControlKeys.join(", ")}`});
+                continue;
+            }
+            if (typeof value !== "number" || !Number.isFinite(value)) {
+                issues.push({key, reason: `expected a finite number, got ${JSON.stringify(value)}`});
+            }
+        }
+    }
+
+    return issues;
+}
+
+export function assertValidControlOverrides(overrides: unknown, source = "control overrides"): asserts overrides is ControlOverrides {
+    const issues = validateControlOverrides(overrides);
+    if (issues.length === 0) return;
+
+    const details = issues
+        .map(issue => `- ${issue.key}: ${issue.reason}`)
+        .join("\n");
+    throw new Error(`${source} contains invalid control override${issues.length === 1 ? "" : "s"}:\n${details}`);
 }
 
 export function parseControlOverridesFromSearch(search: string): ControlOverrides {
